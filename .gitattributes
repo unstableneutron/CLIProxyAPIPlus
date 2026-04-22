@@ -1,0 +1,18 @@
+# Plus-only provider dirs — never merge from upstream (original CLIProxyAPI has no equivalent)
+internal/auth/codebuddy/** merge=ours
+internal/auth/copilot/** merge=ours
+internal/auth/cursor/** merge=ours
+internal/auth/gitlab/** merge=ours
+internal/auth/iflow/** merge=ours
+internal/auth/kilo/** merge=ours
+internal/auth/kiro/** merge=ours
+
+# Plus-specific registration and deps — resolve as PR, not auto
+cmd/server/main.go merge=union
+go.mod merge=union
+go.sum merge=union
+
+# Our fork-maintenance files — always keep ours
+.github/workflows/upstream-sync.yml merge=ours
+.gitattributes merge=ours
+README-ccs-fork.md merge=ours
