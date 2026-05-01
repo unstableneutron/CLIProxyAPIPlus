@@ -249,6 +249,28 @@ nonstream-keepalive-interval: 0
 #    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
 
+# Kiro rate limiter configuration
+# Controls request throttling and backoff behavior for Kiro tokens.
+# All fields are optional; omitted fields fall back to defaults shown below.
+#kiro-rate-limit:
+#  enabled: true                # set to false to disable all rate limiting (default: true)
+#  min-token-interval: "1s"     # minimum interval between requests per token (default: 1s)
+#  max-token-interval: "2s"     # maximum interval between requests per token (default: 2s)
+#  daily-max-requests: 500      # maximum requests per token per day (default: 500)
+#  jitter-percent: 0.3          # random jitter ratio applied to intervals (default: 0.3)
+#  backoff-base: "30s"          # base duration for exponential backoff on failure (default: 30s)
+#  backoff-max: "5m"            # maximum backoff duration cap (default: 5m)
+#  backoff-multiplier: 1.5      # exponential backoff multiplier (default: 1.5)
+#  suspend-cooldown: "1h"       # cooldown after suspension keywords detected (default: 1h)
+
+# Controls whether system prompts are wrapped with --- SYSTEM PROMPT --- markers
+# and injected into Kiro user messages. Kiro/Amazon Q API has no native system
+# field, so by default the proxy prepends the system prompt (wrapped in markers)
+# to the user message. Set to false to drop system prompts entirely — useful
+# when the wrapped markers pollute downstream processing or get echoed back.
+# Default: true.
+#kiro-system-prompt-inject-enable: true
+
 # Kilocode (OAuth-based code assistant)
 # Note: Kilocode uses OAuth device flow authentication.
 # Use the CLI command: ./server --kilo-login

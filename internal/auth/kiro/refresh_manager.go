@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -192,6 +193,73 @@ func initGlobalFingerprintConfig(cfg *config.Config) {
 // InitFingerprintConfig initializes the global fingerprint config from application config.
 func InitFingerprintConfig(cfg *config.Config) {
 	initGlobalFingerprintConfig(cfg)
+}
+
+// InitSystemPromptInjectConfig applies the kiro-system-prompt-inject-enable setting.
+// When the config value is true, Kiro translators wrap system prompts with
+// --- SYSTEM PROMPT --- markers and inject them into user messages.
+// When nil or false (default), system prompts are dropped entirely.
+func InitSystemPromptInjectConfig(cfg *config.Config) {
+	if cfg == nil || cfg.KiroSystemPromptInjectEnable == nil {
+		return
+	}
+	kirocommon.SetSystemPromptInjectEnabled(*cfg.KiroSystemPromptInjectEnable)
+	if *cfg.KiroSystemPromptInjectEnable {
+		log.Info("kiro: system prompt injection enabled")
+	} else {
+		log.Info("kiro: system prompt injection disabled (default) — system prompts will be dropped")
+	}
+}
+
+// InitRateLimiterConfig initializes the global rate limiter config from application config.
+// Must be called before any Kiro requests are made for the config to take effect.
+func InitRateLimiterConfig(cfg *config.Config) {
+	if cfg == nil || cfg.KiroRateLimit == nil {
+		return
+	}
+
+	rlCfg := &RateLimiterConfig{}
+	krl := cfg.KiroRateLimit
+
+	if krl.Enabled != nil {
+		rlCfg.Enabled = krl.Enabled
+	}
+	if krl.MinTokenInterval != "" {
+		if d, err := time.ParseDuration(krl.MinTokenInterval); err == nil && d > 0 {
+			rlCfg.MinTokenInterval = d
+		}
+	}
+	if krl.MaxTokenInterval != "" {
+		if d, err := time.ParseDuration(krl.MaxTokenInterval); err == nil && d > 0 {
+			rlCfg.MaxTokenInterval = d
+		}
+	}
+	if krl.DailyMaxRequests > 0 {
+		rlCfg.DailyMaxRequests = krl.DailyMaxRequests
+	}
+	if krl.JitterPercent > 0 {
+		rlCfg.JitterPercent = krl.JitterPercent
+	}
+	if krl.BackoffBase != "" {
+		if d, err := time.ParseDuration(krl.BackoffBase); err == nil && d > 0 {
+			rlCfg.BackoffBase = d
+		}
+	}
+	if krl.BackoffMax != "" {
+		if d, err := time.ParseDuration(krl.BackoffMax); err == nil && d > 0 {
+			rlCfg.BackoffMax = d
+		}
+	}
+	if krl.BackoffMultiplier > 0 {
+		rlCfg.BackoffMultiplier = krl.BackoffMultiplier
+	}
+	if krl.SuspendCooldown != "" {
+		if d, err := time.ParseDuration(krl.SuspendCooldown); err == nil && d > 0 {
+			rlCfg.SuspendCooldown = d
+		}
+	}
+
+	SetGlobalRateLimiterConfig(rlCfg)
 }
 
 // StopGlobalRefreshManager stops the global refresh manager.

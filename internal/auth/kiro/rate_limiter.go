@@ -36,6 +36,7 @@ type TokenState struct {
 type RateLimiter struct {
 	mu                sync.RWMutex
 	states            map[string]*TokenState
+	enabled           bool
 	minTokenInterval  time.Duration
 	maxTokenInterval  time.Duration
 	dailyMaxRequests  int
@@ -51,6 +52,7 @@ type RateLimiter struct {
 func NewRateLimiter() *RateLimiter {
 	return &RateLimiter{
 		states:            make(map[string]*TokenState),
+		enabled:           false,
 		minTokenInterval:  DefaultMinTokenInterval,
 		maxTokenInterval:  DefaultMaxTokenInterval,
 		dailyMaxRequests:  DefaultDailyMaxRequests,
@@ -65,6 +67,7 @@ func NewRateLimiter() *RateLimiter {
 
 // RateLimiterConfig 频率限制器配置
 type RateLimiterConfig struct {
+	Enabled           *bool
 	MinTokenInterval  time.Duration
 	MaxTokenInterval  time.Duration
 	DailyMaxRequests  int
@@ -78,6 +81,9 @@ type RateLimiterConfig struct {
 // NewRateLimiterWithConfig 使用自定义配置创建频率限制器
 func NewRateLimiterWithConfig(cfg RateLimiterConfig) *RateLimiter {
 	rl := NewRateLimiter()
+	if cfg.Enabled != nil {
+		rl.enabled = *cfg.Enabled
+	}
 	if cfg.MinTokenInterval > 0 {
 		rl.minTokenInterval = cfg.MinTokenInterval
 	}
@@ -135,6 +141,10 @@ func (rl *RateLimiter) calculateInterval() time.Duration {
 
 // WaitForToken 等待 Token 可用（带抖动的随机间隔）
 func (rl *RateLimiter) WaitForToken(tokenKey string) {
+	if !rl.enabled {
+		return
+	}
+
 	rl.mu.Lock()
 	state := rl.getOrCreateState(tokenKey)
 	rl.resetDailyIfNeeded(state)
@@ -171,6 +181,10 @@ func (rl *RateLimiter) WaitForToken(tokenKey string) {
 
 // MarkTokenFailed 标记 Token 失败
 func (rl *RateLimiter) MarkTokenFailed(tokenKey string) {
+	if !rl.enabled {
+		return
+	}
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -181,6 +195,10 @@ func (rl *RateLimiter) MarkTokenFailed(tokenKey string) {
 
 // MarkTokenSuccess 标记 Token 成功
 func (rl *RateLimiter) MarkTokenSuccess(tokenKey string) {
+	if !rl.enabled {
+		return
+	}
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -191,6 +209,10 @@ func (rl *RateLimiter) MarkTokenSuccess(tokenKey string) {
 
 // CheckAndMarkSuspended 检测暂停错误并标记
 func (rl *RateLimiter) CheckAndMarkSuspended(tokenKey string, errorMsg string) bool {
+	if !rl.enabled {
+		return false
+	}
+
 	suspendKeywords := []string{
 		"suspended",
 		"banned",
@@ -221,6 +243,10 @@ func (rl *RateLimiter) CheckAndMarkSuspended(tokenKey string, errorMsg string) b
 
 // IsTokenAvailable 检查 Token 是否可用
 func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
+	if !rl.enabled {
+		return true
+	}
+
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
 
