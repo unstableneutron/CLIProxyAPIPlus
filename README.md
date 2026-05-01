@@ -70,6 +70,28 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Run with Docker
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub Container Registry on every release tag.
+
+```sh
+# Pull a specific version (recommended)
+docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:v6.9.45-0
+
+# Or pull the latest published release
+docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
+```
+
+Or use the included `docker-compose.yml` (defaults to the GHCR image, builds from source if `CLI_PROXY_IMAGE` is overridden):
+
+```sh
+git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
+docker compose up -d
+```
+
+Available tags: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus).
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
