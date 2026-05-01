@@ -56,18 +56,26 @@ jobs:
           fi
 
           FORK_TAG="${UPSTREAM_TAG}-0"
+          # GITHUB_TOKEN tag pushes do NOT trigger downstream workflows, so we
+          # explicitly dispatch release.yaml AND docker-image.yml after tagging.
+          dispatch_downstream() {
+            local tag="$1"
+            gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}" -f tag="${tag}" || true
+            gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}" -f tag="${tag}" || true
+          }
+
           if git ls-remote --exit-code --tags origin "refs/tags/${FORK_TAG}" >/dev/null 2>&1; then
             if gh release view "${FORK_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
               echo "[i] ${FORK_TAG} release already exists; nothing to tag."
               exit 0
             fi
 
-            echo "[i] ${FORK_TAG} tag already exists but release is missing; dispatching release workflow."
-            gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}" -f tag="${FORK_TAG}"
+            echo "[i] ${FORK_TAG} tag already exists but release is missing; dispatching downstream workflows."
+            dispatch_downstream "${FORK_TAG}"
             exit 0
           fi
 
           echo "[i] Creating ${FORK_TAG} for upstream ${UPSTREAM_TAG}."
           git tag -a "$FORK_TAG" -m "CLIProxyAPIPlus ${FORK_TAG} (upstream ${UPSTREAM_TAG})"
           git push origin "refs/tags/${FORK_TAG}"
-          gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}" -f tag="${FORK_TAG}"
+          dispatch_downstream "${FORK_TAG}"
