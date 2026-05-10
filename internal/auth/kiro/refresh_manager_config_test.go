@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 )
 
 func resetKiroRuntimeConfigTestState() {
