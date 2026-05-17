@@ -131,14 +131,17 @@ func computeExpireMs(expiresAt string, expiresInSeconds int64) int64 {
 	return 0
 }
 
-// UserInfoResponse represents the response from /api/v1/userinfo.
-// The upstream wraps user fields under a "data" envelope.
+// UserInfoResponse represents the response from /api/v1/userinfo. The endpoint
+// returns a flat JSON object (no "data" wrapper):
+//
+//	{"id":"019cbc72-...", "name":"...", "username":"...",
+//	 "email":"shiminhao964@example.com", "organization_id":"...", ...}
 type UserInfoResponse struct {
-	Data struct {
-		Name     string `json:"name"`
-		Username string `json:"username"`
-		Email    string `json:"email"`
-	} `json:"data"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Username       string `json:"username"`
+	Email          string `json:"email"`
+	OrganizationID string `json:"organization_id"`
 }
 
 // QoderAuth manages authentication and token handling for the Qoder API
@@ -371,11 +374,11 @@ func (qa *QoderAuth) FetchUserInfo(ctx context.Context, accessToken string) (nam
 		return "", "", fmt.Errorf("failed to parse user info response: %w", err)
 	}
 
-	name = response.Data.Name
+	name = strings.TrimSpace(response.Name)
 	if name == "" {
-		name = response.Data.Username
+		name = strings.TrimSpace(response.Username)
 	}
-	email = response.Data.Email
+	email = strings.TrimSpace(response.Email)
 
 	return name, email, nil
 }
