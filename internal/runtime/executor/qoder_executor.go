@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -89,6 +90,14 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	requestID := uuid.New().String()
 	sessionID := uuid.New().String()
 
+	// Resolve the per-model server-side metadata (is_vl, is_reasoning,
+	// max_input_tokens, ...). Failing here is a hard error — sending the
+	// wrong block silently downgrades to a different model.
+	modelConfig, err := buildQoderModelConfig(storage, qoderModel)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build request body for Qoder API (agent router payload)
 	reqBody := map[string]interface{}{
 		"requestId":           requestID,
@@ -130,7 +139,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			"max_new_tokens": 16384,
 			"max_tokens":     16384,
 		},
-		"model_config":     buildQoderModelConfig(storage, qoderModel),
+		"model_config":     modelConfig,
 		"messages": func() []interface{} {
 			if useNormalized {
 				return normalized
@@ -772,39 +781,46 @@ func (e *QoderExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	return httpClient.Do(req)
 }
 
-// buildQoderModelConfig assembles the model_config block for a chat request.
-// Prefers the raw upstream entry cached on the storage by FetchQoderModels
-// (so per-model is_vl / is_reasoning / max_input_tokens / price_factor
-// match what /algo/api/v2/model/list published). Falls back to a minimal
-// hand-built block when the cache is empty (first request before any model
-// list fetch, or in the rare static-fallback path).
-func buildQoderModelConfig(storage *qoderauth.QoderTokenStorage, modelKey string) map[string]interface{} {
-	if storage != nil && len(storage.ModelConfigs) > 0 {
-		if raw, ok := storage.ModelConfigs[modelKey]; ok && len(raw) > 0 {
-			var cfg map[string]interface{}
-			if err := json.Unmarshal(raw, &cfg); err == nil && cfg != nil {
-				// The cache stores the model description; ensure the key
-				// matches what we actually want to send (handles aliasing).
-				cfg["key"] = modelKey
-				return cfg
-			}
-		}
+// buildQoderModelConfig returns the model_config block for a chat request,
+// pulled from the cache populated by FetchQoderModels (which mirrors what
+// /algo/api/v2/model/list publishes — per-model is_vl / is_reasoning /
+// max_input_tokens / price_factor / strategies / ...). Returns an error
+// when the cache has no entry for modelKey: that means we either never
+// successfully fetched the model list for this auth, or the user asked
+// for a model the server doesn't expose. Either way we should fail loudly
+// rather than guess and silently get downgraded to a different model.
+func buildQoderModelConfig(storage *qoderauth.QoderTokenStorage, modelKey string) (map[string]interface{}, error) {
+	if storage == nil || len(storage.ModelConfigs) == 0 {
+		return nil, fmt.Errorf("qoder: model config cache is empty (model list not fetched yet); restart the service or check /algo/api/v2/model/list connectivity")
 	}
-	// Generic fallback. The values match what /v1 model_list publishes
-	// for a typical tier model and are accepted by the server even when
-	// some per-model fields are wrong (server reads these as hints).
-	return map[string]interface{}{
-		"key":              modelKey,
-		"display_name":     modelKey,
-		"model":            "",
-		"format":           "openai",
-		"is_vl":            true,
-		"is_reasoning":     false,
-		"api_key":          "",
-		"url":              "",
-		"source":           "system",
-		"max_input_tokens": 180000,
+	raw, ok := storage.ModelConfigs[modelKey]
+	if !ok || len(raw) == 0 {
+		return nil, fmt.Errorf("qoder: no model_config cached for %q; known models: %s", modelKey, sortedKeys(storage.ModelConfigs))
 	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("qoder: cached model_config for %q is invalid JSON: %w", modelKey, err)
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("qoder: cached model_config for %q decoded to nil", modelKey)
+	}
+	// The cache stores the model description; ensure the key matches what
+	// we're sending (handles model alias rewrites in caller).
+	cfg["key"] = modelKey
+	return cfg, nil
+}
+
+// sortedKeys returns the keys of m in stable order, suitable for error messages.
+func sortedKeys(m map[string]json.RawMessage) string {
+	if len(m) == 0 {
+		return "<none>"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
 
 // FetchQoderModels retrieves the live model list from Qoder's

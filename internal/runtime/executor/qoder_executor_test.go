@@ -177,7 +177,9 @@ func TestExecuteStream_HTTPRequestFailure(t *testing.T) {
 	assert.Nil(t, result)
 }
 
-// TestExecuteStream_NonOKResponse tests handling of non-200 status codes
+// TestExecuteStream_NonOKResponse verifies ExecuteStream surfaces a clear
+// error when no model_config has been cached for the requested model
+// (i.e. /algo/api/v2/model/list was never fetched, or the model is unknown).
 func TestExecuteStream_NonOKResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -209,7 +211,7 @@ func TestExecuteStream_NonOKResponse(t *testing.T) {
 	result, err := executor.ExecuteStream(context.Background(), authRecord, req, opts)
 	assert.Nil(t, result)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
+	assert.Contains(t, err.Error(), "model config cache is empty")
 }
 
 // TestExecuteStream_StreamParsing tests successful stream parsing
