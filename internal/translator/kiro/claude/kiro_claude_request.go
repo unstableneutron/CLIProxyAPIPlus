@@ -232,7 +232,25 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
 
-		// Build userInputMessageContext with tools and tool results
+		// Build userInputMessageContext with tools and tool results.
+		//
+		// CRITICAL: when history contains any toolUses or toolResults, Kiro's
+		// schema validator requires currentMessage.userInputMessageContext.tools
+		// to be a non-empty array of tool specifications. Without it the API
+		// returns "Improperly formed request" (HTTP 400) — even if the current
+		// turn itself doesn't carry any tool use. This commonly happens during
+		// client-side compaction or when a client (e.g. OpenCode) sends a
+		// follow-up request without re-attaching the original `tools` array.
+		//
+		// To stay robust to those clients, synthesize minimal stub tool specs
+		// from the names referenced in history whenever the client didn't
+		// provide tools but history references them.
+		if len(kiroTools) == 0 && !isChatOnly {
+			kiroTools = synthesizeToolSpecsFromHistory(history)
+			if len(kiroTools) > 0 {
+				log.Infof("kiro: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))
+			}
+		}
 		if len(kiroTools) > 0 || len(currentToolResults) > 0 {
 			currentUserMsg.UserInputMessageContext = &KiroUserInputMessageContext{
 				Tools:       kiroTools,
@@ -254,6 +272,13 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 			log.Debugf("kiro: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
 		} else {
 			log.Debugf("kiro: no system prompt present in fallback user message")
+		}
+		// CRITICAL: Kiro API requires non-empty content for currentMessage.
+		// When system prompt injection is disabled, fallbackContent is empty.
+		// Use DefaultUserContent to avoid "Improperly formed request" 400 error.
+		if strings.TrimSpace(fallbackContent) == "" {
+			fallbackContent = kirocommon.DefaultUserContent
+			log.Debugf("kiro: fallback user message content was empty, using default: %s", fallbackContent)
 		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
 			Content: fallbackContent,
@@ -511,6 +536,49 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
+// synthesizeToolSpecsFromHistory builds a minimal set of stub KiroToolWrapper
+// entries from any toolUse names referenced in history. This is the fallback
+// path used when the client request does not include the `tools` array but
+// history contains tool turns — Kiro's schema validator rejects such payloads
+// with "Improperly formed request" unless tools is non-empty.
+//
+// The synthesized spec is intentionally permissive: schema is an open object
+// (any properties allowed) and the description is a generic placeholder. The
+// real schema does not matter here because Kiro only uses tools to decide
+// what the model is allowed to call going forward, and the history toolUses
+// are already serialized JSON.
+func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrapper {
+	if len(history) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var stubs []KiroToolWrapper
+	for _, h := range history {
+		if h.AssistantResponseMessage == nil {
+			continue
+		}
+		for _, tu := range h.AssistantResponseMessage.ToolUses {
+			name := strings.TrimSpace(tu.Name)
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			stubs = append(stubs, KiroToolWrapper{
+				ToolSpecification: KiroToolSpecification{
+					Name:        shortenToolNameIfNeeded(name),
+					Description: fmt.Sprintf("Tool: %s", name),
+					InputSchema: KiroInputSchema{JSON: map[string]interface{}{
+						"type":                 "object",
+						"properties":           map[string]interface{}{},
+						"additionalProperties": true,
+					}},
+				},
+			})
+		}
+	}
+	return stubs
+}
+
 // convertClaudeToolsToKiro converts Claude tools to Kiro format
 func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -645,7 +713,7 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 		}
 	}
 
-	// POST-PROCESSING: Remove orphaned tool_results that have no matching tool_use
+	// POST-PROCESSING step 1: Remove orphaned tool_results that have no matching tool_use
 	// in any assistant message. This happens when Claude Code compaction truncates
 	// the conversation and removes the assistant message containing the tool_use,
 	// but keeps the user message with the corresponding tool_result.
@@ -660,9 +728,9 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 	}
 
 	// Filter orphaned tool results from history user messages
-	for i, h := range history {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil {
-			ctx := h.UserInputMessage.UserInputMessageContext
+	for i := range history {
+		if history[i].UserInputMessage != nil && history[i].UserInputMessage.UserInputMessageContext != nil {
+			ctx := history[i].UserInputMessage.UserInputMessageContext
 			if len(ctx.ToolResults) > 0 {
 				filtered := make([]KiroToolResult, 0, len(ctx.ToolResults))
 				for _, tr := range ctx.ToolResults {
@@ -674,7 +742,8 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 				}
 				ctx.ToolResults = filtered
 				if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
-					h.UserInputMessage.UserInputMessageContext = nil
+					// Use index to modify the actual slice element, not a range copy
+					history[i].UserInputMessage.UserInputMessageContext = nil
 				}
 			}
 		}
@@ -930,3 +999,4 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		ToolUses: toolUses,
 	}
 }
+
