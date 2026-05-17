@@ -334,7 +334,7 @@ func BuildAuthHeaders(body []byte, requestURL string, creds CosyCredentials) (*C
 		CosyMachineToken:   machineID,
 		CosyMachineType:    QoderMachineTypeMagic,
 		CosyMachineOS:      QoderMachineOS,
-		CosyClientType:     "0",
+		CosyClientType:     QoderClientType,
 		CosyClientIP:       "127.0.0.1",
 		CosyBodyHash:       bodyHash,
 		CosyBodyLength:     bodyLen,

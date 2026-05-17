@@ -33,14 +33,19 @@ const (
 	QoderRefreshTokenEndpoint = "https://center.qoder.sh/algo/api/v3/user/refresh_token"
 	// QoderUserInfoEndpoint is the URL for fetching user information
 	QoderUserInfoEndpoint = "https://openapi.qoder.sh/api/v1/userinfo"
-	// QoderIDEVersion is the upstream IDE version that the COSY signature
+	// QoderIDEVersion is the upstream client version that the COSY signature
 	// scheme expects in payload.cosyVersion and the Cosy-Version header.
-	// Bumped from 0.9.0 to 0.14.2 to match the current Qoder server's
-	// signing rules (the 0.9 IDE format was rejected with code 101).
-	QoderIDEVersion = "0.14.2"
+	// 0.2.16 = NPM `@qoder-ai/qodercli@0.2.16` (May 2026); the Rust WASM
+	// signing module embedded in that release uses this string. Older Veria
+	// builds pass 0.14.2 (IDE) and qoder2api passes 0.1.43 — server accepts
+	// any of these as long as headers are consistent. Bump cautiously.
+	QoderIDEVersion = "0.2.16"
 	// QoderCLIVersion is the deprecated alias kept for backward compatibility
 	// with earlier code that referenced this constant.
 	QoderCLIVersion = QoderIDEVersion
+	// QoderClientType is the client type advertised in the Cosy-Clienttype
+	// header. NPM qodercli (0.2.16) sends "5" (CLI). IDE/web sends "0".
+	QoderClientType = "5"
 	// QoderMachineOS is the machine OS identifier sent in COSY headers.
 	// qodercli's signing scheme treats this as a fixed magic string; the
 	// real client sends "x86_64_windows" regardless of host OS.
