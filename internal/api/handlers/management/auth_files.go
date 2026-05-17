@@ -2792,8 +2792,18 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 		}
 
 		storage := qoderAuth.CreateTokenStorage(tokenData, deviceFlow.MachineID)
-		if strings.TrimSpace(storage.Email) == "" {
-			storage.Email = fmt.Sprintf("%d", time.Now().UnixMilli())
+		// Resolve a human-readable label: prefer the email from /userinfo,
+		// fall back to user_id, then to a timestamp so the auth file always
+		// gets a unique, non-empty name without prompting the operator.
+		name, email := qoderAuth.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, "", "")
+		storage.Name = name
+		switch {
+		case strings.TrimSpace(email) != "":
+			storage.Email = strings.TrimSpace(email)
+		case strings.TrimSpace(tokenData.UserID) != "":
+			storage.Email = strings.TrimSpace(tokenData.UserID)
+		default:
+			storage.Email = fmt.Sprintf("user-%d", time.Now().UnixMilli())
 		}
 		fileName := fmt.Sprintf("qoder-%s.json", storage.Email)
 		record := &coreauth.Auth{

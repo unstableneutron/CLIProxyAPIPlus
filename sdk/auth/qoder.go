@@ -79,48 +79,43 @@ func (a *QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	tokenStorage := authSvc.CreateTokenStorage(tokenData, deviceFlow.MachineID)
 	name, email := authSvc.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, "", "")
 
-	// If userinfo did not return an email, look in caller-supplied metadata.
-	if email == "" && opts.Metadata != nil {
-		email = opts.Metadata["email"]
-		if email == "" {
-			email = opts.Metadata["alias"]
+	// Resolve a label for the auth file name. Preference order:
+	//   1. email returned by /userinfo
+	//   2. opts.Metadata[email|alias] supplied by the caller
+	//   3. tokenData.UserID — stable per account, deterministic file name
+	//   4. timestamp — last-resort unique fallback so non-interactive
+	//      flows (Docker, management API, scripts) never block on a prompt
+	//
+	// We never prompt: prompting would deadlock callers that have no TTY,
+	// and we already have enough information to write a unique file.
+	label := strings.TrimSpace(email)
+	if label == "" && opts.Metadata != nil {
+		label = strings.TrimSpace(opts.Metadata["email"])
+		if label == "" {
+			label = strings.TrimSpace(opts.Metadata["alias"])
 		}
 	}
-
-	// Final fallback: use the stable user_id from the token response as the
-	// label so the auth file gets a deterministic, unique name without
-	// requiring interactive input. Only fall through to a prompt when the
-	// upstream truly gave us nothing identifiable.
-	if email == "" {
-		email = strings.TrimSpace(tokenData.UserID)
+	if label == "" {
+		label = strings.TrimSpace(tokenData.UserID)
+	}
+	if label == "" {
+		label = fmt.Sprintf("user-%d", time.Now().UnixMilli())
 	}
 
-	if email == "" && opts.Prompt != nil {
-		email, err = opts.Prompt("Please input your email address or alias for Qoder:")
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return nil, &EmailRequiredError{Prompt: "Please provide an email address or alias for Qoder."}
-	}
-
-	tokenStorage.Email = email
+	tokenStorage.Email = label
 	tokenStorage.Name = name
 
 	// Generate file name
-	fileName := fmt.Sprintf("qoder-%s.json", tokenStorage.Email)
+	fileName := fmt.Sprintf("qoder-%s.json", label)
 	metadata := map[string]any{
-		"email":   tokenStorage.Email,
-		"name":    tokenStorage.Name,
+		"email":   label,
+		"name":    name,
 		"user_id": tokenData.UserID,
 	}
 
 	fmt.Println("Qoder authentication successful")
 	if name != "" {
-		fmt.Printf("Logged in as %s <%s>\n", name, email)
+		fmt.Printf("Logged in as %s <%s>\n", name, label)
 	}
 
 	return &coreauth.Auth{
