@@ -286,32 +286,37 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			if err != nil {
 				continue
 			}
-			// Wrap as a standard SSE "data: ...\n\n" line. This is the
-			// format TranslateStream expects when from=OpenAI, and also
-			// the format OpenAI clients consume directly.
+			// Reconstruct an OpenAI-compatible SSE line ("data: {chunk}").
+			// Qoder's upstream nests OpenAI chunks inside a
+			// {statusCodeValue, body} envelope so unlike kimi/openai-compat/
+			// codebuddy we can't forward the raw upstream line — we have to
+			// rebuild the SSE frame here. The format matches what those
+			// other executors feed into TranslateStream so the translators'
+			// "expects data: prefix" assumption holds.
 			ssePayload := append([]byte("data: "), chunkBytes...)
-			ssePayload = append(ssePayload, []byte("\n\n")...)
 
-			// Translate the OpenAI-formatted chunk back to the client's
-			// SourceFormat (Anthropic/Gemini/etc). When the client expects
-			// OpenAI we still pass through TranslateStream — it's a no-op
-			// that returns the same SSE line; for cross-format it produces
-			// "event: content_block_delta\ndata: {...}\n\n" frames.
-			if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
-				var param any
-				framed := sdktranslator.TranslateStream(ctx,
-					sdktranslator.FormatOpenAI, opts.SourceFormat,
-					req.Model, opts.OriginalRequest, payload, ssePayload, &param)
-				for _, frame := range framed {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
-					case <-ctx.Done():
-						return
-					}
-				}
-				continue
+			// Always run through TranslateStream. When source==target
+			// (OpenAI client) it strips the "data:" prefix and returns
+			// raw JSON; the OpenAI handler then re-adds the SSE framing.
+			// For cross-format clients (Anthropic/Gemini) it emits the
+			// format-specific stream events (message_start /
+			// content_block_delta / ...) directly as fully framed bytes
+			// because those handlers write chunks verbatim.
+			to := sdktranslator.FormatOpenAI
+			from := opts.SourceFormat
+			if from == "" {
+				from = to
 			}
-			out <- cliproxyexecutor.StreamChunk{Payload: ssePayload}
+			var param any
+			frames := sdktranslator.TranslateStream(ctx, to, from,
+				req.Model, opts.OriginalRequest, payload, ssePayload, &param)
+			for _, frame := range frames {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 		// Scanner loop exited naturally (EOF). Emit a terminating
 		// "data: [DONE]" / Anthropic message_stop frame so the client
@@ -495,29 +500,28 @@ func buildOpenAIChunk(inner map[string]interface{}, model string) ([]byte, error
 	return json.Marshal(inner)
 }
 
-// emitDone publishes a terminating SSE frame to the chunk channel. For
-// OpenAI clients that's plain "data: [DONE]\n\n"; for cross-format clients
-// (Anthropic/Gemini) we let TranslateStream produce the format-specific
-// stream-end events (message_stop / generationComplete / etc).
+// emitDone publishes the terminating SSE frame(s) for the stream. The
+// upstream "[DONE]" sentinel is fed through TranslateStream so the
+// client's SourceFormat dictates the actual wire bytes — "data: [DONE]\n\n"
+// for OpenAI, "event: message_stop\ndata: {...}\n\n" for Anthropic, and
+// the equivalent format-specific terminators for Gemini etc. This mirrors
+// the pattern used by kimi_executor.
 func emitDone(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk,
 	sourceFormat sdktranslator.Format, reqModel string, originalReq, body []byte) {
-	if sourceFormat != "" && sourceFormat != sdktranslator.FormatOpenAI {
-		var param any
-		framed := sdktranslator.TranslateStream(ctx,
-			sdktranslator.FormatOpenAI, sourceFormat,
-			reqModel, originalReq, body, []byte("[DONE]"), &param)
-		for _, frame := range framed {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
-			case <-ctx.Done():
-				return
-			}
-		}
-		return
+	to := sdktranslator.FormatOpenAI
+	from := sourceFormat
+	if from == "" {
+		from = to
 	}
-	select {
-	case out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}:
-	case <-ctx.Done():
+	var param any
+	frames := sdktranslator.TranslateStream(ctx, to, from,
+		reqModel, originalReq, body, []byte("[DONE]"), &param)
+	for _, frame := range frames {
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
