@@ -719,20 +719,24 @@ func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Au
 	}, nil
 }
 
-// Refresh attempts to refresh Qoder credentials
+// Refresh is a no-op for Qoder.
+//
+// Qoder's device-flow token (the "dt-..." string) is already long-lived
+// (~30 days for the access token, ~360 days for the refresh token per
+// the deviceToken/poll response). The upstream does not expose the
+// classic OAuth refresh dance — every endpoint we've observed (cubk1's
+// qoder2api, Veria, the official @qoder-ai/qodercli) either skips
+// refresh entirely or routes through a different /jobToken exchange
+// flow that requires personalToken (we don't have one).
+//
+// Hitting /algo/api/v3/user/refresh_token with our device token returns
+// 403 "Forbidden" / errorCode=Forbidden — the endpoint is not for our
+// flow. Mark the auth refreshed-now and keep going; if a real expiry
+// happens the user re-runs --qoder-login.
 func (e *QoderExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage)
-	if !ok {
-		return nil, fmt.Errorf("invalid auth storage type for qoder")
+	if auth == nil {
+		return nil, fmt.Errorf("qoder executor: auth is nil")
 	}
-
-	qoderAuth := qoderauth.NewQoderAuth(e.cfg)
-	tokenData, err := qoderAuth.RefreshTokens(ctx, storage.Token, storage.RefreshToken)
-	if err != nil {
-		return nil, err
-	}
-
-	qoderAuth.UpdateTokenStorage(storage, tokenData)
 	return auth, nil
 }
 

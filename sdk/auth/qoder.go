@@ -26,8 +26,13 @@ func (a *QoderAuthenticator) Provider() string {
 }
 
 func (a *QoderAuthenticator) RefreshLead() *time.Duration {
-	// Refresh 10 minutes before expiry (matching Python implementation)
-	d := 10 * time.Minute
+	// Qoder device tokens are long-lived (~30 days), and we don't have
+	// a working refresh path (see QoderExecutor.Refresh comment). Use a
+	// short non-zero lead so the auto-refresh loop still revisits the
+	// auth periodically — but never within the same minute it just ran.
+	// Returning nil disables scheduled refresh entirely; we keep a
+	// nominal 24h lead so admins can observe through the management API.
+	d := 24 * time.Hour
 	return &d
 }
 
