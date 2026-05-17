@@ -151,6 +151,11 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+	if toolsRaw != nil {
+		if toolsBytes, err := json.Marshal(reqBody["tools"]); err == nil {
+			log.Debugf("[qoder-debug] outgoing tools: %s", string(toolsBytes))
+		}
+	}
 
 	// Build COSY auth headers
 	headers, err := qoderauth.BuildAuthHeaders(
@@ -582,12 +587,24 @@ func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 // Execute executes a non-streaming request against Qoder API
 func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	// Force ExecuteStream to emit raw OpenAI chunks (no cross-format
-	// translation) so we can accumulate content from choices[0].delta.
-	// We'll run TranslateNonStream ourselves at the end.
+	// We need ExecuteStream to:
+	//   1. Translate the request payload from the client's SourceFormat
+	//      (Anthropic/Gemini/etc) into OpenAI before sending to Qoder.
+	//   2. Emit raw OpenAI chunks so we can accumulate choices[0].delta.
+	//
+	// (1) requires opts.SourceFormat to stay as the original; (2) requires
+	// it to be OpenAI. Resolve by translating the payload up-front, then
+	// passing FormatOpenAI for both directions to ExecuteStream.
+	internalReq := req
 	internalOpts := opts
+	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
+		internalReq.Payload = sdktranslator.TranslateRequest(
+			opts.SourceFormat, sdktranslator.FormatOpenAI,
+			req.Model, req.Payload, false)
+	}
 	internalOpts.SourceFormat = sdktranslator.FormatOpenAI
-	streamResult, err := e.ExecuteStream(ctx, authRecord, req, internalOpts)
+
+	streamResult, err := e.ExecuteStream(ctx, authRecord, internalReq, internalOpts)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
