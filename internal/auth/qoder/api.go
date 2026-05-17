@@ -18,16 +18,27 @@ const (
 	QoderChatURL = QoderInferURL + "/algo" + QoderSigPath + "?AgentId=agent_common"
 )
 
-// ModelMap maps user-facing model names to internal Qoder model keys.
+// ModelMap maps user-facing model identifiers to upstream Qoder model keys.
+// Based on the Qoder CLI reverse-engineering notes
+// (https://github.com/alingse/qodercli-reverse, docs/03-llm-integration.md):
+//
+//   - Tier models: auto, efficient, performance, ultimate, lite
+//   - Frontier ("Q" family) models: qmodel, q35model, gmodel, kmodel, mmodel
+//
+// All identifiers are passed through as-is — the upstream accepts these strings
+// directly, so the map is identity. The map exists so we can cheaply validate
+// "is this a known qoder model?" and emit a stable set in /v1/models.
 var ModelMap = map[string]string{
-	"auto":                 "auto",
-	"ultimate":             "ultimate",
-	"performance":          "performance",
-	"qwen-coder-qoder-1.0": "qmodel",
-	"qwen3.5-plus":         "q35model",
-	"glm-5":                "gmodel",
-	"kimi-k2.5":            "kmodel",
-	"minimax-m2.7":         "mmodel",
+	"auto":        "auto",
+	"efficient":   "efficient",
+	"performance": "performance",
+	"ultimate":    "ultimate",
+	"lite":        "lite",
+	"qmodel":      "qmodel",
+	"q35model":    "q35model",
+	"gmodel":      "gmodel",
+	"kmodel":      "kmodel",
+	"mmodel":      "mmodel",
 }
 
 // doRefreshToken performs a token refresh and persists the result to authFilePath.

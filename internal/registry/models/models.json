@@ -2172,34 +2172,64 @@
   ],
   "qoder": [
     {
-      "id": "qwen-coder-qoder-1.0",
-      "name": "Qwen Coder Qoder 1.0",
+      "id": "auto",
+      "name": "Auto",
       "owned_by": "qoder",
-      "description": "Qoder-tuned Qwen coder model"
+      "description": "Qoder auto tier — picks the best model for the request"
     },
     {
-      "id": "qwen3.5-plus",
-      "name": "Qwen3.5 Plus",
+      "id": "efficient",
+      "name": "Efficient",
       "owned_by": "qoder",
-      "description": "Qwen 3.5 Plus via Qoder"
+      "description": "Qoder efficient tier — fast, low cost"
     },
     {
-      "id": "glm-5",
-      "name": "GLM-5",
+      "id": "performance",
+      "name": "Performance",
       "owned_by": "qoder",
-      "description": "GLM-5 via Qoder"
+      "description": "Qoder performance tier — balanced speed and quality"
     },
     {
-      "id": "kimi-k2.5",
-      "name": "Kimi K2.5",
+      "id": "ultimate",
+      "name": "Ultimate",
       "owned_by": "qoder",
-      "description": "Kimi K2.5 via Qoder"
+      "description": "Qoder ultimate tier — maximum quality"
     },
     {
-      "id": "minimax-m2.7",
-      "name": "MiniMax M2.7",
+      "id": "lite",
+      "name": "Lite",
       "owned_by": "qoder",
-      "description": "MiniMax M2.7 via Qoder"
+      "description": "Qoder lite tier — minimal cost"
+    },
+    {
+      "id": "qmodel",
+      "name": "Q",
+      "owned_by": "qoder",
+      "description": "Qoder Q model (frontier)"
+    },
+    {
+      "id": "q35model",
+      "name": "Q3.5",
+      "owned_by": "qoder",
+      "description": "Qoder Q3.5 model (frontier)"
+    },
+    {
+      "id": "gmodel",
+      "name": "G",
+      "owned_by": "qoder",
+      "description": "Qoder G model — GPT-class (frontier)"
+    },
+    {
+      "id": "kmodel",
+      "name": "K",
+      "owned_by": "qoder",
+      "description": "Qoder K model — Kimi-class (frontier)"
+    },
+    {
+      "id": "mmodel",
+      "name": "M",
+      "owned_by": "qoder",
+      "description": "Qoder M model (frontier)"
     }
   ]
 }

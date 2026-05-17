@@ -451,16 +451,16 @@ nonstream-keepalive-interval: 0
 #     - name: "gpt-5"
 #       alias: "copilot-gpt5"
 #   qoder:
-#     - name: "qwen-coder-qoder-1.0"
-#       alias: "qoder-coder"
-#     - name: "qwen3.5-plus"
-#       alias: "qoder-qwen35"
-#     - name: "glm-5"
-#       alias: "qoder-glm5"
-#     - name: "kimi-k2.5"
+#     - name: "auto"
+#       alias: "qoder-auto"
+#     - name: "ultimate"
+#       alias: "qoder-ultimate"
+#     - name: "qmodel"
+#       alias: "qoder-q"
+#     - name: "kmodel"
 #       alias: "qoder-kimi"
-#     - name: "minimax-m2.7"
-#       alias: "qoder-minimax"
+#     - name: "gmodel"
+#       alias: "qoder-gpt"
 
 # OAuth provider excluded models
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, kimi, qoder.
