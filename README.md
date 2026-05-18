@@ -56,9 +56,9 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - AI Studio Build multi-account load balancing
 - Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
-- Qoder multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
+- Qoder multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
@@ -117,11 +117,6 @@ Local-first usage and quota dashboard for CLIProxyAPI. It collects per-request t
 ### [CPA-Manager](https://github.com/seakee/CPA-Manager)
 
 Full CLIProxyAPI management center with request-level monitoring and cost estimates. CPA-Manager tracks collected requests by account, model, channel, latency, status, and token usage; estimates cost with editable model prices and one-click LiteLLM price sync; persists events in SQLite; and provides Codex account-pool operations with batch inspection, quota detection, unhealthy account discovery, cleanup suggestions, and one-click execution for day-to-day multi-account maintenance.
-
-> [!NOTE]
-> The management dashboard UI is distributed as a static `management.html` asset and may lag new providers.
-> If Qoder does not appear in the UI after upgrading, delete the local `static/management.html` so the server
-> re-downloads the latest control panel bundle.
 
 ## Amp CLI Support
 
