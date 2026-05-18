@@ -34,15 +34,9 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 }
 
 func TestKiroStaticModelsAreDynamic(t *testing.T) {
-	// Kiro model discovery is entirely dynamic (see fetchKiroModels in
-	// sdk/cliproxy/service.go). The static registry intentionally returns
-	// an empty list so new Kiro models (GLM, DeepSeek, MiniMax, future
-	// additions) flow through without code changes. This test pins two
-	// contracts:
-	//   1. The slice is empty — no hardcoded models sneak back in.
-	//   2. The slice is non-nil — GetStaticModelDefinitionsByChannel("kiro")
-	//      must not look like an unknown channel to the management API,
-	//      which 400s on a nil result.
+	// Kiro model discovery is dynamic in sdk/cliproxy/service.go. Keep the
+	// static registry empty but non-nil so management callers still recognize
+	// the channel while newly discovered models flow through without code edits.
 	models := GetKiroModels()
 	if models == nil {
 		t.Fatal("GetKiroModels must return a non-nil slice so kiro stays a recognized channel")
@@ -65,6 +59,42 @@ func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected %s builtin model", xaiBuiltinVideoModelID)
+	}
+}
+
+func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {
+	data := validTestModelsCatalog()
+	data.XAI = nil
+
+	if err := validateModelsCatalog(data); err != nil {
+		t.Fatalf("validateModelsCatalog() error = %v", err)
+	}
+}
+
+func TestValidateModelsCatalogRejectsInvalidDefinitions(t *testing.T) {
+	data := validTestModelsCatalog()
+	data.Claude = []*ModelInfo{{ID: ""}}
+
+	if err := validateModelsCatalog(data); err == nil {
+		t.Fatal("expected invalid model definition error")
+	}
+}
+
+func validTestModelsCatalog() *staticModelsJSON {
+	models := []*ModelInfo{{ID: "test-model"}}
+	return &staticModelsJSON{
+		Claude:      models,
+		Gemini:      models,
+		Vertex:      models,
+		GeminiCLI:   models,
+		AIStudio:    models,
+		CodexFree:   models,
+		CodexTeam:   models,
+		CodexPlus:   models,
+		CodexPro:    models,
+		Kimi:        models,
+		Antigravity: models,
+		XAI:         models,
 	}
 }
 

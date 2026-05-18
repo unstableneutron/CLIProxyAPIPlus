@@ -1220,9 +1220,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kiro":
 		models = s.fetchKiroModels(a)
 		// Filter out agentic variants when system prompt injection is disabled,
-		// since the agentic prompt is delivered via system prompt injection.
-		// Use the runtime global flag (not config field) to stay consistent
-		// with the translator's actual behavior.
+		// since the agentic prompt is delivered through system prompt injection.
 		if !kirocommon.IsSystemPromptInjectEnabled() {
 			models = filterAgenticVariants(models)
 		}

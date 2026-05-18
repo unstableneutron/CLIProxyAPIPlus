@@ -141,7 +141,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel, requestPath)
+	basePayload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "gemini", from.String(), "request", basePayload, originalTranslated, requestedModel, requestPath, opts.Headers)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -297,7 +297,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel, requestPath)
+	basePayload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "gemini", from.String(), "request", basePayload, originalTranslated, requestedModel, requestPath, opts.Headers)
 
 	projectID := resolveGeminiProjectID(auth)
 
