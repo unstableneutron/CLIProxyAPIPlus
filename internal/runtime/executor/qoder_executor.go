@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -93,17 +92,22 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		return nil, err
 	}
 
+	isReasoning, _ := modelConfig["is_reasoning"].(bool)
+	isVL, _ := modelConfig["is_vl"].(bool)
+	maxInputTokens, _ := modelConfig["max_input_tokens"].(float64)
+	maxOutputTokens, _ := modelConfig["max_output_tokens"].(float64)
+
+	chatModelConfig := map[string]interface{}{
+		"key":              qoderModel,
+		"is_reasoning":     isReasoning,
+		"is_vl":            isVL,
+		"max_input_tokens": int(maxInputTokens),
+	}
+
 	// Last user message text — used by Qoder for the chat_context "current
 	// turn" preview slot. The full conversation still goes through `messages`.
 	lastUser := lastUserText(normalized)
 
-	// Build request body matching Ve-ria/CLIProxyAPIPlus v1.3.7's
-	// buildQoderRequestBody — the minimum shape the upstream actually
-	// looks at. We deliberately do NOT add the speculative camelCase
-	// duplicates (sessionId/questionText/chatTask/etc) that earlier
-	// versions sprayed into the request: the server reads only the
-	// snake_case fields, and the duplicates either get ignored or
-	// confuse the routing logic.
 	reqBody := map[string]interface{}{
 		"stream":         true,
 		"chat_task":      "FREE_INPUT",
@@ -122,12 +126,12 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		"request_set_id": uuid.New().String(),
 		"chat_record_id": uuid.New().String(),
 		"session_id":     uuid.New().String(),
-		"parameters":     map[string]interface{}{"max_tokens": 32768},
+		"parameters":     map[string]interface{}{},
 		"chat_context": map[string]interface{}{
 			"chatPrompt": "",
 			"extra": map[string]interface{}{
 				"context":         []interface{}{},
-				"modelConfig":     map[string]interface{}{"key": qoderModel, "is_reasoning": false},
+				"modelConfig":     chatModelConfig,
 				"originalContent": map[string]interface{}{"type": "text", "text": lastUser},
 			},
 			"features": []interface{}{},
@@ -144,6 +148,9 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	if toolsRaw != nil {
 		reqBody["tools"] = toolsRaw
 	}
+	if maxOutputTokens > 0 {
+		reqBody["parameters"].(map[string]interface{})["max_tokens"] = int(maxOutputTokens)
+	}
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -152,6 +159,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	if toolsRaw != nil {
 		log.Debugf("[qoder-debug] outgoing tools: %s", gjson.GetBytes(bodyBytes, "tools").Raw)
 	}
+	log.Debugf("[qoder-debug] outgoing request body: %s", string(bodyBytes))
 
 	headers, err := qoderauth.BuildAuthHeaders(
 		bodyBytes,
@@ -221,14 +229,6 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 		// per-chunk var would re-emit message_start on every delta.
 		var streamParam any
 
-		var debugFile *os.File
-		if debugPath := strings.TrimSpace(os.Getenv("QODER_DEBUG_SSE")); debugPath != "" {
-			if f, err := os.OpenFile(debugPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-				debugFile = f
-				defer func() { _ = f.Close() }()
-			}
-		}
-
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB max line
 
@@ -237,9 +237,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			if len(line) == 0 {
 				continue
 			}
-			if debugFile != nil {
-				_, _ = debugFile.Write(append([]byte("[raw] "), append(line, '\n')...))
-			}
+			log.Debugf("[qoder-sse] %s", string(line))
 
 			// Skip non-data lines
 			if !bytes.HasPrefix(line, []byte("data:")) {
@@ -251,9 +249,6 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			if bytes.Equal(data, []byte("[DONE]")) {
 				emitDone(ctx, out, opts.SourceFormat, req.Model, opts.OriginalRequest, payload, &streamParam)
 				return
-			}
-			if debugFile != nil {
-				_, _ = debugFile.Write(append([]byte("[data] "), append(data, '\n')...))
 			}
 
 			// Parse Qoder response envelope
@@ -388,11 +383,26 @@ func extractContentGeneric(content interface{}) string {
 	}
 }
 
-// normalizeQoderMessages clones each message and flattens its content from
-// the Anthropic / OpenAI multipart shape ([{type:"text",text:"..."}]) into
-// the plain string Qoder's chat endpoint expects. Other fields — role,
-// tool_calls, tool_call_id, name — pass through verbatim so multi-turn
-// tool conversations remain in canonical OpenAI shape.
+// normalizeQoderMessages clones each message and applies three sanitizations
+// required by Qoder's upstream:
+//
+//  1. Flatten content: Anthropic/OpenAI multipart content arrays
+//     ([{type:"text",text:"..."}]) are collapsed to plain strings.
+//
+//  2. Drop system messages: Qoder rejects role="system"; they are silently
+//     removed. The system prompt is already embedded in the first user turn
+//     by the Claude Code client, so context is not lost.
+//
+//  3. Clear tool_call arguments: Qoder's upstream sits behind Alibaba Cloud
+//     WAF which blocks requests containing shell metacharacter sequences
+//     (e.g. "2>/dev/null || echo") anywhere in the body. Historical bash
+//     tool_calls accumulate these patterns; clearing the entire arguments
+//     string prevents WAF 405 rejections without affecting the model's
+//     ability to understand the conversation history.
+//
+//  4. Strip control characters: non-printable bytes (U+0000–U+001F except
+//     tab/LF/CR) in message content cause Qoder to return 500; they are
+//     removed from all string fields.
 func normalizeQoderMessages(messages []interface{}) []interface{} {
 	if len(messages) == 0 {
 		return nil
@@ -403,14 +413,56 @@ func normalizeQoderMessages(messages []interface{}) []interface{} {
 		if !ok {
 			continue
 		}
+		// Drop system messages — Qoder does not accept role="system".
+		if role, _ := msgMap["role"].(string); role == "system" {
+			continue
+		}
 		cloned := make(map[string]interface{}, len(msgMap))
 		for k, v := range msgMap {
 			cloned[k] = v
 		}
-		cloned["content"] = extractContentGeneric(msgMap["content"])
+		cloned["content"] = stripControlChars(extractContentGeneric(msgMap["content"]))
+		// Clear tool_call arguments to avoid triggering WAF command-injection rules.
+		if toolCalls, ok := cloned["tool_calls"].([]interface{}); ok {
+			sanitized := make([]interface{}, 0, len(toolCalls))
+			for _, tc := range toolCalls {
+				tcMap, ok := tc.(map[string]interface{})
+				if !ok {
+					sanitized = append(sanitized, tc)
+					continue
+				}
+				tcCloned := make(map[string]interface{}, len(tcMap))
+				for k, v := range tcMap {
+					tcCloned[k] = v
+				}
+				if fn, ok := tcCloned["function"].(map[string]interface{}); ok {
+					fnCloned := make(map[string]interface{}, len(fn))
+					for k, v := range fn {
+						fnCloned[k] = v
+					}
+					fnCloned["arguments"] = "{}"
+					tcCloned["function"] = fnCloned
+				}
+				sanitized = append(sanitized, tcCloned)
+			}
+			cloned["tool_calls"] = sanitized
+		}
 		out = append(out, cloned)
 	}
 	return out
+}
+
+// stripControlChars removes non-printable control characters (U+0000–U+001F)
+// from s, preserving tab (U+0009), line feed (U+000A), and carriage return
+// (U+000D). Qoder's upstream returns 500 when the request body contains
+// bare control bytes.
+func stripControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func buildOpenAIChunk(inner map[string]interface{}, model string) ([]byte, error) {
