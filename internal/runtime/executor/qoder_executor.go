@@ -208,14 +208,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 			"allow":          allow,
 			"body_truncated": bodyPreview,
 		}).Warnf("qoder: upstream %d allow=%q server=%q body=%q", httpResp.StatusCode, allow, server, bodyPreview)
-		// Qoder returns 405 as peak rate-limiting; remap to 429 so the
-		// conductor's existing quota-backoff / retry logic handles it
-		// transparently without per-provider special-casing.
-		status := httpResp.StatusCode
-		if status == http.StatusMethodNotAllowed {
-			status = http.StatusTooManyRequests
-		}
-		return nil, newQoderStatusError(status, string(body))
+		return nil, newQoderStatusError(httpResp.StatusCode, string(body))
 	}
 
 	// Create streaming channel
