@@ -922,6 +922,10 @@ func FetchQoderModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.
 	storage.SetModelConfigs(configs)
 
 	log.Infof("qoder: fetched %d models from /algo/api/v2/model/list", len(models))
+
+	// Fetch usage alongside models so the management UI has fresh credit data.
+	go FetchQoderUsage(ctx, auth, cfg)
+
 	return models
 }
 
@@ -972,4 +976,55 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// FetchQoderUsage fetches the current quota usage from /api/v2/quota/usage
+// and caches the result in storage.UsageInfo. It is called opportunistically
+// alongside FetchQoderModels so the management UI can display credit balance
+// without a separate round-trip.
+func FetchQoderUsage(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) *qoderauth.QoderUsageInfo {
+	storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage)
+	if !ok || storage == nil || storage.Token == "" {
+		return nil
+	}
+
+	const usageURL = "https://openapi.qoder.sh/api/v2/quota/usage"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	if err != nil {
+		log.Debugf("qoder: build usage request: %v", err)
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+storage.Token)
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Debugf("qoder: usage fetch failed: %v", err)
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("qoder: usage fetch returned %d", resp.StatusCode)
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Debugf("qoder: read usage response: %v", err)
+		return nil
+	}
+
+	var info qoderauth.QoderUsageInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		log.Debugf("qoder: parse usage response: %v", err)
+		return nil
+	}
+
+	storage.UsageInfo = &info
+	log.Debugf("qoder: usage fetched — %.0f/%.0f %s used (%.1f%%)",
+		info.UserQuota.Used, info.UserQuota.Total, info.UserQuota.Unit,
+		info.TotalUsagePercentage*100)
+	return &info
 }

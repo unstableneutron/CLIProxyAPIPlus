@@ -36,8 +36,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -508,6 +508,22 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		if rawNote, ok := auth.Metadata["note"].(string); ok {
 			if trimmed := strings.TrimSpace(rawNote); trimmed != "" {
 				entry["note"] = trimmed
+			}
+		}
+	}
+	// Expose Qoder credit usage if available.
+	if auth.Provider == "qoder" {
+		if storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage); ok && storage != nil && storage.UsageInfo != nil {
+			u := storage.UsageInfo
+			entry["usage"] = gin.H{
+				"used":                   u.UserQuota.Used,
+				"total":                  u.UserQuota.Total,
+				"remaining":              u.UserQuota.Remaining,
+				"percentage":             u.TotalUsagePercentage,
+				"unit":                   u.UserQuota.Unit,
+				"is_quota_exceeded":      u.IsQuotaExceeded,
+				"expires_at":             u.ExpiresAt,
+				"org_resource_remaining": u.OrgResourcePackage.Remaining,
 			}
 		}
 	}

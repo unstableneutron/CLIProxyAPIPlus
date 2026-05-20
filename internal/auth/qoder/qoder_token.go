@@ -45,6 +45,10 @@ type QoderTokenStorage struct {
 	// chat traffic never race on the underlying map.
 	ModelConfigs map[string]json.RawMessage `json:"model_configs,omitempty"`
 
+	// UsageInfo caches the most recent /api/v2/quota/usage response.
+	// Populated by FetchQoderUsage; not persisted to disk (in-memory only).
+	UsageInfo *QoderUsageInfo `json:"-"`
+
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
@@ -54,6 +58,29 @@ type QoderTokenStorage struct {
 	// from /algo/api/v2/model/list is replaced wholesale, but the lookup
 	// path (GetModelConfig) still reads it during chat requests.
 	modelConfigMu sync.RWMutex `json:"-"`
+}
+
+// QoderUsageInfo holds the parsed /api/v2/quota/usage response.
+type QoderUsageInfo struct {
+	// UserQuota is the personal credit quota.
+	UserQuota QoderQuota `json:"user_quota"`
+	// OrgResourcePackage is the org-level resource package.
+	OrgResourcePackage QoderQuota `json:"org_resource_package"`
+	// TotalUsagePercentage is the combined usage percentage (0–1).
+	TotalUsagePercentage float64 `json:"total_usage_percentage"`
+	// IsQuotaExceeded indicates whether the quota is exhausted.
+	IsQuotaExceeded bool `json:"is_quota_exceeded"`
+	// ExpiresAt is the quota reset timestamp in milliseconds epoch.
+	ExpiresAt int64 `json:"expires_at"`
+}
+
+// QoderQuota holds a single quota bucket (user or org).
+type QoderQuota struct {
+	Total      float64 `json:"total"`
+	Used       float64 `json:"used"`
+	Remaining  float64 `json:"remaining"`
+	Percentage float64 `json:"percentage"`
+	Unit       string  `json:"unit"`
 }
 
 // SetMetadata allows external callers to inject metadata into the storage before saving.
