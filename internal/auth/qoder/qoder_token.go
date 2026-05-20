@@ -47,7 +47,12 @@ type QoderTokenStorage struct {
 
 	// UsageInfo caches the most recent /api/v2/quota/usage response.
 	// Populated by FetchQoderUsage; not persisted to disk (in-memory only).
+	// Access must go through SetUsageInfo / GetUsageInfo.
 	UsageInfo *QoderUsageInfo `json:"-"`
+
+	// usageMu guards UsageInfo against concurrent FetchQoderUsage writes
+	// vs management-listing reads (buildAuthFileEntry).
+	usageMu sync.RWMutex `json:"-"`
 
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
@@ -112,6 +117,30 @@ func (ts *QoderTokenStorage) GetModelConfig(key string) (json.RawMessage, bool) 
 	defer ts.modelConfigMu.RUnlock()
 	raw, ok := ts.ModelConfigs[key]
 	return raw, ok
+}
+
+// SetUsageInfo replaces the cached quota-usage snapshot atomically.
+// Callers (FetchQoderUsage background goroutine) hand in the freshly-fetched
+// info; readers (buildAuthFileEntry on the management listing path) see
+// either the previous full snapshot or the new one, never a torn pointer.
+func (ts *QoderTokenStorage) SetUsageInfo(info *QoderUsageInfo) {
+	if ts == nil {
+		return
+	}
+	ts.usageMu.Lock()
+	ts.UsageInfo = info
+	ts.usageMu.Unlock()
+}
+
+// GetUsageInfo returns the cached quota-usage snapshot (or nil if none has
+// been fetched yet). Safe for concurrent use with SetUsageInfo.
+func (ts *QoderTokenStorage) GetUsageInfo() *QoderUsageInfo {
+	if ts == nil {
+		return nil
+	}
+	ts.usageMu.RLock()
+	defer ts.usageMu.RUnlock()
+	return ts.UsageInfo
 }
 
 // ModelConfigKeys returns the sorted list of cached model keys (used in

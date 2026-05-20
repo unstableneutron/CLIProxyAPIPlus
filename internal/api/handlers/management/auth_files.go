@@ -513,8 +513,8 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	// Expose Qoder credit usage if available.
 	if auth.Provider == "qoder" {
-		if storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage); ok && storage != nil && storage.UsageInfo != nil {
-			u := storage.UsageInfo
+		if storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage); ok && storage != nil && storage.GetUsageInfo() != nil {
+			u := storage.GetUsageInfo()
 			entry["usage"] = gin.H{
 				"used":                   u.UserQuota.Used,
 				"total":                  u.UserQuota.Total,

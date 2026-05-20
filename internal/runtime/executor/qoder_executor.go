@@ -1041,7 +1041,7 @@ func FetchQoderUsage(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 		return nil
 	}
 
-	storage.UsageInfo = &info
+	storage.SetUsageInfo(&info)
 	log.Debugf("qoder: usage fetched — %.0f/%.0f %s used (%.1f%%)",
 		info.UserQuota.Used, info.UserQuota.Total, info.UserQuota.Unit,
 		info.TotalUsagePercentage*100)
