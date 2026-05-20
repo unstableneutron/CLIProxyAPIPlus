@@ -167,11 +167,6 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	if toolsRaw != nil {
-		log.Debugf("[qoder-debug] outgoing tools: %s", gjson.GetBytes(bodyBytes, "tools").Raw)
-	}
-	log.Debugf("[qoder-debug] outgoing request body: %s", string(bodyBytes))
-
 	// Encode the body to bypass Alibaba Cloud WAF pattern matching.
 	// The server decodes when &Encode=1 is present in the URL.
 	encodedBytes := []byte(helps.QoderEncodeBody(bodyBytes))
@@ -999,7 +994,7 @@ func FetchQoderUsage(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 	req.Header.Set("Authorization", "Bearer "+storage.Token)
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 15*time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Debugf("qoder: usage fetch failed: %v", err)
