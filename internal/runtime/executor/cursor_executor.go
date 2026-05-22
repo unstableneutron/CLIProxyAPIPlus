@@ -882,11 +882,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if thinkingActive {
 			sendChunkSwitchable(`{"content":"</think>"}`, "")
 		}
-		// Include token usage in the final stop chunk
+		// Include token usage in the final stop chunk.
 		inputTok, outputTok := usage.get()
-		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
-			inputTok, outputTok, inputTok+outputTok)
-		// Build the stop chunk with usage embedded in the choices array level
+		// Build the stop chunk with usage embedded in the choices array level.
 		fr := `"stop"`
 		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
 			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
@@ -900,7 +898,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
 		}
 		sendDoneSwitchable()
-		_ = stopDelta // unused
 
 		// Close whatever output channel is still active
 		outMu.Lock()
@@ -1797,7 +1794,7 @@ func cursorFetchRemoteImage(ctx context.Context, client *http.Client, rawURL str
 }
 
 func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
-	modelTarget := resolveCursorModelTarget(parsed.Model, parsed.RawPayload, "openai")
+	modelTarget := resolveCursorModelTarget(parsed.Model, parsed.RawPayload)
 	requestedModel := cursorResolveRequestedModel(modelTarget)
 	params := &cursorproto.RunRequestParams{
 		ModelId:         requestedModel.ModelID,
@@ -2106,7 +2103,7 @@ func cursorPublicModelID(id string) string {
 	return "cursor-" + id
 }
 
-func resolveCursorModelTarget(model string, payload []byte, sourceFormat string) string {
+func resolveCursorModelTarget(model string, payload []byte) string {
 	parsed := thinking.ParseSuffix(strings.TrimSpace(model))
 	if family, ok := cursorCanonicalFamiliesByID[parsed.ModelName]; ok {
 		if parsed.HasSuffix {
@@ -2114,7 +2111,7 @@ func resolveCursorModelTarget(model string, payload []byte, sourceFormat string)
 				return family.targetFor(bucket)
 			}
 		}
-		if bucket, ok := cursorEffortBucketFromRequest(payload, sourceFormat); ok {
+		if bucket, ok := cursorEffortBucketFromRequest(payload); ok {
 			return family.targetFor(bucket)
 		}
 		return family.Default
@@ -2148,7 +2145,7 @@ func (f cursorCanonicalFamily) targetFor(bucket cursorEffortBucket) string {
 	return f.Default
 }
 
-func cursorEffortBucketFromRequest(body []byte, _ string) (cursorEffortBucket, bool) {
+func cursorEffortBucketFromRequest(body []byte) (cursorEffortBucket, bool) {
 	for _, path := range []string{"reasoning_effort", "reasoning.effort", "thinking.effort", "thinking.level", "thinkingBudget", "thinking.budget", "generationConfig.thinkingConfig.thinkingBudget"} {
 		value := gjson.GetBytes(body, path)
 		if !value.Exists() {
