@@ -496,23 +496,11 @@ func setKVRequestMetadata(kvc *dynamicpb.Message, requestMetadata [][]byte) {
 
 // EncodeExecRequestContextResult responds to requestContextArgs with tool definitions.
 func EncodeExecRequestContextResult(execMsgId uint32, execId string, tools []McpToolDef) []byte {
-	// RequestContext with tools
+	// Cursor receives MCP tools through AgentRunRequest.mcp_tools. Echoing
+	// them again in the request_context ack has been observed to stall some
+	// agent sessions, so this response intentionally sends an empty context.
+	_ = tools
 	rc := newMsg("RequestContext")
-	if len(tools) > 0 {
-		toolsField := field(rc, "tools")
-		toolsList := rc.Mutable(toolsField).List()
-		for _, tool := range tools {
-			td := newMsg("McpToolDefinition")
-			setStr(td, "name", tool.Name)
-			setStr(td, "description", tool.Description)
-			if len(tool.InputSchema) > 0 {
-				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
-			}
-			setStr(td, "provider_identifier", "proxy")
-			setStr(td, "tool_name", tool.Name)
-			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
-		}
-	}
 
 	// RequestContextSuccess
 	rcs := newMsg("RequestContextSuccess")

@@ -83,6 +83,90 @@ type pendingMcpExec struct {
 	Args       string // JSON-encoded args
 }
 
+func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMcpExec) bool {
+	if len(results) == 0 || len(pending) == 0 {
+		return false
+	}
+	pendingIDs := make(map[string]struct{}, len(pending))
+	for _, call := range pending {
+		if strings.TrimSpace(call.ToolCallId) != "" {
+			pendingIDs[call.ToolCallId] = struct{}{}
+		}
+	}
+	for _, result := range results {
+		if _, ok := pendingIDs[result.ToolCallId]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func cursorBuildNonStreamingToolCallCompletion(id string, created int64, model string, pending []pendingMcpExec) []byte {
+	type toolFunction struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type toolCall struct {
+		ID       string       `json:"id"`
+		Type     string       `json:"type"`
+		Function toolFunction `json:"function"`
+	}
+	type message struct {
+		Role      string     `json:"role"`
+		Content   *string    `json:"content"`
+		ToolCalls []toolCall `json:"tool_calls"`
+	}
+	type choice struct {
+		Index        int     `json:"index"`
+		Message      message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	}
+	resp := struct {
+		ID      string         `json:"id"`
+		Object  string         `json:"object"`
+		Created int64          `json:"created"`
+		Model   string         `json:"model"`
+		Choices []choice       `json:"choices"`
+		Usage   map[string]int `json:"usage"`
+	}{
+		ID:      id,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   model,
+		Usage: map[string]int{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+	calls := make([]toolCall, 0, len(pending))
+	for _, call := range pending {
+		arguments := strings.TrimSpace(call.Args)
+		if arguments == "" {
+			arguments = "{}"
+		}
+		calls = append(calls, toolCall{
+			ID:   call.ToolCallId,
+			Type: "function",
+			Function: toolFunction{
+				Name:      call.ToolName,
+				Arguments: arguments,
+			},
+		})
+	}
+	resp.Choices = []choice{{
+		Index: 0,
+		Message: message{
+			Role:      "assistant",
+			Content:   nil,
+			ToolCalls: calls,
+		},
+		FinishReason: "tool_calls",
+	}}
+	out, _ := json.Marshal(resp)
+	return out
+}
+
 // NewCursorExecutor constructs a new executor instance.
 func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
 	e := &CursorExecutor{
@@ -327,27 +411,36 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	defer sessionCancel()
 	go cursorH2Heartbeat(sessionCtx, stream)
 
-	// Collect full text from streaming response
+	// Collect full text from streaming response, or capture tool calls if the
+	// model pauses for MCP execution.
 	var fullText strings.Builder
-	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, nil,
+	var pendingToolCalls []pendingMcpExec
+	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 		func(text string, isThinking bool) {
 			fullText.WriteString(text)
 		},
-		nil,
+		func(exec pendingMcpExec) {
+			pendingToolCalls = append(pendingToolCalls, exec)
+		},
 		nil,
 		nil, // tokenUsage - non-streaming
 		nil, // onCheckpoint - non-streaming doesn't persist
-	); streamErr != nil && fullText.Len() == 0 {
+	); streamErr != nil && fullText.Len() == 0 && len(pendingToolCalls) == 0 {
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
 	}
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	var openaiResp []byte
+	if len(pendingToolCalls) > 0 {
+		openaiResp = cursorBuildNonStreamingToolCallCompletion(id, created, parsed.Model, pendingToolCalls)
+	} else {
+		openaiResp = []byte(fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+			id, created, parsed.Model, jsonString(fullText.String())))
+	}
 
 	// Translate response back to source format if needed
-	result := []byte(openaiResp)
+	result := openaiResp
 	if from.String() != "" && from.String() != "openai" {
 		var param any
 		result = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), payload, result, &param)
@@ -438,8 +531,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 
 		if hasSession && session.stream != nil && session.authID == authID {
-			log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
-			return e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+			if !cursorToolResultsMatchPending(parsed.ToolResults, session.pending) {
+				log.Warnf("cursor: session %s has no pending call matching %d tool results; falling back to cold resume", sessionKey, len(parsed.ToolResults))
+				session.cancel()
+				session.stream.Close()
+			} else {
+				log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
+				return e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+			}
 		}
 		if hasSession && session.authID != authID {
 			log.Warnf("cursor: session %s belongs to auth %s, but request is from %s — skipping resume", sessionKey, session.authID, authID)
@@ -1191,13 +1290,18 @@ func processH2SessionFrames(
 						}
 
 						// Send MCP result
+						sentResult := false
 						for _, tr := range toolResults {
 							if tr.ToolCallId == pending.ToolCallId {
 								log.Debugf("cursor: sending inline MCP result for tool=%s", pending.ToolName)
 								resultBytes := cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)
 								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
+								sentResult = true
 								break
 							}
+						}
+						if !sentResult {
+							return fmt.Errorf("cursor: no tool result for pending call %s", pending.ToolCallId)
 						}
 						continue
 					}
