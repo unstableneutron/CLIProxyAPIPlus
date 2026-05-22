@@ -6,6 +6,22 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestEncodeKvResponsesEchoRequestMetadata(t *testing.T) {
+	metadata := []byte("opaque-request-metadata")
+
+	getPayload := EncodeKvGetBlobResult(7, []byte("blob-data"), metadata)
+	getClient := mustFirstBytesField(t, getPayload, ACM_KvClientMessage)
+	if got := mustFirstStringField(t, getClient, KCM_RequestMetadata); got != string(metadata) {
+		t.Fatalf("get metadata = %q, want %q", got, string(metadata))
+	}
+
+	setPayload := EncodeKvSetBlobResult(9, metadata)
+	setClient := mustFirstBytesField(t, setPayload, ACM_KvClientMessage)
+	if got := mustFirstStringField(t, setClient, KCM_RequestMetadata); got != string(metadata) {
+		t.Fatalf("set metadata = %q, want %q", got, string(metadata))
+	}
+}
+
 func TestEncodeRunRequestIncludesRequestedModelAndFastParameter(t *testing.T) {
 	encoded := EncodeRunRequest(&RunRequestParams{
 		ModelId:        "composer-2",

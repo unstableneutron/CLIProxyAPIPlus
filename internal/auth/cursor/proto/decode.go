@@ -46,9 +46,10 @@ type DecodedServerMessage struct {
 	Text string
 
 	// For KV messages
-	KvId     uint32
-	BlobId   []byte // hex-encoded blob ID
-	BlobData []byte // for setBlobArgs
+	KvId            uint32
+	BlobId          []byte // hex-encoded blob ID
+	BlobData        []byte // for setBlobArgs
+	RequestMetadata []byte // opaque KV request metadata to echo in responses
 
 	// For exec messages
 	ExecMsgId uint32
@@ -235,6 +236,8 @@ func decodeKvServerMessage(data []byte, msg *DecodedServerMessage) {
 			case KSM_SetBlobArgs:
 				msg.Type = ServerMsgKvSetBlob
 				decodeSetBlobArgs(val, msg)
+			case KSM_RequestMetadata:
+				msg.RequestMetadata = append([]byte(nil), val...)
 			}
 
 		default:
