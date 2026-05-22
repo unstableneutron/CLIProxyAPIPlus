@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +24,8 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -38,6 +43,7 @@ const (
 	cursorHeartbeatInterval = 5 * time.Second
 	cursorSessionTTL        = 5 * time.Minute
 	cursorCheckpointTTL     = 30 * time.Minute
+	cursorMaxImageBytes     = 20 << 20
 )
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
@@ -294,6 +300,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	parsed := parseOpenAIRequest(payload)
+	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
+		return resp, err
+	}
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
 	params := buildRunRequestParams(parsed, conversationId)
@@ -388,6 +397,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	parsed := parseOpenAIRequest(payload)
+	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
+		return nil, err
+	}
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
@@ -784,18 +796,31 @@ func (e *CursorExecutor) resumeWithToolResults(
 // --- H2Stream helpers ---
 
 func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
+	requestID := uuid.New().String()
+	traceParent := cursorTraceParent()
 	headers := map[string]string{
 		":path":                    cursorRunPath,
 		"content-type":             "application/connect+proto",
 		"connect-protocol-version": "1",
+		"connect-accept-encoding":  "gzip",
 		"te":                       "trailers",
 		"authorization":            "Bearer " + accessToken,
+		"backend-traceparent":      traceParent,
+		"traceparent":              traceParent,
+		"user-agent":               "connect-es/1.6.1",
 		"x-ghost-mode":             "true",
 		"x-cursor-client-version":  cursorClientVersion,
 		"x-cursor-client-type":     "cli",
-		"x-request-id":             uuid.New().String(),
+		"x-original-request-id":    requestID,
+		"x-request-id":             requestID,
 	}
 	return cursorproto.DialH2Stream("api2.cursor.sh", headers)
+}
+
+func cursorTraceParent() string {
+	traceID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	spanID := strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
+	return "00-" + traceID + "-" + spanID + "-01"
 }
 
 func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
@@ -1081,6 +1106,7 @@ func processH2SessionFrames(
 
 type parsedOpenAIRequest struct {
 	Model        string
+	RawPayload   []byte
 	Messages     []gjson.Result
 	Tools        []gjson.Result
 	Stream       bool
@@ -1098,8 +1124,9 @@ type toolResultInfo struct {
 
 func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p := &parsedOpenAIRequest{
-		Model:  gjson.GetBytes(payload, "model").String(),
-		Stream: gjson.GetBytes(payload, "stream").Bool(),
+		Model:      gjson.GetBytes(payload, "model").String(),
+		RawPayload: bytes.Clone(payload),
+		Stream:     gjson.GetBytes(payload, "stream").Bool(),
 	}
 
 	messages := gjson.GetBytes(payload, "messages").Array()
@@ -1246,59 +1273,126 @@ func extractImages(content gjson.Result) []cursorproto.ImageData {
 	if !content.IsArray() {
 		return nil
 	}
-	var images []cursorproto.ImageData
+	images := make([]cursorproto.ImageData, 0)
 	for _, part := range content.Array() {
-		if part.Get("type").String() == "image_url" {
-			url := part.Get("image_url.url").String()
-			if strings.HasPrefix(url, "data:") {
-				img := parseDataURL(url)
-				if img != nil {
-					images = append(images, *img)
-				}
-			}
+		if part.Get("type").String() != "image_url" {
+			continue
 		}
+		rawURL := strings.TrimSpace(part.Get("image_url.url").String())
+		if rawURL == "" {
+			continue
+		}
+		if img := parseDataURL(rawURL); img != nil {
+			images = append(images, *img)
+			continue
+		}
+		images = append(images, cursorproto.ImageData{URL: rawURL})
 	}
 	return images
 }
 
-func parseDataURL(url string) *cursorproto.ImageData {
-	// data:image/png;base64,...
-	if !strings.HasPrefix(url, "data:") {
+func parseDataURL(rawURL string) *cursorproto.ImageData {
+	if !strings.HasPrefix(rawURL, "data:") {
 		return nil
 	}
-	parts := strings.SplitN(url[5:], ";", 2)
-	if len(parts) != 2 {
+	metadataAndData := strings.SplitN(strings.TrimPrefix(rawURL, "data:"), ",", 2)
+	if len(metadataAndData) != 2 {
 		return nil
 	}
-	mimeType := parts[0]
-	if !strings.HasPrefix(parts[1], "base64,") {
+	metadata := metadataAndData[0]
+	if !strings.Contains(metadata, ";base64") {
 		return nil
 	}
-	encoded := parts[1][7:]
-	data, err := base64.StdEncoding.DecodeString(encoded)
+	mimeType := strings.TrimSpace(strings.SplitN(metadata, ";", 2)[0])
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(metadataAndData[1])
 	if err != nil {
-		// Try RawStdEncoding for unpadded base64
-		data, err = base64.RawStdEncoding.DecodeString(encoded)
+		data, err = base64.RawStdEncoding.DecodeString(metadataAndData[1])
 		if err != nil {
 			return nil
 		}
 	}
-	return &cursorproto.ImageData{
-		MimeType: mimeType,
-		Data:     data,
+	if len(data) > cursorMaxImageBytes {
+		return nil
 	}
+	return &cursorproto.ImageData{MimeType: mimeType, Data: data}
+}
+
+func (e *CursorExecutor) resolveCursorRemoteImages(ctx context.Context, auth *cliproxyauth.Auth, parsed *parsedOpenAIRequest) error {
+	if parsed == nil || len(parsed.Images) == 0 {
+		return nil
+	}
+	client := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	for i := range parsed.Images {
+		if len(parsed.Images[i].Data) > 0 || strings.TrimSpace(parsed.Images[i].URL) == "" {
+			continue
+		}
+		image, err := cursorFetchRemoteImage(ctx, client, parsed.Images[i].URL)
+		if err != nil {
+			return err
+		}
+		parsed.Images[i] = image
+	}
+	return nil
+}
+
+func cursorFetchRemoteImage(ctx context.Context, client *http.Client, rawURL string) (cursorproto.ImageData, error) {
+	parsedURL, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsedURL == nil || parsedURL.Host == "" {
+		return cursorproto.ImageData{}, cursorStatusErr{code: http.StatusBadRequest, msg: "cursor: invalid image_url"}
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return cursorproto.ImageData{}, cursorStatusErr{code: http.StatusBadRequest, msg: "cursor: image_url must use http or https"}
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURL.String(), nil)
+	if err != nil {
+		return cursorproto.ImageData{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return cursorproto.ImageData{}, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Errorf("cursor: failed to close image_url response body: %v", closeErr)
+		}
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return cursorproto.ImageData{}, cursorStatusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("cursor: fetch image_url failed with status %d", resp.StatusCode)}
+	}
+	mimeType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+	if !strings.HasPrefix(mimeType, "image/") {
+		return cursorproto.ImageData{}, cursorStatusErr{code: http.StatusBadRequest, msg: "cursor: image_url did not return an image content type"}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, cursorMaxImageBytes+1))
+	if err != nil {
+		return cursorproto.ImageData{}, err
+	}
+	if len(data) > cursorMaxImageBytes {
+		return cursorproto.ImageData{}, cursorStatusErr{code: http.StatusRequestEntityTooLarge, msg: "cursor: image_url response is too large"}
+	}
+	return cursorproto.ImageData{MimeType: mimeType, Data: data}, nil
 }
 
 func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
+	modelTarget := resolveCursorModelTarget(parsed.Model, parsed.RawPayload, "openai")
+	requestedModel := cursorResolveRequestedModel(modelTarget)
 	params := &cursorproto.RunRequestParams{
-		ModelId:        parsed.Model,
-		SystemPrompt:   parsed.SystemPrompt,
-		UserText:       parsed.UserText,
-		MessageId:      uuid.New().String(),
-		ConversationId: conversationId,
-		Images:         parsed.Images,
-		Turns:          parsed.Turns,
-		BlobStore:      make(map[string][]byte),
+		ModelId:         requestedModel.ModelID,
+		ModelParameters: requestedModel.Parameters,
+		SystemPrompt:    parsed.SystemPrompt,
+		UserText:        parsed.UserText,
+		MessageId:       uuid.New().String(),
+		ConversationId:  conversationId,
+		Images:          parsed.Images,
+		Turns:           parsed.Turns,
+		BlobStore:       make(map[string][]byte),
 	}
 
 	// Convert OpenAI tools to McpToolDefs
@@ -1337,14 +1431,21 @@ func cursorRefreshToken(auth *cliproxyauth.Auth) string {
 }
 
 func applyCursorHeaders(req *http.Request, accessToken string) {
+	requestID := uuid.New().String()
+	traceParent := cursorTraceParent()
 	req.Header.Set("Content-Type", "application/connect+proto")
 	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("Connect-Accept-Encoding", "gzip")
 	req.Header.Set("Te", "trailers")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Backend-Traceparent", traceParent)
+	req.Header.Set("Traceparent", traceParent)
+	req.Header.Set("User-Agent", "connect-es/1.6.1")
 	req.Header.Set("X-Ghost-Mode", "true")
 	req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
 	req.Header.Set("X-Cursor-Client-Type", "cli")
-	req.Header.Set("X-Request-Id", uuid.New().String())
+	req.Header.Set("X-Original-Request-Id", requestID)
+	req.Header.Set("X-Request-Id", requestID)
 }
 
 func newH2Client() *http.Client {
@@ -1477,6 +1578,281 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 	return string(b)
 }
 
+type cursorRequestedModel struct {
+	ModelID    string
+	Parameters []cursorproto.ModelParameter
+}
+
+type cursorEffortBucket string
+
+const (
+	cursorEffortNone   cursorEffortBucket = "none"
+	cursorEffortLow    cursorEffortBucket = "low"
+	cursorEffortMedium cursorEffortBucket = "medium"
+	cursorEffortHigh   cursorEffortBucket = "high"
+	cursorEffortXHigh  cursorEffortBucket = "xhigh"
+)
+
+type cursorCanonicalFamily struct {
+	ID      string
+	Default string
+	None    string
+	Low     string
+	Medium  string
+	High    string
+	XHigh   string
+}
+
+var cursorCanonicalFamilies = []cursorCanonicalFamily{
+	{ID: "cursor-claude-4-sonnet", Default: "cursor-claude-4-sonnet", None: "cursor-claude-4-sonnet", Low: "cursor-claude-4-sonnet-thinking", Medium: "cursor-claude-4-sonnet-thinking", High: "cursor-claude-4-sonnet-thinking", XHigh: "cursor-claude-4-sonnet-thinking"},
+	{ID: "cursor-claude-4-sonnet-1m", Default: "cursor-claude-4-sonnet-1m", None: "cursor-claude-4-sonnet-1m", Low: "cursor-claude-4-sonnet-1m-thinking", Medium: "cursor-claude-4-sonnet-1m-thinking", High: "cursor-claude-4-sonnet-1m-thinking", XHigh: "cursor-claude-4-sonnet-1m-thinking"},
+	{ID: "cursor-claude-4.5-sonnet", Default: "cursor-claude-4.5-sonnet", None: "cursor-claude-4.5-sonnet", Low: "cursor-claude-4.5-sonnet-thinking", Medium: "cursor-claude-4.5-sonnet-thinking", High: "cursor-claude-4.5-sonnet-thinking", XHigh: "cursor-claude-4.5-sonnet-thinking"},
+	{ID: "cursor-claude-4.6-opus-max", Default: "cursor-claude-4.6-opus-max", None: "cursor-claude-4.6-opus-max", Low: "cursor-claude-4.6-opus-max-thinking", Medium: "cursor-claude-4.6-opus-max-thinking", High: "cursor-claude-4.6-opus-max-thinking", XHigh: "cursor-claude-4.6-opus-max-thinking"},
+	{ID: "cursor-grok-4-20", Default: "cursor-grok-4-20", None: "cursor-grok-4-20", Low: "cursor-grok-4-20-thinking", Medium: "cursor-grok-4-20-thinking", High: "cursor-grok-4-20-thinking", XHigh: "cursor-grok-4-20-thinking"},
+	{ID: "cursor-claude-4.5-opus", Default: "cursor-claude-4.5-opus-high", None: "cursor-claude-4.5-opus-high", Low: "cursor-claude-4.5-opus-high-thinking", Medium: "cursor-claude-4.5-opus-high-thinking", High: "cursor-claude-4.5-opus-high-thinking", XHigh: "cursor-claude-4.5-opus-high-thinking"},
+	{ID: "cursor-claude-4.6-opus", Default: "cursor-claude-4.6-opus-high", None: "cursor-claude-4.6-opus-high", Low: "cursor-claude-4.6-opus-high-thinking", Medium: "cursor-claude-4.6-opus-high-thinking", High: "cursor-claude-4.6-opus-high-thinking", XHigh: "cursor-claude-4.6-opus-high-thinking"},
+	{ID: "cursor-claude-4.6-sonnet", Default: "cursor-claude-4.6-sonnet-medium", None: "cursor-claude-4.6-sonnet-medium", Low: "cursor-claude-4.6-sonnet-medium-thinking", Medium: "cursor-claude-4.6-sonnet-medium-thinking", High: "cursor-claude-4.6-sonnet-medium-thinking", XHigh: "cursor-claude-4.6-sonnet-medium-thinking"},
+	{ID: "cursor-gpt-5.1", Default: "cursor-gpt-5.1", None: "cursor-gpt-5.1-low", Low: "cursor-gpt-5.1-low", Medium: "cursor-gpt-5.1", High: "cursor-gpt-5.1-high", XHigh: "cursor-gpt-5.1-high"},
+	{ID: "cursor-gpt-5.1-codex-mini", Default: "cursor-gpt-5.1-codex-mini", None: "cursor-gpt-5.1-codex-mini-low", Low: "cursor-gpt-5.1-codex-mini-low", Medium: "cursor-gpt-5.1-codex-mini", High: "cursor-gpt-5.1-codex-mini-high", XHigh: "cursor-gpt-5.1-codex-mini-high"},
+	{ID: "cursor-gpt-5.1-codex-max", Default: "cursor-gpt-5.1-codex-max-medium", None: "cursor-gpt-5.1-codex-max-low", Low: "cursor-gpt-5.1-codex-max-low", Medium: "cursor-gpt-5.1-codex-max-medium", High: "cursor-gpt-5.1-codex-max-high", XHigh: "cursor-gpt-5.1-codex-max-xhigh"},
+	{ID: "cursor-gpt-5.2", Default: "cursor-gpt-5.2", None: "cursor-gpt-5.2-low", Low: "cursor-gpt-5.2-low", Medium: "cursor-gpt-5.2", High: "cursor-gpt-5.2-high", XHigh: "cursor-gpt-5.2-xhigh"},
+	{ID: "cursor-gpt-5.2-codex", Default: "cursor-gpt-5.2-codex", None: "cursor-gpt-5.2-codex-low", Low: "cursor-gpt-5.2-codex-low", Medium: "cursor-gpt-5.2-codex", High: "cursor-gpt-5.2-codex-high", XHigh: "cursor-gpt-5.2-codex-xhigh"},
+	{ID: "cursor-gpt-5.3-codex", Default: "cursor-gpt-5.3-codex", None: "cursor-gpt-5.3-codex-low", Low: "cursor-gpt-5.3-codex-low", Medium: "cursor-gpt-5.3-codex", High: "cursor-gpt-5.3-codex-high", XHigh: "cursor-gpt-5.3-codex-xhigh"},
+	{ID: "cursor-gpt-5.3-codex-spark-preview", Default: "cursor-gpt-5.3-codex-spark-preview", None: "cursor-gpt-5.3-codex-spark-preview-low", Low: "cursor-gpt-5.3-codex-spark-preview-low", Medium: "cursor-gpt-5.3-codex-spark-preview", High: "cursor-gpt-5.3-codex-spark-preview-high", XHigh: "cursor-gpt-5.3-codex-spark-preview-xhigh"},
+	{ID: "cursor-gpt-5.4", Default: "cursor-gpt-5.4-medium", None: "cursor-gpt-5.4-low", Low: "cursor-gpt-5.4-low", Medium: "cursor-gpt-5.4-medium", High: "cursor-gpt-5.4-high", XHigh: "cursor-gpt-5.4-xhigh"},
+	{ID: "cursor-gpt-5.4-mini", Default: "cursor-gpt-5.4-mini-medium", None: "cursor-gpt-5.4-mini-none", Low: "cursor-gpt-5.4-mini-low", Medium: "cursor-gpt-5.4-mini-medium", High: "cursor-gpt-5.4-mini-high", XHigh: "cursor-gpt-5.4-mini-xhigh"},
+	{ID: "cursor-gpt-5.4-nano", Default: "cursor-gpt-5.4-nano-medium", None: "cursor-gpt-5.4-nano-none", Low: "cursor-gpt-5.4-nano-low", Medium: "cursor-gpt-5.4-nano-medium", High: "cursor-gpt-5.4-nano-high", XHigh: "cursor-gpt-5.4-nano-xhigh"},
+	{ID: "cursor-composer-1.5", Default: "cursor-composer-1.5", None: "cursor-composer-1.5", Low: "cursor-composer-1.5", Medium: "cursor-composer-1.5", High: "cursor-composer-1.5", XHigh: "cursor-composer-1.5"},
+	{ID: "cursor-composer-2", Default: "cursor-composer-2", None: "cursor-composer-2", Low: "cursor-composer-2", Medium: "cursor-composer-2", High: "cursor-composer-2", XHigh: "cursor-composer-2"},
+	{ID: "cursor-composer-2.5", Default: "cursor-composer-2.5", None: "cursor-composer-2.5", Low: "cursor-composer-2.5", Medium: "cursor-composer-2.5", High: "cursor-composer-2.5", XHigh: "cursor-composer-2.5"},
+	{ID: "cursor-default", Default: "cursor-default", None: "cursor-default", Low: "cursor-default", Medium: "cursor-default", High: "cursor-default", XHigh: "cursor-default"},
+	{ID: "cursor-gemini-3-flash", Default: "cursor-gemini-3-flash", None: "cursor-gemini-3-flash", Low: "cursor-gemini-3-flash", Medium: "cursor-gemini-3-flash", High: "cursor-gemini-3-flash", XHigh: "cursor-gemini-3-flash"},
+	{ID: "cursor-gemini-3-pro", Default: "cursor-gemini-3-pro", None: "cursor-gemini-3-pro", Low: "cursor-gemini-3-pro", Medium: "cursor-gemini-3-pro", High: "cursor-gemini-3-pro", XHigh: "cursor-gemini-3-pro"},
+	{ID: "cursor-gemini-3.1-pro", Default: "cursor-gemini-3.1-pro", None: "cursor-gemini-3.1-pro", Low: "cursor-gemini-3.1-pro", Medium: "cursor-gemini-3.1-pro", High: "cursor-gemini-3.1-pro", XHigh: "cursor-gemini-3.1-pro"},
+	{ID: "cursor-gpt-5-mini", Default: "cursor-gpt-5-mini", None: "cursor-gpt-5-mini", Low: "cursor-gpt-5-mini", Medium: "cursor-gpt-5-mini", High: "cursor-gpt-5-mini", XHigh: "cursor-gpt-5-mini"},
+	{ID: "cursor-kimi-k2.5", Default: "cursor-kimi-k2.5", None: "cursor-kimi-k2.5", Low: "cursor-kimi-k2.5", Medium: "cursor-kimi-k2.5", High: "cursor-kimi-k2.5", XHigh: "cursor-kimi-k2.5"},
+}
+
+var cursorCanonicalFamiliesByID = func() map[string]cursorCanonicalFamily {
+	out := make(map[string]cursorCanonicalFamily, len(cursorCanonicalFamilies)*2)
+	for _, family := range cursorCanonicalFamilies {
+		out[family.ID] = family
+		out[strings.TrimPrefix(family.ID, "cursor-")] = family
+	}
+	return out
+}()
+
+var cursorUpstreamIDsWithCursorPrefix = map[string]struct{}{
+	"cursor-small": {},
+}
+
+func cursorResolveRequestedModel(model string) cursorRequestedModel {
+	modelID := cursorUpstreamModelID(model)
+	if modelID == "auto" {
+		modelID = "default"
+	}
+	if strings.HasPrefix(modelID, "composer-") && strings.HasSuffix(modelID, "-fast") {
+		return cursorRequestedModel{
+			ModelID: strings.TrimSuffix(modelID, "-fast"),
+			Parameters: []cursorproto.ModelParameter{{
+				ID:    "fast",
+				Value: "true",
+			}},
+		}
+	}
+	return cursorRequestedModel{ModelID: modelID}
+}
+
+func cursorUpstreamModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return model
+	}
+	if strings.HasPrefix(model, "cursor-cursor-") {
+		return strings.TrimPrefix(model, "cursor-")
+	}
+	if strings.HasPrefix(model, "cursor-") {
+		if _, keep := cursorUpstreamIDsWithCursorPrefix[model]; !keep {
+			return strings.TrimPrefix(model, "cursor-")
+		}
+	}
+	return model
+}
+
+func cursorPublicModelID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return id
+	}
+	if strings.HasPrefix(id, "cursor-") {
+		return id
+	}
+	return "cursor-" + id
+}
+
+func resolveCursorModelTarget(model string, payload []byte, sourceFormat string) string {
+	parsed := thinking.ParseSuffix(strings.TrimSpace(model))
+	if family, ok := cursorCanonicalFamiliesByID[parsed.ModelName]; ok {
+		if parsed.HasSuffix {
+			if bucket, ok := cursorEffortBucketFromRawValue(parsed.RawSuffix); ok {
+				return family.targetFor(bucket)
+			}
+		}
+		if bucket, ok := cursorEffortBucketFromRequest(payload, sourceFormat); ok {
+			return family.targetFor(bucket)
+		}
+		return family.Default
+	}
+	return cursorPublicModelID(parsed.ModelName)
+}
+
+func (f cursorCanonicalFamily) targetFor(bucket cursorEffortBucket) string {
+	switch bucket {
+	case cursorEffortNone:
+		if f.None != "" {
+			return f.None
+		}
+	case cursorEffortLow:
+		if f.Low != "" {
+			return f.Low
+		}
+	case cursorEffortMedium:
+		if f.Medium != "" {
+			return f.Medium
+		}
+	case cursorEffortHigh:
+		if f.High != "" {
+			return f.High
+		}
+	case cursorEffortXHigh:
+		if f.XHigh != "" {
+			return f.XHigh
+		}
+	}
+	return f.Default
+}
+
+func cursorEffortBucketFromRequest(body []byte, _ string) (cursorEffortBucket, bool) {
+	for _, path := range []string{"reasoning_effort", "reasoning.effort", "thinking.effort", "thinking.level", "thinkingBudget", "thinking.budget", "generationConfig.thinkingConfig.thinkingBudget"} {
+		value := gjson.GetBytes(body, path)
+		if !value.Exists() {
+			continue
+		}
+		if value.Type == gjson.Number {
+			return cursorEffortBucketFromBudget(int(value.Int())), true
+		}
+		if bucket, ok := cursorEffortBucketFromRawValue(value.String()); ok {
+			return bucket, true
+		}
+	}
+	return "", false
+}
+
+func cursorEffortBucketFromRawValue(raw string) (cursorEffortBucket, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "":
+		return "", false
+	case "none":
+		return cursorEffortNone, true
+	case "minimal", "low", "small":
+		return cursorEffortLow, true
+	case "auto", "default", "medium", "mid":
+		return cursorEffortMedium, true
+	case "high":
+		return cursorEffortHigh, true
+	case "xhigh", "max", "large":
+		return cursorEffortXHigh, true
+	}
+	budget, err := strconv.Atoi(value)
+	if err != nil {
+		return "", false
+	}
+	return cursorEffortBucketFromBudget(budget), true
+}
+
+func cursorEffortBucketFromBudget(budget int) cursorEffortBucket {
+	switch {
+	case budget == 0:
+		return cursorEffortNone
+	case budget < 0:
+		return cursorEffortMedium
+	case budget <= 1024:
+		return cursorEffortLow
+	case budget <= 8192:
+		return cursorEffortMedium
+	case budget <= 32768:
+		return cursorEffortHigh
+	default:
+		return cursorEffortXHigh
+	}
+}
+
+func cursorAddCanonicalFamilyAliases(models []*registry.ModelInfo) []*registry.ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	byID := make(map[string]*registry.ModelInfo, len(models)+len(cursorCanonicalFamilies))
+	out := make([]*registry.ModelInfo, 0, len(models)+len(cursorCanonicalFamilies))
+	for _, model := range models {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		byID[model.ID] = model
+		out = append(out, model)
+	}
+	for _, family := range cursorCanonicalFamilies {
+		if family.ID == family.Default {
+			continue
+		}
+		if _, exists := byID[family.ID]; exists {
+			continue
+		}
+		source := byID[family.Default]
+		if source == nil {
+			continue
+		}
+		clone := *source
+		clone.ID = family.ID
+		clone.DisplayName = strings.TrimPrefix(family.ID, "cursor-")
+		out = append(out, &clone)
+		byID[family.ID] = &clone
+	}
+	return out
+}
+
+func cursorExpandModelAliases(models []*registry.ModelInfo) []*registry.ModelInfo {
+	models = cursorAddCanonicalFamilyAliases(models)
+	byID := make(map[string]*registry.ModelInfo, len(models)*2)
+	out := make([]*registry.ModelInfo, 0, len(models)*2)
+	for _, model := range models {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		if _, exists := byID[model.ID]; !exists {
+			byID[model.ID] = model
+			out = append(out, model)
+		}
+		if _, keep := cursorUpstreamIDsWithCursorPrefix[model.ID]; keep {
+			continue
+		}
+		if strings.HasPrefix(model.ID, "cursor-") {
+			rawID := strings.TrimPrefix(model.ID, "cursor-")
+			if rawID != "" {
+				if _, exists := byID[rawID]; !exists {
+					clone := *model
+					clone.ID = rawID
+					clone.Name = rawID
+					out = append(out, &clone)
+					byID[rawID] = &clone
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
 // --- Model Discovery ---
 
 // FetchCursorModels retrieves available models from Cursor's API.
@@ -1529,7 +1905,7 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	if len(models) == 0 {
 		return GetCursorFallbackModels()
 	}
-	return models
+	return cursorExpandModelAliases(models)
 }
 
 func parseModelsResponse(data []byte) []*registry.ModelInfo {
@@ -1637,12 +2013,13 @@ func parseModelEntry(data []byte) *registry.ModelInfo {
 	}
 
 	info := &registry.ModelInfo{
-		ID:                  modelId,
+		ID:                  cursorPublicModelID(modelId),
 		Object:              "model",
 		Created:             time.Now().Unix(),
 		OwnedBy:             "cursor",
 		Type:                cursorAuthType,
 		DisplayName:         displayName,
+		Name:                modelId,
 		ContextLength:       200000,
 		MaxCompletionTokens: 64000,
 	}
@@ -1657,14 +2034,44 @@ func parseModelEntry(data []byte) *registry.ModelInfo {
 
 // GetCursorFallbackModels returns hardcoded fallback models.
 func GetCursorFallbackModels() []*registry.ModelInfo {
-	return []*registry.ModelInfo{
-		{ID: "composer-2", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "Composer 2", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}},
-		{ID: "claude-4-sonnet", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "Claude 4 Sonnet", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}},
-		{ID: "claude-3.5-sonnet", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "Claude 3.5 Sonnet", ContextLength: 200000, MaxCompletionTokens: 8192},
-		{ID: "gpt-4o", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "GPT-4o", ContextLength: 128000, MaxCompletionTokens: 16384},
-		{ID: "cursor-small", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "Cursor Small", ContextLength: 200000, MaxCompletionTokens: 64000},
-		{ID: "gemini-2.5-pro", Object: "model", OwnedBy: "cursor", Type: cursorAuthType, DisplayName: "Gemini 2.5 Pro", ContextLength: 1000000, MaxCompletionTokens: 65536, Thinking: &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+	now := time.Now().Unix()
+	models := []*registry.ModelInfo{
+		cursorFallbackModel(now, "cursor-default", "Default", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-composer-1", "Composer 1", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-composer-1.5", "Composer 1.5", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-composer-2", "Composer 2", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-composer-2.5", "Composer 2.5", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-claude-4.6-opus-high", "Claude 4.6 Opus", 200000, 128000, true),
+		cursorFallbackModel(now, "cursor-claude-4.6-sonnet-medium", "Claude 4.6 Sonnet", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-claude-4.5-sonnet", "Claude 4.5 Sonnet", 200000, 64000, true),
+		cursorFallbackModel(now, "cursor-gpt-5.4-medium", "GPT-5.4", 272000, 128000, true),
+		cursorFallbackModel(now, "cursor-gpt-5.2", "GPT-5.2", 400000, 128000, true),
+		cursorFallbackModel(now, "cursor-gpt-5.2-codex", "GPT-5.2 Codex", 400000, 128000, true),
+		cursorFallbackModel(now, "cursor-gpt-5.3-codex", "GPT-5.3 Codex", 400000, 128000, true),
+		cursorFallbackModel(now, "cursor-gpt-5.3-codex-spark-preview", "GPT-5.3 Codex Spark", 128000, 128000, true),
+		cursorFallbackModel(now, "cursor-gemini-3.1-pro", "Gemini 3.1 Pro", 1000000, 64000, true),
+		cursorFallbackModel(now, "cursor-grok-code-fast-1", "Grok Code Fast 1", 128000, 64000, false),
+		cursorFallbackModel(now, "cursor-small", "Cursor Small", 200000, 64000, false),
 	}
+	return cursorExpandModelAliases(models)
+}
+
+func cursorFallbackModel(now int64, id, displayName string, contextLength, maxTokens int, thinkingSupport bool) *registry.ModelInfo {
+	model := &registry.ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		Created:             now,
+		OwnedBy:             "cursor",
+		Type:                cursorAuthType,
+		DisplayName:         displayName,
+		Name:                cursorUpstreamModelID(id),
+		ContextLength:       contextLength,
+		MaxCompletionTokens: maxTokens,
+	}
+	if thinkingSupport {
+		model.Thinking = &registry.ThinkingSupport{Max: 50000, DynamicAllowed: true}
+	}
+	return model
 }
 
 // Low-level protowire helpers (avoid importing protowire in executor)

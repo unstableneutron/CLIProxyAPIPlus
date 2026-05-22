@@ -21,21 +21,28 @@ import (
 
 // RunRequestParams holds all data needed to build an AgentRunRequest.
 type RunRequestParams struct {
-	ModelId        string
-	SystemPrompt   string
-	UserText       string
-	MessageId      string
-	ConversationId string
-	Images         []ImageData
-	Turns          []TurnData
-	McpTools       []McpToolDef
-	BlobStore      map[string][]byte // hex(sha256) -> data, populated during encoding
-	RawCheckpoint  []byte            // if non-nil, use as conversation_state directly (from server checkpoint)
+	ModelId         string
+	ModelParameters []ModelParameter
+	SystemPrompt    string
+	UserText        string
+	MessageId       string
+	ConversationId  string
+	Images          []ImageData
+	Turns           []TurnData
+	McpTools        []McpToolDef
+	BlobStore       map[string][]byte // hex(sha256) -> data, populated during encoding
+	RawCheckpoint   []byte            // if non-nil, use as conversation_state directly (from server checkpoint)
+}
+
+type ModelParameter struct {
+	ID    string
+	Value string
 }
 
 type ImageData struct {
 	MimeType string
 	Data     []byte
+	URL      string
 }
 
 type TurnData struct {
@@ -89,6 +96,44 @@ func marshal(msg *dynamicpb.Message) []byte {
 		panic("cursor proto marshal: " + err.Error())
 	}
 	return b
+}
+
+func appendRequestedModelFields(buf []byte, modelID, conversationID string, parameters []ModelParameter) []byte {
+	if modelID == "" {
+		return buf
+	}
+
+	var requested []byte
+	requested = protowire.AppendTag(requested, RM_ModelId, protowire.BytesType)
+	requested = protowire.AppendString(requested, modelID)
+	for _, parameter := range parameters {
+		if parameter.ID == "" {
+			continue
+		}
+		var paramBytes []byte
+		paramBytes = protowire.AppendTag(paramBytes, RMP_Id, protowire.BytesType)
+		paramBytes = protowire.AppendString(paramBytes, parameter.ID)
+		paramBytes = protowire.AppendTag(paramBytes, RMP_Value, protowire.BytesType)
+		paramBytes = protowire.AppendString(paramBytes, parameter.Value)
+		requested = protowire.AppendTag(requested, RM_Parameters, protowire.BytesType)
+		requested = protowire.AppendBytes(requested, paramBytes)
+	}
+
+	buf = protowire.AppendTag(buf, ARR_RequestedModel, protowire.BytesType)
+	buf = protowire.AppendBytes(buf, requested)
+	buf = protowire.AppendTag(buf, ARR_Unknown12, protowire.VarintType)
+	buf = protowire.AppendVarint(buf, 0)
+	if conversationID != "" {
+		buf = protowire.AppendTag(buf, ARR_RequestId, protowire.BytesType)
+		buf = protowire.AppendString(buf, conversationID)
+	}
+	return buf
+}
+
+func setRequestedModelUnknownFields(msg *dynamicpb.Message, modelID, conversationID string, parameters []ModelParameter) {
+	unknown := append([]byte(nil), msg.ProtoReflect().GetUnknown()...)
+	unknown = appendRequestedModelFields(unknown, modelID, conversationID, parameters)
+	msg.ProtoReflect().SetUnknown(unknown)
 }
 
 // --- Encode functions mirroring cursor-fetch.ts ---
@@ -215,6 +260,7 @@ func EncodeRunRequest(p *RunRequestParams) []byte {
 	setMsg(arr, "action", ca)
 	setMsg(arr, "model_details", md)
 	setStr(arr, "conversation_id", p.ConversationId)
+	setRequestedModelUnknownFields(arr, p.ModelId, p.ConversationId, p.ModelParameters)
 
 	// McpTools
 	if len(p.McpTools) > 0 {
@@ -318,6 +364,7 @@ func encodeRunRequestWithCheckpoint(p *RunRequestParams) []byte {
 		arrBuf = protowire.AppendTag(arrBuf, ARR_ConversationId, protowire.BytesType)
 		arrBuf = protowire.AppendString(arrBuf, p.ConversationId)
 	}
+	arrBuf = appendRequestedModelFields(arrBuf, p.ModelId, p.ConversationId, p.ModelParameters)
 
 	// Wrap in AgentClientMessage field 1 (run_request)
 	var acmBuf []byte

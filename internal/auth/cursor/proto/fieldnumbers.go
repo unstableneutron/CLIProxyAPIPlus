@@ -25,11 +25,14 @@ const (
 
 // AgentRunRequest (msg 91)
 const (
-	ARR_ConversationState = 1 // ConversationStateStructure
-	ARR_Action            = 2 // ConversationAction
-	ARR_ModelDetails      = 3 // ModelDetails
-	ARR_McpTools          = 4 // McpTools
-	ARR_ConversationId    = 5 // string (optional)
+	ARR_ConversationState = 1  // ConversationStateStructure
+	ARR_Action            = 2  // ConversationAction
+	ARR_ModelDetails      = 3  // ModelDetails
+	ARR_McpTools          = 4  // McpTools
+	ARR_ConversationId    = 5  // string (optional)
+	ARR_RequestedModel    = 9  // RequestedModel
+	ARR_Unknown12         = 12 // observed varint=0 in cursor-agent traffic
+	ARR_RequestId         = 16 // observed UUID, same value as conversation_id
 )
 
 // ConversationStateStructure (msg 83)
@@ -81,6 +84,17 @@ const (
 	MD_ThinkingDetails = 2 // ThinkingDetails (optional)
 	MD_DisplayModelId  = 3 // string
 	MD_DisplayName     = 4 // string
+)
+
+// RequestedModel and RequestedModel.ModelParameter.
+const (
+	RM_ModelId    = 1 // string
+	RM_Parameters = 3 // repeated ModelParameter
+)
+
+const (
+	RMP_Id    = 1 // string
+	RMP_Value = 2 // string
 )
 
 // McpTools (msg 307)
