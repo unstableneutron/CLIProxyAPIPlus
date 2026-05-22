@@ -303,6 +303,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
 		return resp, err
 	}
+	flattenConversationIntoUserText(parsed)
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
 	params := buildRunRequestParams(parsed, conversationId)
@@ -467,10 +468,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId)
-
+	var params *cursorproto.RunRequestParams
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
-		// Same auth — use checkpoint normally
+		// Same auth — use checkpoint normally. The server already has prior
+		// conversation context, so keep only the current user message structured.
+		params = buildRunRequestParams(parsed, conversationId)
 		log.Debugf("cursor: using saved checkpoint (%d bytes) for conv=%s auth=%s", len(saved.data), checkpointKey, authID)
 		params.RawCheckpoint = saved.data
 		// Merge saved blobStore into params
@@ -482,22 +484,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				params.BlobStore[k] = v
 			}
 		}
-	} else if hasCheckpoint && saved.data != nil && saved.authID != authID {
-		// Auth changed (quota failover) — checkpoint is not portable across accounts.
-		// Discard and flatten conversation history into userText.
-		log.Infof("cursor: auth migrated (%s → %s) for conv=%s, discarding checkpoint and flattening context", saved.authID, authID, checkpointKey)
-		e.mu.Lock()
-		delete(e.checkpoints, checkpointKey)
-		e.mu.Unlock()
-		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
-			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId)
+	} else {
+		if hasCheckpoint && saved.data != nil && saved.authID != authID {
+			// Auth changed (quota failover) — checkpoint is not portable across accounts.
+			// Discard and flatten conversation history into userText.
+			log.Infof("cursor: auth migrated (%s → %s) for conv=%s, discarding checkpoint and flattening context", saved.authID, authID, checkpointKey)
+			e.mu.Lock()
+			delete(e.checkpoints, checkpointKey)
+			e.mu.Unlock()
+		} else {
+			log.Debugf("cursor: no checkpoint, flattening full message history into userText")
 		}
-	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
-		// Fallback: no checkpoint available (cold resume / proxy restart).
-		// Flatten the full conversation history (including tool interactions) into userText.
-		// Cursor's turns encoding is not reliably read by the model, but userText always works.
-		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
 		params = buildRunRequestParams(parsed, conversationId)
 	}
@@ -1331,59 +1328,166 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	return p
 }
 
-// bakeToolResultsIntoTurns merges tool results into the last turn's assistant text
-// when there's no active H2 session to resume. This ensures the model sees the
-// full tool interaction context in a new conversation.
-// flattenConversationIntoUserText flattens the full conversation history
-// (turns + tool results) into the UserText field as plain text.
-// This is the fallback for cold resume when no checkpoint is available.
-// Cursor reliably reads UserText but ignores structured turns.
+// flattenConversationIntoUserText flattens the full OpenAI-shaped message
+// history into Cursor's single UserMessage text. Cursor reliably reads
+// UserText but does not consistently honor client-synthesized protobuf turns
+// or system-prompt blobs, so cold-start paths include system instructions,
+// assistant tool calls, and tool results directly in text.
 func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
-	var buf strings.Builder
-
-	// Flatten turns into readable context
-	for _, turn := range parsed.Turns {
-		if turn.UserText != "" {
-			buf.WriteString("USER: ")
-			buf.WriteString(turn.UserText)
-			buf.WriteString("\n\n")
-		}
-		if turn.AssistantText != "" {
-			buf.WriteString("ASSISTANT: ")
-			buf.WriteString(turn.AssistantText)
-			buf.WriteString("\n\n")
-		}
+	if parsed == nil {
+		return
 	}
-
-	// Flatten tool results
-	for _, tr := range parsed.ToolResults {
-		buf.WriteString("TOOL_RESULT (call_id: ")
-		buf.WriteString(tr.ToolCallId)
-		buf.WriteString("): ")
-		// Truncate very large tool results to avoid overwhelming the context
-		content := tr.Content
-		if len(content) > 8000 {
-			content = content[:8000] + "\n... [truncated]"
-		}
-		buf.WriteString(content)
-		buf.WriteString("\n\n")
+	if text := cursorFlattenMessages(parsed.Messages); text != "" {
+		parsed.UserText = text
+	} else if parsed.UserText == "" {
+		parsed.UserText = "Continue from the conversation above."
 	}
-
-	if buf.Len() > 0 {
-		buf.WriteString("The above is the previous conversation context including tool call results.\n")
-		buf.WriteString("Continue your response based on this context.\n\n")
-	}
-
-	// Prepend flattened history to the current UserText
-	if parsed.UserText != "" {
-		parsed.UserText = buf.String() + "Current request: " + parsed.UserText
-	} else {
-		parsed.UserText = buf.String() + "Continue from the conversation above."
-	}
-
-	// Clear turns and tool results since they're now in UserText
 	parsed.Turns = nil
 	parsed.ToolResults = nil
+}
+
+func cursorFlattenMessages(messages []gjson.Result) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	systemTexts := make([]string, 0, 1)
+	turns := make([]gjson.Result, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Get("role").String() == "system" {
+			if text := extractTextContent(msg.Get("content")); strings.TrimSpace(text) != "" {
+				systemTexts = append(systemTexts, text)
+			}
+			continue
+		}
+		turns = append(turns, msg)
+	}
+
+	if len(turns) == 1 && turns[0].Get("role").String() == "user" && len(turns[0].Get("tool_calls").Array()) == 0 && !cursorContentHasToolResult(turns[0].Get("content")) {
+		userText := extractTextContent(turns[0].Get("content"))
+		if len(systemTexts) > 0 {
+			if userText != "" {
+				return strings.Join(systemTexts, "\n\n") + "\n\n" + userText
+			}
+			return strings.Join(systemTexts, "\n\n")
+		}
+		return userText
+	}
+
+	lines := make([]string, 0, len(turns)*2)
+	for _, msg := range turns {
+		role := msg.Get("role").String()
+		switch role {
+		case "user":
+			text := extractTextContent(msg.Get("content"))
+			if text != "" {
+				lines = append(lines, "User: "+text)
+			}
+			lines = append(lines, cursorToolResultLinesFromContent(msg.Get("content"))...)
+		case "assistant":
+			text := extractTextContent(msg.Get("content"))
+			if text != "" {
+				lines = append(lines, "Assistant: "+text)
+			}
+			lines = append(lines, cursorAssistantToolCallLines(msg)...)
+		case "tool":
+			callID := msg.Get("tool_call_id").String()
+			if callID == "" {
+				callID = "(unknown)"
+			}
+			text := extractTextContent(msg.Get("content"))
+			if len(text) > 8000 {
+				text = text[:8000] + "\n... [truncated]"
+			}
+			lines = append(lines, fmt.Sprintf("Tool result (%s): %s", callID, text))
+		default:
+			text := extractTextContent(msg.Get("content"))
+			if text != "" {
+				lines = append(lines, role+": "+text)
+			}
+		}
+	}
+
+	body := strings.Join(lines, "\n\n")
+	if len(systemTexts) > 0 {
+		if body != "" {
+			return strings.Join(systemTexts, "\n\n") + "\n\n" + body
+		}
+		return strings.Join(systemTexts, "\n\n")
+	}
+	return body
+}
+
+func cursorContentHasToolResult(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+func cursorToolResultLinesFromContent(content gjson.Result) []string {
+	if !content.IsArray() {
+		return nil
+	}
+	out := make([]string, 0)
+	for _, part := range content.Array() {
+		if part.Get("type").String() != "tool_result" {
+			continue
+		}
+		callID := part.Get("tool_use_id").String()
+		if callID == "" {
+			callID = "(unknown)"
+		}
+		text := extractTextContent(part.Get("content"))
+		if text == "" {
+			text = part.Get("content").String()
+		}
+		out = append(out, fmt.Sprintf("Tool result (%s): %s", callID, text))
+	}
+	return out
+}
+
+func cursorAssistantToolCallLines(msg gjson.Result) []string {
+	out := make([]string, 0)
+	for _, tc := range msg.Get("tool_calls").Array() {
+		id := tc.Get("id").String()
+		if id == "" {
+			id = "(unknown)"
+		}
+		name := tc.Get("function.name").String()
+		if name == "" {
+			name = "tool"
+		}
+		args := tc.Get("function.arguments").String()
+		out = append(out, fmt.Sprintf("Assistant called tool %s (%s) with arguments: %s", name, id, args))
+	}
+	content := msg.Get("content")
+	if content.IsArray() {
+		for _, part := range content.Array() {
+			if part.Get("type").String() != "tool_use" {
+				continue
+			}
+			id := part.Get("id").String()
+			if id == "" {
+				id = "(unknown)"
+			}
+			name := part.Get("name").String()
+			if name == "" {
+				name = "tool"
+			}
+			args := part.Get("input").Raw
+			if args == "" {
+				args = "{}"
+			}
+			out = append(out, fmt.Sprintf("Assistant called tool %s (%s) with arguments: %s", name, id, args))
+		}
+	}
+	return out
 }
 
 func extractTextContent(content gjson.Result) string {

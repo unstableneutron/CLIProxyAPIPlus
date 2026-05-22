@@ -5,12 +5,76 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestCursorFlattenMessagesPrependsSystemForSingleUser(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[
+			{"role":"system","content":"Always answer in uppercase."},
+			{"role":"user","content":"hello"}
+		]
+	}`))
+
+	flattenConversationIntoUserText(parsed)
+
+	if parsed.UserText != "Always answer in uppercase.\n\nhello" {
+		t.Fatalf("UserText = %q, want system prompt prepended to single user text", parsed.UserText)
+	}
+	if len(parsed.Turns) != 0 || len(parsed.ToolResults) != 0 {
+		t.Fatalf("Turns/ToolResults not cleared: turns=%d tools=%d", len(parsed.Turns), len(parsed.ToolResults))
+	}
+}
+
+func TestCursorFlattenMessagesIncludesAssistantToolCallsAndToolResults(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[
+			{"role":"system","content":"Be concise."},
+			{"role":"user","content":"what is the weather?"},
+			{"role":"assistant","content":"Let me check.","tool_calls":[{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
+			{"role":"tool","tool_call_id":"call_weather","content":"sunny, 22C"},
+			{"role":"user","content":"summarize"}
+		]
+	}`))
+
+	flattenConversationIntoUserText(parsed)
+
+	for _, want := range []string{
+		"Be concise.",
+		"User: what is the weather?",
+		"Assistant: Let me check.",
+		`Assistant called tool get_weather (call_weather) with arguments: {"city":"Paris"}`,
+		"Tool result (call_weather): sunny, 22C",
+		"User: summarize",
+	} {
+		if !strings.Contains(parsed.UserText, want) {
+			t.Fatalf("flattened text missing %q in:\n%s", want, parsed.UserText)
+		}
+	}
+	if len(parsed.Turns) != 0 || len(parsed.ToolResults) != 0 {
+		t.Fatalf("Turns/ToolResults not cleared: turns=%d tools=%d", len(parsed.Turns), len(parsed.ToolResults))
+	}
+}
+
+func TestCursorFlattenMessagesKeepsSingleUserFastPath(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+
+	flattenConversationIntoUserText(parsed)
+
+	if parsed.UserText != "hello" {
+		t.Fatalf("UserText = %q, want original single user text", parsed.UserText)
+	}
+}
 
 func TestCursorJSONErrorFromPayloadMapsResourceExhausted(t *testing.T) {
 	err := cursorJSONErrorFromPayload([]byte(`{"error":{"code":"resource_exhausted","message":"rate limited"}}`))
