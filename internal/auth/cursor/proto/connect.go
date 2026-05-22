@@ -1,9 +1,12 @@
 package proto
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 const (
@@ -38,7 +41,20 @@ func ParseConnectFrame(buf []byte) (flags byte, payload []byte, consumed int, ok
 	if len(buf) < total {
 		return 0, nil, 0, false
 	}
-	return flags, buf[5:total], total, true
+	payload = buf[5:total]
+	if flags&ConnectCompressionFlag != 0 {
+		zr, err := gzip.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return 0, nil, 0, false
+		}
+		decompressed, err := io.ReadAll(zr)
+		closeErr := zr.Close()
+		if err != nil || closeErr != nil {
+			return 0, nil, 0, false
+		}
+		payload = decompressed
+	}
+	return flags, payload, total, true
 }
 
 // ConnectError is a structured error from the Connect protocol end-of-stream trailer.

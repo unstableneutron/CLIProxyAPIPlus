@@ -1,0 +1,175 @@
+package executor
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+)
+
+func TestCursorResolveRequestedModelAcceptsPrefixedAndRawIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantModel  string
+		wantParams map[string]string
+	}{
+		{name: "prefixed composer", input: "cursor-composer-2.5", wantModel: "composer-2.5"},
+		{name: "raw composer", input: "composer-2.5", wantModel: "composer-2.5"},
+		{name: "prefixed default", input: "cursor-default", wantModel: "default"},
+		{name: "auto maps to default", input: "auto", wantModel: "default"},
+		{name: "prefixed auto maps to default", input: "cursor-auto", wantModel: "default"},
+		{name: "composer fast parameter", input: "cursor-composer-2-fast", wantModel: "composer-2", wantParams: map[string]string{"fast": "true"}},
+		{name: "raw cursor-small remains raw", input: "cursor-small", wantModel: "cursor-small"},
+		{name: "namespaced cursor-small strips one prefix", input: "cursor-cursor-small", wantModel: "cursor-small"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cursorResolveRequestedModel(tt.input)
+			if got.ModelID != tt.wantModel {
+				t.Fatalf("ModelID = %q, want %q", got.ModelID, tt.wantModel)
+			}
+			if len(got.Parameters) != len(tt.wantParams) {
+				t.Fatalf("parameters = %#v, want %#v", got.Parameters, tt.wantParams)
+			}
+			for _, param := range got.Parameters {
+				if tt.wantParams[param.ID] != param.Value {
+					t.Fatalf("parameter %q = %q, want %q", param.ID, param.Value, tt.wantParams[param.ID])
+				}
+			}
+		})
+	}
+}
+
+func TestBuildRunRequestParamsNormalizesCursorModelForUpstream(t *testing.T) {
+	parsed := &parsedOpenAIRequest{
+		Model:        "cursor-gpt-5.4(high)",
+		SystemPrompt: "system",
+		UserText:     "hello",
+		RawPayload:   []byte(`{"model":"cursor-gpt-5.4(high)","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	params := buildRunRequestParams(parsed, "conv-1")
+	if params.ModelId != "gpt-5.4-high" {
+		t.Fatalf("ModelId = %q, want gpt-5.4-high", params.ModelId)
+	}
+}
+
+func TestGetCursorFallbackModelsIncludePrefixedAndRawAliases(t *testing.T) {
+	models := GetCursorFallbackModels()
+	ids := make(map[string]bool, len(models))
+	for _, model := range models {
+		ids[model.ID] = true
+	}
+	for _, id := range []string{"cursor-composer-2.5", "composer-2.5", "cursor-gpt-5.4", "gpt-5.4", "cursor-default", "default"} {
+		if !ids[id] {
+			t.Fatalf("fallback models missing %q; got ids=%v", id, ids)
+		}
+	}
+	if ids["small"] {
+		t.Fatalf("fallback models should not expose small alias for raw cursor-small")
+	}
+}
+
+func TestParseOpenAIRequestExtractsDataAndRemoteImageURLs(t *testing.T) {
+	const redPixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	payload := []byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"what color?"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,` + redPixelPNG + `"}},
+			{"type":"image_url","image_url":{"url":"https://example.test/red.png"}}
+		]}]
+	}`)
+
+	parsed := parseOpenAIRequest(payload)
+	if parsed.UserText != "what color?" {
+		t.Fatalf("UserText = %q, want text content", parsed.UserText)
+	}
+	if len(parsed.Images) != 2 {
+		t.Fatalf("Images = %d, want 2", len(parsed.Images))
+	}
+	if parsed.Images[0].MimeType != "image/png" || len(parsed.Images[0].Data) == 0 {
+		t.Fatalf("first image = %#v, want decoded data URL PNG", parsed.Images[0])
+	}
+	if parsed.Images[1].URL != "https://example.test/red.png" {
+		t.Fatalf("second image URL = %q, want remote URL", parsed.Images[1].URL)
+	}
+}
+
+func TestCursorExecutorResolveRemoteImageURL(t *testing.T) {
+	imageBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 'r', 'e', 'd'}
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/red.png" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png; charset=binary")
+		_, _ = w.Write(imageBytes)
+	}))
+	defer imageServer.Close()
+
+	parsed := &parsedOpenAIRequest{Images: []cursorproto.ImageData{{URL: imageServer.URL + "/red.png"}}}
+	exec := NewCursorExecutor(nil)
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "token-x"}}
+
+	if err := exec.resolveCursorRemoteImages(context.Background(), auth, parsed); err != nil {
+		t.Fatalf("resolveCursorRemoteImages() error = %v", err)
+	}
+	if len(parsed.Images) != 1 {
+		t.Fatalf("Images = %d, want 1", len(parsed.Images))
+	}
+	if parsed.Images[0].MimeType != "image/png" {
+		t.Fatalf("MimeType = %q, want image/png", parsed.Images[0].MimeType)
+	}
+	if got := string(parsed.Images[0].Data); got != string(imageBytes) {
+		t.Fatalf("image data = %q, want %q", got, string(imageBytes))
+	}
+	if parsed.Images[0].URL != "" {
+		t.Fatalf("URL = %q, want cleared after fetch", parsed.Images[0].URL)
+	}
+}
+
+func TestCursorExecutorRejectsRemoteNonImage(t *testing.T) {
+	textServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("not an image"))
+	}))
+	defer textServer.Close()
+
+	parsed := &parsedOpenAIRequest{Images: []cursorproto.ImageData{{URL: textServer.URL}}}
+	exec := NewCursorExecutor(nil)
+
+	if err := exec.resolveCursorRemoteImages(context.Background(), nil, parsed); err == nil {
+		t.Fatal("resolveCursorRemoteImages() error = nil, want non-image content type error")
+	}
+}
+
+func TestParseModelsResponsePrefixesRemoteIDsAndAddsRawAliases(t *testing.T) {
+	models := cursorExpandModelAliases([]*registry.ModelInfo{
+		{ID: cursorPublicModelID("composer-2.5"), Name: "composer-2.5", OwnedBy: "cursor", Type: cursorAuthType},
+		{ID: cursorPublicModelID("cursor-small"), Name: "cursor-small", OwnedBy: "cursor", Type: cursorAuthType},
+	})
+
+	ids := make(map[string]bool, len(models))
+	for _, model := range models {
+		ids[model.ID] = true
+	}
+	for _, id := range []string{"cursor-composer-2.5", "composer-2.5", "cursor-small"} {
+		if !ids[id] {
+			t.Fatalf("expanded model aliases missing %q; got ids=%v", id, ids)
+		}
+	}
+	for _, id := range []string{"small", "cursor-cursor-small"} {
+		if ids[id] {
+			t.Fatalf("expanded model aliases unexpectedly contained %q; got ids=%v", id, ids)
+		}
+	}
+	_ = fmt.Sprintf("%v", ids)
+}
