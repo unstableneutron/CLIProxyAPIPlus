@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,59 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
+	pending := []pendingMcpExec{
+		{ToolCallId: "call_a"},
+		{ToolCallId: "call_b"},
+	}
+	if !cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_b", Content: "ok"}}, pending) {
+		t.Fatal("expected tool result to match one pending call")
+	}
+	if cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_missing", Content: "ok"}}, pending) {
+		t.Fatal("unexpected match for unknown tool call id")
+	}
+}
+
+func TestCursorBuildNonStreamingToolCallCompletion(t *testing.T) {
+	payload := cursorBuildNonStreamingToolCallCompletion("chatcmpl-test", 123, "cursor-composer-2.5", []pendingMcpExec{{
+		ToolCallId: "call_weather",
+		ToolName:   "get_weather",
+		Args:       `{"city":"Paris"}`,
+	}})
+
+	var decoded struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Role      string  `json:"role"`
+				Content   *string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; payload=%s", err, payload)
+	}
+	choice := decoded.Choices[0]
+	if choice.FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", choice.FinishReason)
+	}
+	if choice.Message.Content != nil {
+		t.Fatalf("content = %q, want null", *choice.Message.Content)
+	}
+	call := choice.Message.ToolCalls[0]
+	if call.ID != "call_weather" || call.Function.Name != "get_weather" || call.Function.Arguments != `{"city":"Paris"}` {
+		t.Fatalf("tool call = %+v, want weather call with JSON string args", call)
+	}
+}
 
 func TestCursorFlattenMessagesPrependsSystemForSingleUser(t *testing.T) {
 	parsed := parseOpenAIRequest([]byte(`{

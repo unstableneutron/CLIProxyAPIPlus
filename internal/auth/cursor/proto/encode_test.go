@@ -1,10 +1,28 @@
 package proto
 
 import (
+	"bytes"
 	"testing"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func TestEncodeExecRequestContextResultOmitsTools(t *testing.T) {
+	payload := EncodeExecRequestContextResult(5, "exec-ctx", []McpToolDef{{
+		Name:        "get_weather",
+		Description: "weather lookup",
+		InputSchema: []byte(`{"type":"object"}`),
+	}})
+
+	if bytes.Contains(payload, []byte("get_weather")) {
+		t.Fatalf("request_context ack should not echo tools; payload contains tool name: %x", payload)
+	}
+	execClient := mustFirstBytesField(t, payload, ACM_ExecClientMessage)
+	if got := mustFirstStringField(t, execClient, ECM_ExecId); got != "exec-ctx" {
+		t.Fatalf("exec id = %q, want exec-ctx", got)
+	}
+	_ = mustFirstBytesField(t, execClient, ECM_RequestContextResult)
+}
 
 func TestEncodeKvResponsesEchoRequestMetadata(t *testing.T) {
 	metadata := []byte("opaque-request-metadata")
