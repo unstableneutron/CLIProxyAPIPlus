@@ -153,9 +153,10 @@ const (
 
 // KvServerMessage (msg 271)
 const (
-	KSM_Id          = 1 // uint32
-	KSM_GetBlobArgs = 2 // GetBlobArgs
-	KSM_SetBlobArgs = 3 // SetBlobArgs
+	KSM_Id              = 1 // uint32
+	KSM_GetBlobArgs     = 2 // GetBlobArgs
+	KSM_SetBlobArgs     = 3 // SetBlobArgs
+	KSM_RequestMetadata = 4 // opaque request metadata echoed in responses
 )
 
 // GetBlobArgs (msg 267)
@@ -171,9 +172,10 @@ const (
 
 // KvClientMessage (msg 272)
 const (
-	KCM_Id            = 1 // uint32
-	KCM_GetBlobResult = 2 // GetBlobResult
-	KCM_SetBlobResult = 3 // SetBlobResult
+	KCM_Id              = 1 // uint32
+	KCM_GetBlobResult   = 2 // GetBlobResult
+	KCM_SetBlobResult   = 3 // SetBlobResult
+	KCM_RequestMetadata = 4 // opaque request metadata echoed from server request
 )
 
 // GetBlobResult (msg 268)

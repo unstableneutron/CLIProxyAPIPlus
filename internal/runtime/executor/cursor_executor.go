@@ -871,6 +871,104 @@ func (u *cursorTokenUsage) get() (input, output int64) {
 	return u.inputTokensEst, u.outputTokens
 }
 
+func cursorJSONErrorFromPayload(payload []byte) error {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !bytes.Contains(trimmed, []byte(`"error"`)) {
+		return nil
+	}
+	var envelope struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Details []struct {
+				Debug struct {
+					Details struct {
+						Title  string `json:"title"`
+						Detail string `json:"detail"`
+					} `json:"details"`
+				} `json:"debug"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil || envelope.Error == nil {
+		return nil
+	}
+	message := envelope.Error.Message
+	for _, detail := range envelope.Error.Details {
+		if detail.Debug.Details.Title != "" {
+			message = detail.Debug.Details.Title
+			break
+		}
+		if detail.Debug.Details.Detail != "" {
+			message = detail.Debug.Details.Detail
+			break
+		}
+	}
+	if message == "" {
+		message = string(trimmed)
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.Error.Code)) {
+	case "resource_exhausted":
+		return cursorStatusErr{code: http.StatusTooManyRequests, msg: message}
+	case "unauthenticated":
+		return cursorStatusErr{code: http.StatusUnauthorized, msg: message}
+	case "permission_denied":
+		return cursorStatusErr{code: http.StatusForbidden, msg: message}
+	case "unavailable":
+		return cursorStatusErr{code: http.StatusServiceUnavailable, msg: message}
+	case "internal":
+		return cursorStatusErr{code: http.StatusInternalServerError, msg: message}
+	default:
+		return cursorStatusErr{code: http.StatusBadGateway, msg: message}
+	}
+}
+
+type cursorExecDeduper struct {
+	seen map[string]struct{}
+}
+
+func newCursorExecDeduper() *cursorExecDeduper {
+	return &cursorExecDeduper{seen: make(map[string]struct{})}
+}
+
+func (d *cursorExecDeduper) mark(msg *cursorproto.DecodedServerMessage) bool {
+	if d == nil || msg == nil || !cursorIsExecMessage(msg.Type) {
+		return true
+	}
+	key := fmt.Sprintf("%d:%s:%d", msg.Type, msg.ExecId, msg.ExecMsgId)
+	if _, ok := d.seen[key]; ok {
+		return false
+	}
+	d.seen[key] = struct{}{}
+	return true
+}
+
+func cursorIsExecMessage(msgType cursorproto.ServerMessageType) bool {
+	switch msgType {
+	case cursorproto.ServerMsgExecRequestCtx,
+		cursorproto.ServerMsgExecMcpArgs,
+		cursorproto.ServerMsgExecShellArgs,
+		cursorproto.ServerMsgExecReadArgs,
+		cursorproto.ServerMsgExecWriteArgs,
+		cursorproto.ServerMsgExecDeleteArgs,
+		cursorproto.ServerMsgExecLsArgs,
+		cursorproto.ServerMsgExecGrepArgs,
+		cursorproto.ServerMsgExecFetchArgs,
+		cursorproto.ServerMsgExecDiagnostics,
+		cursorproto.ServerMsgExecShellStream,
+		cursorproto.ServerMsgExecBgShellSpawn,
+		cursorproto.ServerMsgExecWriteShellStdin,
+		cursorproto.ServerMsgExecOther:
+		return true
+	default:
+		return false
+	}
+}
+
+func cursorShouldEndAfterKV(receivedContent bool, msgType cursorproto.ServerMessageType) bool {
+	return receivedContent && msgType == cursorproto.ServerMsgKvSetBlob
+}
+
 func processH2SessionFrames(
 	ctx context.Context,
 	stream *cursorproto.H2Stream,
@@ -884,6 +982,8 @@ func processH2SessionFrames(
 ) error {
 	var buf bytes.Buffer
 	rejectReason := "Tool not available in this environment. Use the MCP tools provided instead."
+	execDeduper := newCursorExecDeduper()
+	receivedContent := false
 	log.Debugf("cursor: processH2SessionFrames started for streamID=%s, waiting for data...", stream.ID())
 	for {
 		select {
@@ -924,6 +1024,13 @@ func processH2SessionFrames(
 					}
 					continue
 				}
+				if jsonErr := cursorJSONErrorFromPayload(payload); jsonErr != nil {
+					if receivedContent {
+						log.Debugf("cursor: JSON error after content; ending stream cleanly: %v", jsonErr)
+						return nil
+					}
+					return jsonErr
+				}
 
 				msg, err := cursorproto.DecodeAgentServerMessage(payload)
 				if err != nil {
@@ -932,14 +1039,24 @@ func processH2SessionFrames(
 				}
 
 				log.Debugf("cursor: decoded server message type=%d", msg.Type)
+				if !execDeduper.mark(msg) {
+					log.Debugf("cursor: skipping duplicate exec message type=%d execMsgId=%d execId=%q", msg.Type, msg.ExecMsgId, msg.ExecId)
+					continue
+				}
 				switch msg.Type {
 				case cursorproto.ServerMsgTextDelta:
-					if msg.Text != "" && onText != nil {
-						onText(msg.Text, false)
+					if msg.Text != "" {
+						receivedContent = true
+						if onText != nil {
+							onText(msg.Text, false)
+						}
 					}
 				case cursorproto.ServerMsgThinkingDelta:
-					if msg.Text != "" && onText != nil {
-						onText(msg.Text, true)
+					if msg.Text != "" {
+						receivedContent = true
+						if onText != nil {
+							onText(msg.Text, true)
+						}
 					}
 				case cursorproto.ServerMsgThinkingCompleted:
 					// Handled by caller
@@ -967,14 +1084,18 @@ func processH2SessionFrames(
 				case cursorproto.ServerMsgKvGetBlob:
 					blobKey := cursorproto.BlobIdHex(msg.BlobId)
 					data := blobStore[blobKey]
-					resp := cursorproto.EncodeKvGetBlobResult(msg.KvId, data)
+					resp := cursorproto.EncodeKvGetBlobResult(msg.KvId, data, msg.RequestMetadata)
 					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
 
 				case cursorproto.ServerMsgKvSetBlob:
 					blobKey := cursorproto.BlobIdHex(msg.BlobId)
 					blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
-					resp := cursorproto.EncodeKvSetBlobResult(msg.KvId)
+					resp := cursorproto.EncodeKvSetBlobResult(msg.KvId, msg.RequestMetadata)
 					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
+					if cursorShouldEndAfterKV(receivedContent, msg.Type) {
+						log.Debugf("cursor: KV set after content; treating as clean end of response")
+						return nil
+					}
 
 				case cursorproto.ServerMsgExecRequestCtx:
 					resp := cursorproto.EncodeExecRequestContextResult(msg.ExecMsgId, msg.ExecId, mcpTools)
@@ -1034,19 +1155,31 @@ func processH2SessionFrames(
 									if wf&cursorproto.ConnectEndStreamFlag != 0 {
 										continue
 									}
+									if jsonErr := cursorJSONErrorFromPayload(wp); jsonErr != nil {
+										if receivedContent {
+											return nil
+										}
+										return jsonErr
+									}
 									wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
 									if werr != nil {
+										continue
+									}
+									if !execDeduper.mark(wmsg) {
 										continue
 									}
 									switch wmsg.Type {
 									case cursorproto.ServerMsgKvGetBlob:
 										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
 										d := blobStore[blobKey]
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d), 0))
+										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d, wmsg.RequestMetadata), 0))
 									case cursorproto.ServerMsgKvSetBlob:
 										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
 										blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId), 0))
+										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId, wmsg.RequestMetadata), 0))
+										if cursorShouldEndAfterKV(receivedContent, wmsg.Type) {
+											return nil
+										}
 									case cursorproto.ServerMsgExecRequestCtx:
 										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
 									case cursorproto.ServerMsgCheckpoint:

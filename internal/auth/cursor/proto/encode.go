@@ -451,7 +451,7 @@ func EncodeResumeRequest(p *ResumeRequestParams) []byte {
 // Mirrors handleKvMessage() in cursor-fetch.ts
 
 // EncodeKvGetBlobResult responds to a getBlobArgs request.
-func EncodeKvGetBlobResult(kvId uint32, blobData []byte) []byte {
+func EncodeKvGetBlobResult(kvId uint32, blobData []byte, requestMetadata ...[]byte) []byte {
 	result := newMsg("GetBlobResult")
 	if blobData != nil {
 		setBytes(result, "blob_data", blobData)
@@ -460,6 +460,7 @@ func EncodeKvGetBlobResult(kvId uint32, blobData []byte) []byte {
 	kvc := newMsg("KvClientMessage")
 	setUint32(kvc, "id", kvId)
 	setMsg(kvc, "get_blob_result", result)
+	setKVRequestMetadata(kvc, requestMetadata)
 
 	acm := newMsg("AgentClientMessage")
 	setMsg(acm, "kv_client_message", kvc)
@@ -467,16 +468,27 @@ func EncodeKvGetBlobResult(kvId uint32, blobData []byte) []byte {
 }
 
 // EncodeKvSetBlobResult responds to a setBlobArgs request.
-func EncodeKvSetBlobResult(kvId uint32) []byte {
+func EncodeKvSetBlobResult(kvId uint32, requestMetadata ...[]byte) []byte {
 	result := newMsg("SetBlobResult")
 
 	kvc := newMsg("KvClientMessage")
 	setUint32(kvc, "id", kvId)
 	setMsg(kvc, "set_blob_result", result)
+	setKVRequestMetadata(kvc, requestMetadata)
 
 	acm := newMsg("AgentClientMessage")
 	setMsg(acm, "kv_client_message", kvc)
 	return marshal(acm)
+}
+
+func setKVRequestMetadata(kvc *dynamicpb.Message, requestMetadata [][]byte) {
+	if len(requestMetadata) == 0 || len(requestMetadata[0]) == 0 {
+		return
+	}
+	unknown := append([]byte(nil), kvc.ProtoReflect().GetUnknown()...)
+	unknown = protowire.AppendTag(unknown, KCM_RequestMetadata, protowire.BytesType)
+	unknown = protowire.AppendBytes(unknown, requestMetadata[0])
+	kvc.ProtoReflect().SetUnknown(unknown)
 }
 
 // --- Exec response encoders ---

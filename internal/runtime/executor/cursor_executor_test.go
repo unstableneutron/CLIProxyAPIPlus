@@ -12,6 +12,48 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestCursorJSONErrorFromPayloadMapsResourceExhausted(t *testing.T) {
+	err := cursorJSONErrorFromPayload([]byte(`{"error":{"code":"resource_exhausted","message":"rate limited"}}`))
+	if err == nil {
+		t.Fatal("cursorJSONErrorFromPayload() = nil, want error")
+	}
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type %T does not expose StatusCode", err)
+	}
+	if statusErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode = %d, want %d", statusErr.StatusCode(), http.StatusTooManyRequests)
+	}
+}
+
+func TestCursorExecDeduperSeparatesRequestContextAndMCPWithEmptyExecID(t *testing.T) {
+	d := newCursorExecDeduper()
+	requestContext := &cursorproto.DecodedServerMessage{Type: cursorproto.ServerMsgExecRequestCtx, ExecMsgId: 1}
+	mcpArgs := &cursorproto.DecodedServerMessage{Type: cursorproto.ServerMsgExecMcpArgs, ExecMsgId: 1}
+
+	if !d.mark(requestContext) {
+		t.Fatal("first request_context mark = false, want true")
+	}
+	if d.mark(requestContext) {
+		t.Fatal("duplicate request_context mark = true, want false")
+	}
+	if !d.mark(mcpArgs) {
+		t.Fatal("mcp_args mark = false, want true; type must be part of dedupe key")
+	}
+}
+
+func TestCursorShouldEndAfterKVOnlyAfterContent(t *testing.T) {
+	if cursorShouldEndAfterKV(false, cursorproto.ServerMsgKvSetBlob) {
+		t.Fatal("KV before content should not end stream")
+	}
+	if !cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvSetBlob) {
+		t.Fatal("KV set after content should end stream")
+	}
+	if cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvGetBlob) {
+		t.Fatal("KV get after content should not end stream")
+	}
+}
+
 func TestCursorResolveRequestedModelAcceptsPrefixedAndRawIDs(t *testing.T) {
 	tests := []struct {
 		name       string
