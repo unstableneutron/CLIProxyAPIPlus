@@ -14,6 +14,54 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestCursorClientVersionHeaderAllowsEnvOverride(t *testing.T) {
+	t.Setenv("CLIPROXY_CURSOR_CLIENT_VERSION", "9.9.9")
+	if got := cursorClientVersionHeader(); got != "cli-9.9.9" {
+		t.Fatalf("cursorClientVersionHeader() = %q, want cli-9.9.9", got)
+	}
+
+	t.Setenv("CLIPROXY_CURSOR_CLIENT_VERSION", "cli-8.8.8")
+	if got := cursorClientVersionHeader(); got != "cli-8.8.8" {
+		t.Fatalf("cursorClientVersionHeader() = %q, want cli-8.8.8", got)
+	}
+}
+
+func TestCursorBuildNonStreamingTextCompletionIncludesReasoningAndUsage(t *testing.T) {
+	payload := cursorBuildNonStreamingTextCompletion("chatcmpl-test", 123, "cursor-composer-2.5", "answer", "thinking", 11, 7)
+
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens            int `json:"prompt_tokens"`
+			CompletionTokens        int `json:"completion_tokens"`
+			TotalTokens             int `json:"total_tokens"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; payload=%s", err, payload)
+	}
+	if decoded.Choices[0].Message.Content != "answer" {
+		t.Fatalf("content = %q, want answer", decoded.Choices[0].Message.Content)
+	}
+	if decoded.Choices[0].Message.ReasoningContent != "thinking" {
+		t.Fatalf("reasoning_content = %q, want thinking", decoded.Choices[0].Message.ReasoningContent)
+	}
+	if decoded.Usage.PromptTokens != 11 || decoded.Usage.CompletionTokens != 7 || decoded.Usage.TotalTokens != 18 {
+		t.Fatalf("usage = %+v, want 11/7/18", decoded.Usage)
+	}
+	if decoded.Usage.CompletionTokensDetails.ReasoningTokens == 0 {
+		t.Fatal("reasoning_tokens = 0, want non-zero")
+	}
+}
+
 func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
 	pending := []pendingMcpExec{
 		{ToolCallId: "call_a"},

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,15 +36,15 @@ import (
 )
 
 const (
-	cursorAPIURL            = "https://api2.cursor.sh"
-	cursorRunPath           = "/agent.v1.AgentService/Run"
-	cursorModelsPath        = "/agent.v1.AgentService/GetUsableModels"
-	cursorClientVersion     = "cli-2026.02.13-41ac335"
-	cursorAuthType          = "cursor"
-	cursorHeartbeatInterval = 5 * time.Second
-	cursorSessionTTL        = 5 * time.Minute
-	cursorCheckpointTTL     = 30 * time.Minute
-	cursorMaxImageBytes     = 20 << 20
+	cursorAPIURL               = "https://api2.cursor.sh"
+	cursorRunPath              = "/agent.v1.AgentService/Run"
+	cursorModelsPath           = "/agent.v1.AgentService/GetUsableModels"
+	defaultCursorClientVersion = "cli-2026.02.13-41ac335"
+	cursorAuthType             = "cursor"
+	cursorHeartbeatInterval    = 5 * time.Second
+	cursorSessionTTL           = 5 * time.Minute
+	cursorCheckpointTTL        = 30 * time.Minute
+	cursorMaxImageBytes        = 20 << 20
 )
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
@@ -83,6 +84,16 @@ type pendingMcpExec struct {
 	Args       string // JSON-encoded args
 }
 
+func cursorClientVersionHeader() string {
+	if version := strings.TrimSpace(os.Getenv("CLIPROXY_CURSOR_CLIENT_VERSION")); version != "" {
+		if strings.HasPrefix(version, "cli-") {
+			return version
+		}
+		return "cli-" + version
+	}
+	return defaultCursorClientVersion
+}
+
 func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMcpExec) bool {
 	if len(results) == 0 || len(pending) == 0 {
 		return false
@@ -99,6 +110,63 @@ func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMc
 		}
 	}
 	return false
+}
+
+func cursorBuildNonStreamingTextCompletion(id string, created int64, model, content, reasoning string, inputTokens, outputTokens int64) []byte {
+	if outputTokens == 0 {
+		estimated := int64(len(content)+len(reasoning)) / 4
+		if estimated == 0 && (content != "" || reasoning != "") {
+			estimated = 1
+		}
+		outputTokens = estimated
+	}
+	type message struct {
+		Role             string `json:"role"`
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content,omitempty"`
+	}
+	type choice struct {
+		Index        int     `json:"index"`
+		Message      message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	}
+	usage := map[string]any{
+		"prompt_tokens":     inputTokens,
+		"completion_tokens": outputTokens,
+		"total_tokens":      inputTokens + outputTokens,
+	}
+	if reasoning != "" {
+		reasoningTokens := int64(len(reasoning)) / 4
+		if reasoningTokens == 0 {
+			reasoningTokens = 1
+		}
+		usage["completion_tokens_details"] = map[string]int64{"reasoning_tokens": reasoningTokens}
+	}
+	resp := struct {
+		ID      string         `json:"id"`
+		Object  string         `json:"object"`
+		Created int64          `json:"created"`
+		Model   string         `json:"model"`
+		Choices []choice       `json:"choices"`
+		Usage   map[string]any `json:"usage"`
+	}{
+		ID:      id,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   model,
+		Choices: []choice{{
+			Index: 0,
+			Message: message{
+				Role:             "assistant",
+				Content:          content,
+				ReasoningContent: reasoning,
+			},
+			FinishReason: "stop",
+		}},
+		Usage: usage,
+	}
+	out, _ := json.Marshal(resp)
+	return out
 }
 
 func cursorBuildNonStreamingToolCallCompletion(id string, created int64, model string, pending []pendingMcpExec) []byte {
@@ -414,16 +482,23 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Collect full text from streaming response, or capture tool calls if the
 	// model pauses for MCP execution.
 	var fullText strings.Builder
+	var thinkingText strings.Builder
 	var pendingToolCalls []pendingMcpExec
+	usage := &cursorTokenUsage{}
+	usage.setInputEstimate(len(payload))
 	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 		func(text string, isThinking bool) {
-			fullText.WriteString(text)
+			if isThinking {
+				thinkingText.WriteString(text)
+			} else {
+				fullText.WriteString(text)
+			}
 		},
 		func(exec pendingMcpExec) {
 			pendingToolCalls = append(pendingToolCalls, exec)
 		},
 		nil,
-		nil, // tokenUsage - non-streaming
+		usage,
 		nil, // onCheckpoint - non-streaming doesn't persist
 	); streamErr != nil && fullText.Len() == 0 && len(pendingToolCalls) == 0 {
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
@@ -435,8 +510,8 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if len(pendingToolCalls) > 0 {
 		openaiResp = cursorBuildNonStreamingToolCallCompletion(id, created, parsed.Model, pendingToolCalls)
 	} else {
-		openaiResp = []byte(fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-			id, created, parsed.Model, jsonString(fullText.String())))
+		inputTokens, outputTokens := usage.get()
+		openaiResp = cursorBuildNonStreamingTextCompletion(id, created, parsed.Model, fullText.String(), thinkingText.String(), inputTokens, outputTokens)
 	}
 
 	// Translate response back to source format if needed
@@ -905,7 +980,7 @@ func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
 		"traceparent":              traceParent,
 		"user-agent":               "connect-es/1.6.1",
 		"x-ghost-mode":             "true",
-		"x-cursor-client-version":  cursorClientVersion,
+		"x-cursor-client-version":  cursorClientVersionHeader(),
 		"x-cursor-client-type":     "cli",
 		"x-original-request-id":    requestID,
 		"x-request-id":             requestID,
@@ -1783,7 +1858,7 @@ func applyCursorHeaders(req *http.Request, accessToken string) {
 	req.Header.Set("Traceparent", traceParent)
 	req.Header.Set("User-Agent", "connect-es/1.6.1")
 	req.Header.Set("X-Ghost-Mode", "true")
-	req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
+	req.Header.Set("X-Cursor-Client-Version", cursorClientVersionHeader())
 	req.Header.Set("X-Cursor-Client-Type", "cli")
 	req.Header.Set("X-Original-Request-Id", requestID)
 	req.Header.Set("X-Request-Id", requestID)
@@ -2221,7 +2296,7 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	h2Req.Header.Set("Te", "trailers")
 	h2Req.Header.Set("Authorization", "Bearer "+accessToken)
 	h2Req.Header.Set("X-Ghost-Mode", "true")
-	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
+	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersionHeader())
 	h2Req.Header.Set("X-Cursor-Client-Type", "cli")
 
 	client := newH2Client()
