@@ -838,6 +838,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.coreManager != nil && !homeEnabled {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
+		} else {
+			s.registerLoadedAuthModels(ctx)
 		}
 	}
 
@@ -1099,6 +1101,27 @@ func (s *Service) ensureAuthDir() error {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
 	}
 	return nil
+}
+
+// registerLoadedAuthModels registers model catalogs for credentials loaded from
+// the auth store during startup. Store load happens before file watcher events,
+// so without this pass existing OAuth credentials would be usable by ID but
+// invisible to model routing and /v1/models until the auth file changed.
+func (s *Service) registerLoadedAuthModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		if !auth.Disabled {
+			s.ensureExecutorsForAuth(auth)
+		}
+		s.registerModelsForAuth(auth)
+		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
 }
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
