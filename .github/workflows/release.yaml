@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing fork tag to release, for example v6.9.36-0
+        description: Existing fork tag to release, for example v7.1.21-unstableneutron.0
         required: false
         type: string
 
