@@ -2,10 +2,11 @@ name: Upstream Sync
 
 # Polls release tags from kaitranntt/CLIProxyAPIPlus and merges the newest
 # upstream tag into this fork. Successful syncs are tagged as:
-#   <upstream-tag>-unstableneutron.<n>
+#   vX.Y.Z-unstableneutron.<github-run-number>
+#   vX.Y.Z-prerelease.unstableneutron.<github-run-number>
 # Examples:
-#   v7.1.21       -> v7.1.21-unstableneutron.0
-#   v7.1.15-1     -> v7.1.15-1-unstableneutron.0
+#   v7.1.21       -> v7.1.21-unstableneutron.123
+#   v7.1.15-1     -> v7.1.15-1.unstableneutron.123
 #
 # Outcomes:
 #   1. Clean merge + build + test pass -> fast-forward main, create fork tag,
@@ -24,7 +25,7 @@ on:
         required: false
         default: 'false'
       force_rebuild:
-        description: 'Create the next -unstableneutron.N tag even if the latest upstream tag is already synced'
+        description: 'Create a new unstableneutron run-number tag even if the latest upstream tag is already synced'
         required: false
         default: 'false'
 
@@ -107,7 +108,7 @@ jobs:
 
           UPSTREAM_TAG=$(git ls-remote --tags --refs upstream 'v*' \
             | awk '{ sub("refs/tags/", "", $2); print $2 }' \
-            | grep -Ev -- '-unstableneutron\.[0-9]+$' \
+            | grep -Ev -- '[-.]unstableneutron\.[0-9]+$' \
             | sort -V \
             | tail -n 1 || true)
 
@@ -125,14 +126,13 @@ jobs:
           MERGE_BASE=$(git merge-base HEAD "${UPSTREAM_COMMIT}" || echo "none")
           SAFE_TAG=$(printf '%s' "${UPSTREAM_TAG}" | tr -c 'A-Za-z0-9._-' '-')
 
-          LATEST_FORK_TAG=$(git tag --list "${UPSTREAM_TAG}-unstableneutron.[0-9]*" --sort=-v:refname | head -n 1 || true)
-          if [ -n "${LATEST_FORK_TAG}" ]; then
-            LAST_SUFFIX=${LATEST_FORK_TAG##*-unstableneutron.}
-            NEXT_SUFFIX=$((LAST_SUFFIX + 1))
+          if [[ "${UPSTREAM_TAG}" == *-* ]]; then
+            FORK_TAG_PREFIX="${UPSTREAM_TAG}.unstableneutron"
           else
-            NEXT_SUFFIX=0
+            FORK_TAG_PREFIX="${UPSTREAM_TAG}-unstableneutron"
           fi
-          NEXT_FORK_TAG="${UPSTREAM_TAG}-unstableneutron.${NEXT_SUFFIX}"
+          LATEST_FORK_TAG=$(git tag --list "${FORK_TAG_PREFIX}.[0-9]*" --sort=-v:refname | head -n 1 || true)
+          NEXT_FORK_TAG="${FORK_TAG_PREFIX}.${GITHUB_RUN_NUMBER}"
 
           {
             echo "local=${LOCAL}"
