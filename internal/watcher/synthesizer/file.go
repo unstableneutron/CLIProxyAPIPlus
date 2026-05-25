@@ -158,6 +158,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	if provider == "commandcode" {
+		if apiKey := extractCommandCodeAPIKey(metadata); apiKey != "" {
+			a.Attributes["api_key"] = apiKey
+		}
+		if baseURL := extractStringMetadata(metadata, "base_url", "baseURL", "api_base", "apiBase"); baseURL != "" {
+			a.Attributes["base_url"] = baseURL
+		}
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
@@ -331,6 +339,32 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.
 // Supports both "excluded_models" and "excluded-models" keys, and accepts both []string and []interface{}.
+func extractCommandCodeAPIKey(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	if value := extractStringMetadata(metadata, "api_key", "apiKey", "access_token", "access", "commandcode"); value != "" {
+		return value
+	}
+	if nested, ok := metadata["commandcode"].(map[string]any); ok {
+		return extractStringMetadata(nested, "access", "access_token", "apiKey", "api_key")
+	}
+	return ""
+}
+
+func extractStringMetadata(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if raw, ok := metadata[key]; ok {
+			if value, okString := raw.(string); okString {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	if metadata == nil {
 		return nil

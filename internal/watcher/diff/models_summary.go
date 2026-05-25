@@ -24,6 +24,11 @@ type CodexModelsSummary struct {
 	count int
 }
 
+type CommandCodeModelsSummary struct {
+	hash  string
+	count int
+}
+
 type VertexModelsSummary struct {
 	hash  string
 	count int
@@ -87,6 +92,27 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 		}
 	})
 	return CodexModelsSummary{
+		hash:  hashJoined(keys),
+		count: len(keys),
+	}
+}
+
+// SummarizeCommandCodeModels hashes Command Code model aliases for change detection.
+func SummarizeCommandCodeModels(models []config.CommandCodeModel) CommandCodeModelsSummary {
+	if len(models) == 0 {
+		return CommandCodeModelsSummary{}
+	}
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return CommandCodeModelsSummary{
 		hash:  hashJoined(keys),
 		count: len(keys),
 	}
