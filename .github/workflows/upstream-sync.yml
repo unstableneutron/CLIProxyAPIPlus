@@ -1,31 +1,35 @@
 name: Upstream Sync
 
-# Polls for changes from router-for-me/CLIProxyAPI and merges them into this fork.
-# Plus-only provider dirs are shielded via .gitattributes (merge=ours).
+# Polls release tags from kaitranntt/CLIProxyAPIPlus and merges the newest
+# upstream tag into this fork. Successful syncs are tagged as:
+#   <upstream-tag>-unstableneutron.<n>
+# Examples:
+#   v7.1.21       -> v7.1.21-unstableneutron.0
+#   v7.1.15-1     -> v7.1.15-1-unstableneutron.0
 #
 # Outcomes:
-#   1. Clean merge + build + test pass  -> fast-forward main directly (no PR/issue noise)
-#   2. Anything else (conflicts auto-resolved with theirs, build/test red, etc.)
-#      -> open or update a SINGLE tracking issue (label: upstream-sync-blocked).
-#         No new PR is created. The sync branch is pushed for inspection.
-#   3. workflow_dispatch with force_pr=true -> always open a PR for manual review.
-#
-# Invariants enforced by the supersession step:
-#   - At most ONE open upstream-sync PR exists at any time.
-#   - At most ONE open upstream-sync-blocked tracking issue exists at any time.
-#   - Stale upstream-sync/* branches from prior failed runs are pruned.
+#   1. Clean merge + build + test pass -> fast-forward main, create fork tag,
+#      and dispatch release/docker workflows.
+#   2. Conflicts or gate failures -> push a sync branch and open/update a
+#      SINGLE tracking issue (label: upstream-sync-blocked).
+#   3. workflow_dispatch with force_pr=true -> open a PR for manual review.
 
 on:
   schedule:
-    - cron: '17 3 * * *'   # daily at 03:17 UTC; upstream releases ~1/day
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       force_pr:
-        description: 'Always open a PR even on clean merge'
+        description: 'Always open a PR instead of fast-forwarding/tagging'
+        required: false
+        default: 'false'
+      force_rebuild:
+        description: 'Create the next -unstableneutron.N tag even if the latest upstream tag is already synced'
         required: false
         default: 'false'
 
 permissions:
+  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -38,6 +42,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   TRACKING_ISSUE_LABEL: upstream-sync-blocked
   PR_LABEL: upstream-sync
+  UPSTREAM_REPOSITORY: kaitranntt/CLIProxyAPIPlus
 
 jobs:
   sync:
@@ -59,8 +64,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          # Close every open upstream-sync PR and delete its head branch.
-          # Invariant: 0 open upstream-sync PRs before we start a new run.
           OPEN_PRS=$(gh pr list \
             --repo "${{ github.repository }}" \
             --state open \
@@ -79,8 +82,6 @@ jobs:
             done
           fi
 
-          # Belt-and-braces: delete any orphan upstream-sync/* branches that no
-          # longer have an associated open PR (e.g. PRs closed manually).
           git ls-remote --heads origin 'upstream-sync/*' \
             | awk '{print $2}' \
             | sed 's|refs/heads/||' \
@@ -92,32 +93,70 @@ jobs:
           set -e
 
       - name: Add upstream remote
-        run: git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+        run: git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
 
-      - name: Fetch upstream
-        run: git fetch upstream main --tags
+      - name: Fetch upstream main
+        run: git fetch --no-tags upstream main
 
-      - name: Check for new upstream commits
+      - name: Select upstream release tag
         id: check
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
-          LOCAL=$(git rev-parse HEAD)
-          UPSTREAM_MERGE_BASE=$(git merge-base HEAD upstream/main || echo "none")
-          UPSTREAM_HEAD=$(git rev-parse upstream/main)
-          UPSTREAM_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-          echo "local=${LOCAL}" >> $GITHUB_OUTPUT
-          echo "upstream_head=${UPSTREAM_HEAD}" >> $GITHUB_OUTPUT
-          echo "upstream_tag=${UPSTREAM_TAG}" >> $GITHUB_OUTPUT
-          echo "merge_base=${UPSTREAM_MERGE_BASE}" >> $GITHUB_OUTPUT
-          if [ "${UPSTREAM_HEAD}" = "${UPSTREAM_MERGE_BASE}" ]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "[i] Fork already contains all upstream commits; nothing to sync."
-          else
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "[i] New upstream commits to sync:"
-            git log --oneline "${UPSTREAM_MERGE_BASE}..upstream/main" | head -20
+          set -euo pipefail
+
+          UPSTREAM_TAG=$(git ls-remote --tags --refs upstream 'v*' \
+            | awk '{ sub("refs/tags/", "", $2); print $2 }' \
+            | grep -Ev -- '-unstableneutron\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true)
+
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          if [ -z "${UPSTREAM_TAG}" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "[i] No upstream v* release tags found."
+            exit 0
           fi
 
-      - name: Close stale tracking issue when fork is back in sync
+          git fetch --no-tags upstream "refs/tags/${UPSTREAM_TAG}"
+          UPSTREAM_COMMIT=$(git rev-list -n 1 FETCH_HEAD)
+          UPSTREAM_MAIN=$(git rev-parse upstream/main)
+          LOCAL=$(git rev-parse HEAD)
+          MERGE_BASE=$(git merge-base HEAD "${UPSTREAM_COMMIT}" || echo "none")
+          SAFE_TAG=$(printf '%s' "${UPSTREAM_TAG}" | tr -c 'A-Za-z0-9._-' '-')
+
+          LATEST_FORK_TAG=$(git tag --list "${UPSTREAM_TAG}-unstableneutron.[0-9]*" --sort=-v:refname | head -n 1 || true)
+          if [ -n "${LATEST_FORK_TAG}" ]; then
+            LAST_SUFFIX=${LATEST_FORK_TAG##*-unstableneutron.}
+            NEXT_SUFFIX=$((LAST_SUFFIX + 1))
+          else
+            NEXT_SUFFIX=0
+          fi
+          NEXT_FORK_TAG="${UPSTREAM_TAG}-unstableneutron.${NEXT_SUFFIX}"
+
+          {
+            echo "local=${LOCAL}"
+            echo "upstream_head=${UPSTREAM_COMMIT}"
+            echo "upstream_main=${UPSTREAM_MAIN}"
+            echo "merge_base=${MERGE_BASE}"
+            echo "safe_tag=${SAFE_TAG}"
+            echo "latest_fork_tag=${LATEST_FORK_TAG}"
+            echo "next_fork_tag=${NEXT_FORK_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${FORCE_REBUILD:-false}" != "true" ] && [ -n "${LATEST_FORK_TAG}" ]; then
+            LATEST_FORK_COMMIT=$(git rev-list -n 1 "${LATEST_FORK_TAG}")
+            if git merge-base --is-ancestor "${LATEST_FORK_COMMIT}" HEAD; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "[i] ${UPSTREAM_TAG} is already represented by ${LATEST_FORK_TAG} on main."
+              exit 0
+            fi
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "[i] Selected upstream tag ${UPSTREAM_TAG} (${UPSTREAM_COMMIT}); next fork tag ${NEXT_FORK_TAG}."
+
+      - name: Close stale tracking issue when latest upstream tag is synced
         if: steps.check.outputs.has_changes == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -130,9 +169,9 @@ jobs:
             --json number \
             --jq '.[].number' || true)
           for n in ${OPEN_ISSUES}; do
-            echo "[i] Closing stale tracking issue #${n} (fork is in sync)."
+            echo "[i] Closing stale tracking issue #${n}."
             gh issue close "${n}" --repo "${{ github.repository }}" \
-              --comment "Fork is now in sync with upstream. Auto-closing." || true
+              --comment "Latest upstream tag is already synced. Auto-closing." || true
           done
           set -e
 
@@ -140,45 +179,43 @@ jobs:
         if: steps.check.outputs.has_changes == 'true'
         id: branch
         run: |
-          BRANCH="upstream-sync/$(date -u +%Y%m%d-%H%M)"
-          echo "name=${BRANCH}" >> $GITHUB_OUTPUT
+          BRANCH="upstream-sync/${{ steps.check.outputs.safe_tag }}"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           git checkout -b "${BRANCH}"
 
-      - name: Merge upstream (prefer upstream, respect .gitattributes merge=ours)
+      - name: Merge upstream tag (prefer upstream, respect .gitattributes merge=ours)
         if: steps.check.outputs.has_changes == 'true'
         id: merge
         run: |
           set +e
-          git merge --no-edit -X theirs upstream/main
+          git merge --no-edit -X theirs "${{ steps.check.outputs.upstream_head }}"
           MERGE_EXIT=$?
           set -e
 
-          # Collect any remaining unmerged paths (delete-modify, binary clash, etc.)
           UNMERGED=$(git ls-files -u | awk '{print $4}' | sort -u || true)
-
           if [ -z "$UNMERGED" ] && [ $MERGE_EXIT -eq 0 ]; then
-            echo "conflicts=false" >> $GITHUB_OUTPUT
+            echo "conflicts=false" >> "$GITHUB_OUTPUT"
             echo "[OK] Clean merge, no conflicts."
             exit 0
           fi
 
-          echo "conflicts=true" >> $GITHUB_OUTPUT
-          echo "[!] Conflicts detected; auto-resolving with upstream side:"
-          echo "$UNMERGED"
-
-          # Save conflict list for issue body
+          echo "conflicts=true" >> "$GITHUB_OUTPUT"
           {
             echo 'CONFLICT_FILES<<EOF'
             echo "$UNMERGED"
             echo 'EOF'
-          } >> $GITHUB_ENV
+          } >> "$GITHUB_ENV"
 
-          # Auto-resolve: prefer upstream version (covers delete-modify cases).
-          # Files with .gitattributes merge=ours were already resolved by git.
+          if [ -z "$UNMERGED" ]; then
+            echo "[!] Merge failed without unmerged paths; leaving branch for inspection."
+            exit 0
+          fi
+
+          echo "[!] Conflicts detected; auto-resolving with upstream side:"
+          echo "$UNMERGED"
           echo "$UNMERGED" | while IFS= read -r f; do
             [ -z "$f" ] && continue
-            # If file exists in upstream/main, take it; otherwise remove.
-            if git cat-file -e "upstream/main:$f" 2>/dev/null; then
+            if git cat-file -e "${{ steps.check.outputs.upstream_head }}:$f" 2>/dev/null; then
               git checkout --theirs -- "$f" 2>/dev/null || true
             else
               git rm -f --ignore-unmatch "$f" || true
@@ -186,21 +223,23 @@ jobs:
             git add -- "$f" 2>/dev/null || true
           done
 
-          # Commit the merge with resolution
-          git commit --no-edit -m "chore(upstream-sync): merge router-for-me/CLIProxyAPI (auto-resolved: $(echo "$UNMERGED" | tr '\n' ' '))"
-          echo "[OK] Conflicts auto-resolved; proceeding to build gate."
+          git commit \
+            -m "chore(upstream-sync): merge ${{ steps.check.outputs.upstream_tag }}" \
+            -m "Auto-resolved conflicts by preferring upstream files where .gitattributes did not already select the fork side."
+          echo "[OK] Conflicts auto-resolved; proceeding to validation gates."
 
       - name: Set up Go
         if: steps.check.outputs.has_changes == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: '>=1.26.0'
+          go-version-file: go.mod
           cache: true
 
       - name: Record synced upstream version
         if: steps.check.outputs.has_changes == 'true'
         run: |
           {
+            echo "UPSTREAM_REPOSITORY=${UPSTREAM_REPOSITORY}"
             echo "UPSTREAM_TAG=${{ steps.check.outputs.upstream_tag }}"
             echo "UPSTREAM_COMMIT=${{ steps.check.outputs.upstream_head }}"
           } > .ccs-fork-upstream.env
@@ -214,19 +253,19 @@ jobs:
         run: |
           set +e
           BUILD_LOG=$(mktemp)
-          go build ./... 2>&1 | tee "${BUILD_LOG}"
+          go build -o test-output ./cmd/server 2>&1 | tee "${BUILD_LOG}"
           BUILD_EXIT=${PIPESTATUS[0]}
+          rm -f test-output
           if [ $BUILD_EXIT -ne 0 ]; then
-            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "passed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "passed=true" >> "$GITHUB_OUTPUT"
           fi
-          # Capture last 60 lines for issue body
           {
             echo 'BUILD_TAIL<<EOF'
             tail -n 60 "${BUILD_LOG}"
             echo 'EOF'
-          } >> $GITHUB_ENV
+          } >> "$GITHUB_ENV"
           set -e
 
       - name: Test gate
@@ -239,22 +278,22 @@ jobs:
           go test ./... -count=1 -timeout 10m 2>&1 | tee "${TEST_LOG}"
           TEST_EXIT=${PIPESTATUS[0]}
           if [ $TEST_EXIT -ne 0 ]; then
-            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "passed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "passed=true" >> "$GITHUB_OUTPUT"
           fi
           {
             echo 'TEST_TAIL<<EOF'
             tail -n 60 "${TEST_LOG}"
             echo 'EOF'
-          } >> $GITHUB_ENV
+          } >> "$GITHUB_ENV"
           set -e
 
       - name: Push sync branch
         if: steps.check.outputs.has_changes == 'true'
-        run: git push origin "${{ steps.branch.outputs.name }}"
+        run: git push --force-with-lease origin "${{ steps.branch.outputs.name }}"
 
-      - name: Fast-forward main (clean merge + build + test pass)
+      - name: Fast-forward main and tag fork release
         id: ffwd
         if: |
           steps.check.outputs.has_changes == 'true' &&
@@ -262,13 +301,24 @@ jobs:
           steps.build.outputs.passed == 'true' &&
           steps.test.outputs.passed == 'true' &&
           github.event.inputs.force_pr != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          FORK_TAG="${{ steps.check.outputs.next_fork_tag }}"
           git checkout main
           git merge --ff-only "${{ steps.branch.outputs.name }}"
           git push origin main
-          git push origin --delete "${{ steps.branch.outputs.name }}"
-          echo "[OK] Synced ${{ steps.check.outputs.merge_base }}..${{ steps.check.outputs.upstream_head }} directly to main."
-          echo "did_ff=true" >> $GITHUB_OUTPUT
+          git push origin --delete "${{ steps.branch.outputs.name }}" || true
+
+          git tag -a "${FORK_TAG}" -m "CLIProxyAPIPlus ${FORK_TAG} (upstream ${{ steps.check.outputs.upstream_tag }})"
+          git push origin "refs/tags/${FORK_TAG}"
+
+          gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref main -f tag="${FORK_TAG}" || true
+          gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref main -f tag="${FORK_TAG}" || true
+
+          echo "fork_tag=${FORK_TAG}" >> "$GITHUB_OUTPUT"
+          echo "did_ff=true" >> "$GITHUB_OUTPUT"
+          echo "[OK] Synced ${{ steps.check.outputs.upstream_tag }} and created ${FORK_TAG}."
 
       - name: Close stale tracking issue (fast-forward succeeded)
         if: steps.ffwd.outputs.did_ff == 'true'
@@ -284,7 +334,7 @@ jobs:
             --jq '.[].number' || true)
           for n in ${OPEN_ISSUES}; do
             gh issue close "${n}" --repo "${{ github.repository }}" \
-              --comment "Resolved by automated fast-forward to upstream ${{ steps.check.outputs.upstream_head }}." || true
+              --comment "Resolved by automated sync to ${{ steps.check.outputs.upstream_tag }} as ${{ steps.ffwd.outputs.fork_tag }}." || true
           done
           set -e
 
@@ -295,8 +345,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TITLE="chore(upstream-sync): $(date -u +%Y-%m-%d) pull from router-for-me/CLIProxyAPI"
-          BODY=$(printf "## Upstream sync (force_pr): \`router-for-me/CLIProxyAPI\` -> \`main\`\n\nCommits being synced: \`${{ steps.check.outputs.merge_base }}..${{ steps.check.outputs.upstream_head }}\`\n\nManually requested via workflow_dispatch.\n")
+          TITLE="chore(upstream-sync): sync ${{ steps.check.outputs.upstream_tag }} from ${UPSTREAM_REPOSITORY}"
+          BODY=$(printf "## Upstream sync (force_pr)\n\n- Upstream repository: \`%s\`\n- Upstream tag: \`%s\`\n- Upstream commit: \`%s\`\n- Next fork tag after merge: \`%s\`\n\nManually requested via workflow_dispatch.\n" \
+            "${UPSTREAM_REPOSITORY}" \
+            "${{ steps.check.outputs.upstream_tag }}" \
+            "${{ steps.check.outputs.upstream_head }}" \
+            "${{ steps.check.outputs.next_fork_tag }}")
           set +e
           PR_URL=$(gh pr create \
             --base main \
@@ -312,7 +366,7 @@ jobs:
             gh pr edit "${PR_NUM}" --add-label "${PR_LABEL}" 2>&1 || true
           fi
 
-      - name: Update tracking issue on gate failure or unresolved conflicts
+      - name: Update tracking issue on conflicts or gate failure
         if: |
           steps.check.outputs.has_changes == 'true' &&
           github.event.inputs.force_pr != 'true' &&
@@ -324,23 +378,22 @@ jobs:
         run: |
           set +e
           STATUS=""
-          [ "${{ steps.merge.outputs.conflicts }}" = "true" ] && STATUS="${STATUS}- :warning: Auto-resolved conflicts in: \`${CONFLICT_FILES:-(see diff)}\`\n"
-          [ "${{ steps.build.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \`go build ./...\` FAILED\n"
+          [ "${{ steps.merge.outputs.conflicts }}" = "true" ] && STATUS="${STATUS}- :warning: Auto-resolved or unresolved conflicts in: \`${CONFLICT_FILES:-(see diff)}\`\n"
+          [ "${{ steps.build.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \`go build -o test-output ./cmd/server\` FAILED\n"
           [ "${{ steps.test.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \`go test ./...\` FAILED\n"
 
           BRANCH="${{ steps.branch.outputs.name }}"
-          UPSTREAM="${{ steps.check.outputs.upstream_head }}"
           UPSTREAM_TAG="${{ steps.check.outputs.upstream_tag }}"
+          UPSTREAM_COMMIT="${{ steps.check.outputs.upstream_head }}"
+          NEXT_FORK_TAG="${{ steps.check.outputs.next_fork_tag }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           BRANCH_URL="${{ github.server_url }}/${{ github.repository }}/tree/${BRANCH}"
 
-          # Ensure the label exists (idempotent).
           gh label create "${TRACKING_ISSUE_LABEL}" \
             --color "B60205" \
             --description "Automated upstream sync is blocked; needs maintainer attention." \
             --repo "${{ github.repository }}" 2>/dev/null || true
 
-          # Find existing open tracking issue (single-issue invariant).
           ISSUE_NUM=$(gh issue list \
             --repo "${{ github.repository }}" \
             --state open \
@@ -349,10 +402,12 @@ jobs:
             --jq '.[0].number' || true)
 
           NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
-          COMMENT_BODY=$(printf '**New blocked sync attempt** (%s)\n\n- Upstream HEAD: `%s`\n- Upstream tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
+          COMMENT_BODY=$(printf '**New blocked sync attempt** (%s)\n\n- Upstream repository: `%s`\n- Upstream tag: `%s`\n- Upstream commit: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
             "${NOW}" \
-            "${UPSTREAM}" \
-            "${UPSTREAM_TAG:-none}" \
+            "${UPSTREAM_REPOSITORY}" \
+            "${UPSTREAM_TAG}" \
+            "${UPSTREAM_COMMIT}" \
+            "${NEXT_FORK_TAG}" \
             "${BRANCH}" "${BRANCH_URL}" \
             "${RUN_URL}" \
             "${STATUS}" \
@@ -366,8 +421,8 @@ jobs:
               --body "${COMMENT_BODY}" || exit 1
           else
             echo "[i] Creating new tracking issue"
-            ISSUE_TITLE="upstream-sync blocked: needs maintainer attention"
-            INTRO=$(printf 'The automated upstream sync from `router-for-me/CLIProxyAPI` cannot fast-forward `main` cleanly. This issue tracks the blocked state. **It will be auto-closed** once a sync run reaches main without intervention.\n\nEach subsequent failed run will append a comment with the latest failing commit and gate output. **No new PRs or issues are spawned** — this is the single source of truth.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build ./... && go test ./...`.\n3. Patch Plus-only files (`.gitattributes merge=ours` paths) to track upstream API changes.\n4. Push the fix to `main`. The next scheduled run will close this issue.\n\nIf the fork has truly diverged beyond simple repair, consider reducing the `merge=ours` surface area in `.gitattributes`.\n\n---\n')
+            ISSUE_TITLE="upstream-sync blocked: ${{ steps.check.outputs.upstream_tag }} needs maintainer attention"
+            INTRO=$(printf 'The automated upstream sync from `%s` cannot land cleanly. This issue tracks the blocked state. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\nEach subsequent failed run will append a comment with the latest failing tag and gate output. **No new PRs or issues are spawned** — this is the single source of truth.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Patch fork-specific files to track upstream API changes.\n4. Push the fix to `main`. The next scheduled run will close this issue.\n\n---\n' "${UPSTREAM_REPOSITORY}")
             ISSUE_BODY="${INTRO}${COMMENT_BODY}"
             gh issue create \
               --repo "${{ github.repository }}" \
