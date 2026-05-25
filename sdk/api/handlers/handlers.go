@@ -50,8 +50,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds     = 0
+	defaultStreamingBootstrapRetries     = 0
+	defaultStreamingBootstrapTimeoutSecs = 30
 )
 
 type pinnedAuthContextKey struct{}
@@ -188,6 +189,20 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 		retries = 0
 	}
 	return retries
+}
+
+// StreamingBootstrapTimeout returns the maximum duration a streaming handler
+// waits for upstream stream bootstrap before sending a downstream stream error.
+// A negative configured value disables the timeout. Zero means use the default.
+func StreamingBootstrapTimeout(cfg *config.SDKConfig) time.Duration {
+	seconds := defaultStreamingBootstrapTimeoutSecs
+	if cfg != nil && cfg.Streaming.BootstrapTimeoutSeconds != 0 {
+		seconds = cfg.Streaming.BootstrapTimeoutSeconds
+	}
+	if seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
