@@ -359,6 +359,24 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestCreateFastTier(t *testing.T) {
+	raw := []byte(`{"type":"response.create","model":"gpt-5.5-fast","stream":false,"input":[{"type":"message","id":"msg-1"}]}`)
+
+	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if model := gjson.GetBytes(normalized, "model").String(); model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; payload=%s", model, string(normalized))
+	}
+	if tier := gjson.GetBytes(normalized, "service_tier").String(); tier != "priority" {
+		t.Fatalf("service_tier = %q, want priority; payload=%s", tier, string(normalized))
+	}
+	if !bytes.Equal(last, normalized) {
+		t.Fatalf("last request snapshot should match normalized request")
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
@@ -429,6 +447,29 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDIncremental(t *
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDCarriesFastTier(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.5","service_tier":"priority","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"function_call","id":"fc-1","call_id":"call-1"},
+		{"type":"message","id":"assistant-1"}
+	]`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, true, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if model := gjson.GetBytes(normalized, "model").String(); model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; payload=%s", model, string(normalized))
+	}
+	if tier := gjson.GetBytes(normalized, "service_tier").String(); tier != "priority" {
+		t.Fatalf("service_tier = %q, want priority; payload=%s", tier, string(normalized))
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDMergedWhenIncrementalDisabled(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
@@ -484,6 +525,52 @@ func TestNormalizeResponsesWebsocketRequestAppend(t *testing.T) {
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match normalized append request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestAppendCarriesFastTier(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.5","service_tier":"priority","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"message","id":"assistant-1"},
+		{"type":"function_call_output","id":"tool-out-1"}
+	]`)
+	raw := []byte(`{"type":"response.append","input":[{"type":"message","id":"msg-2"}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if model := gjson.GetBytes(normalized, "model").String(); model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; payload=%s", model, string(normalized))
+	}
+	if tier := gjson.GetBytes(normalized, "service_tier").String(); tier != "priority" {
+		t.Fatalf("service_tier = %q, want priority; payload=%s", tier, string(normalized))
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestAppendNormalizesExplicitFastModel(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.5","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"message","id":"assistant-1"},
+		{"type":"function_call_output","id":"tool-out-1"}
+	]`)
+	raw := []byte(`{"type":"response.append","model":"gpt-5.5-fast","input":[{"type":"message","id":"msg-2"}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if model := gjson.GetBytes(normalized, "model").String(); model != "gpt-5.5" {
+		t.Fatalf("model = %q, want gpt-5.5; payload=%s", model, string(normalized))
+	}
+	if tier := gjson.GetBytes(normalized, "service_tier").String(); tier != "priority" {
+		t.Fatalf("service_tier = %q, want priority; payload=%s", tier, string(normalized))
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
 	}
 }
 

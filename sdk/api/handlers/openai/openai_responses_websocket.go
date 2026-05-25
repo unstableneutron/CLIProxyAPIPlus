@@ -319,6 +319,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 	if !gjson.GetBytes(normalized, "input").Exists() {
 		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
 	}
+	normalized = finalizeResponsesWebsocketRequest(normalized, nil)
 
 	modelName := strings.TrimSpace(gjson.GetBytes(normalized, "model").String())
 	if modelName == "" {
@@ -328,6 +329,29 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 		}
 	}
 	return normalized, bytes.Clone(normalized), nil
+}
+
+func finalizeResponsesWebsocketRequest(normalized []byte, lastRequest []byte) []byte {
+	normalized = normalizeCodexFastSpeedTierRequest(normalized)
+	if gjson.GetBytes(normalized, "service_tier").Exists() {
+		return normalized
+	}
+
+	previousTier := gjson.GetBytes(lastRequest, "service_tier")
+	if !previousTier.Exists() {
+		return normalized
+	}
+	modelName := strings.TrimSpace(gjson.GetBytes(normalized, "model").String())
+	previousModelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+	if modelName == "" || previousModelName == "" || !strings.EqualFold(modelName, previousModelName) {
+		return normalized
+	}
+
+	updated, err := sjson.SetRawBytes(normalized, "service_tier", []byte(previousTier.Raw))
+	if err != nil {
+		return normalized
+	}
+	return updated
 }
 
 func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -376,6 +400,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
+			normalized = finalizeResponsesWebsocketRequest(normalized, lastRequest)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
@@ -444,6 +469,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = finalizeResponsesWebsocketRequest(normalized, lastRequest)
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -493,6 +519,7 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = finalizeResponsesWebsocketRequest(normalized, lastRequest)
 	return bytes.Clone(normalized)
 }
 
