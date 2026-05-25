@@ -49,11 +49,16 @@ type SDKConfig struct {
 // StreamingConfig holds server streaming behavior configuration.
 type StreamingConfig struct {
 	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n").
-	// <= 0 disables keep-alives. Default is 0.
+	// <= 0 disables keep-alives after the upstream stream has started. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// BootstrapTimeoutSeconds bounds how long a streaming handler waits for the
+	// upstream stream to start before sending a downstream stream error. Set -1 to
+	// disable the timeout. Default is 30 seconds.
+	BootstrapTimeoutSeconds int `yaml:"bootstrap-timeout-seconds,omitempty" json:"bootstrap-timeout-seconds,omitempty"`
 }

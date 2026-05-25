@@ -158,8 +158,9 @@ enable-gemini-cli-endpoint: false
 nonstream-keepalive-interval: 0
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
-#   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
-#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+#   keepalive-seconds: 15         # Default: 0 (disabled after upstream starts). <= 0 disables keep-alives.
+#   bootstrap-retries: 1          # Default: 0 (disabled). Retries before first byte is sent.
+#   bootstrap-timeout-seconds: 30  # Default: 30. Set -1 to disable pre-first-byte timeout.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.

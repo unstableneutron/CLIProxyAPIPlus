@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -300,6 +301,17 @@ func responsesSSEDataLinesValid(chunk []byte) bool {
 	return true
 }
 
+const (
+	responsesStreamBootstrapGrace     = 200 * time.Millisecond
+	responsesStreamBootstrapHeartbeat = 15 * time.Second
+)
+
+type responsesStreamBootstrapResult struct {
+	data            <-chan []byte
+	upstreamHeaders http.Header
+	errs            <-chan *interfaces.ErrorMessage
+}
+
 func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 	if len(pending) == 0 || len(chunk) == 0 {
 		return false
@@ -526,7 +538,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -536,50 +547,263 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 	framer := &responsesSSEFramer{}
 
-	// Peek at the first chunk
+	h.handleResponsesStreamBootstrap(
+		c,
+		flusher,
+		cliCtx,
+		cliCancel,
+		func(ctx context.Context) responsesStreamBootstrapResult {
+			data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, h.HandlerType(), modelName, rawJSON, "")
+			return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
+		},
+		setSSEHeaders,
+		func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time) {
+			h.forwardStreamAfterBootstrap(
+				c,
+				flusher,
+				func(err error) { cliCancel(err) },
+				data,
+				headers,
+				errs,
+				setSSEHeaders,
+				committed,
+				deadline,
+				func(chunk []byte) { framer.WriteChunk(c.Writer, chunk) },
+				func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+					h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, data, errs, framer)
+				},
+			)
+		},
+	)
+}
+
+func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
+	c *gin.Context,
+	flusher http.Flusher,
+	cliCtx context.Context,
+	cliCancel func(...interface{}),
+	start func(context.Context) responsesStreamBootstrapResult,
+	setSSEHeaders func(),
+	forward func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time),
+) {
+	bootstrapCtx, bootstrapCancel := context.WithCancel(cliCtx)
+	defer bootstrapCancel()
+
+	bootstrapTimeout := handlers.StreamingBootstrapTimeout(h.Cfg)
+	bootstrapDeadline := time.Time{}
+	var timeoutC <-chan time.Time
+	var timeoutTimer *time.Timer
+	if bootstrapTimeout > 0 {
+		bootstrapDeadline = time.Now().Add(bootstrapTimeout)
+		timeoutTimer = time.NewTimer(bootstrapTimeout)
+		timeoutC = timeoutTimer.C
+		defer timeoutTimer.Stop()
+	}
+
+	bootstrapCh := make(chan responsesStreamBootstrapResult, 1)
+	go func() {
+		result := start(bootstrapCtx)
+		select {
+		case bootstrapCh <- result:
+		case <-bootstrapCtx.Done():
+		}
+	}()
+
+	graceTimer := time.NewTimer(responsesStreamBootstrapGrace)
+	defer graceTimer.Stop()
+
+	select {
+	case <-c.Request.Context().Done():
+		cliCancel(c.Request.Context().Err())
+		return
+	case result := <-bootstrapCh:
+		forward(result.data, result.upstreamHeaders, result.errs, false, bootstrapDeadline)
+		return
+	case <-timeoutC:
+		setSSEHeaders()
+		_, _ = c.Writer.Write([]byte(": stream-start\n\n"))
+		msg := fmt.Errorf("upstream stream bootstrap timed out after %s", bootstrapTimeout)
+		writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
+		flusher.Flush()
+		bootstrapCancel()
+		cliCancel(msg)
+		return
+	case <-graceTimer.C:
+	}
+
+	setSSEHeaders()
+	_, _ = c.Writer.Write([]byte(": stream-start\n\n"))
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(responsesStreamBootstrapHeartbeat)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
-		case errMsg, ok := <-errChan:
+		case result := <-bootstrapCh:
+			forward(result.data, result.upstreamHeaders, result.errs, true, bootstrapDeadline)
+			return
+		case <-timeoutC:
+			msg := fmt.Errorf("upstream stream bootstrap timed out after %s", bootstrapTimeout)
+			writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
+			flusher.Flush()
+			bootstrapCancel()
+			cliCancel(msg)
+			return
+		case <-heartbeat.C:
+			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			flusher.Flush()
+		}
+	}
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	data <-chan []byte,
+	upstreamHeaders http.Header,
+	errs <-chan *interfaces.ErrorMessage,
+	setSSEHeaders func(),
+	committed bool,
+	bootstrapDeadline time.Time,
+	writeFirstChunk func([]byte),
+	forwardRest func(<-chan []byte, <-chan *interfaces.ErrorMessage),
+) {
+	var graceC <-chan time.Time
+	var graceTimer *time.Timer
+	if !committed {
+		graceTimer = time.NewTimer(responsesStreamBootstrapGrace)
+		graceC = graceTimer.C
+		defer graceTimer.Stop()
+	}
+
+	var timeoutC <-chan time.Time
+	var timeoutTimer *time.Timer
+	if !bootstrapDeadline.IsZero() {
+		timeoutTimer = time.NewTimer(time.Until(bootstrapDeadline))
+		timeoutC = timeoutTimer.C
+		defer timeoutTimer.Stop()
+	}
+
+	var heartbeat *time.Ticker
+	var heartbeatC <-chan time.Time
+	if committed {
+		heartbeat = time.NewTicker(responsesStreamBootstrapHeartbeat)
+		heartbeatC = heartbeat.C
+	}
+	defer func() {
+		if heartbeat != nil {
+			heartbeat.Stop()
+		}
+	}()
+
+	commitStream := func() {
+		if committed {
+			return
+		}
+		committed = true
+		graceC = nil
+		setSSEHeaders()
+		_, _ = c.Writer.Write([]byte(": stream-start\n\n"))
+		flusher.Flush()
+		heartbeat = time.NewTicker(responsesStreamBootstrapHeartbeat)
+		heartbeatC = heartbeat.C
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cancel(c.Request.Context().Err())
+			return
+		case <-graceC:
+			commitStream()
+		case <-timeoutC:
+			commitStream()
+			msg := fmt.Errorf("upstream stream bootstrap timed out before first chunk")
+			writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
+			flusher.Flush()
+			cancel(msg)
+			return
+		case <-heartbeatC:
+			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			flusher.Flush()
+		case errMsg, ok := <-errs:
 			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
+				errs = nil
+				if data == nil {
+					h.writeResponsesBootstrapClosedError(c, flusher, cancel, committed)
+					return
+				}
 				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
+			if committed {
+				writeResponsesStreamErrorMessage(c.Writer, errMsg)
+				flusher.Flush()
 			} else {
-				cliCancel(nil)
+				h.WriteErrorResponse(c, errMsg)
+			}
+			if errMsg != nil {
+				cancel(errMsg.Error)
+			} else {
+				cancel(nil)
 			}
 			return
-		case chunk, ok := <-dataChan:
+		case chunk, ok := <-data:
 			if !ok {
-				// Stream closed without data? Send headers and done.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
+				h.writeResponsesBootstrapClosedError(c, flusher, cancel, committed)
 				return
 			}
-
-			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write first chunk logic (matching forwardResponsesStream)
-			framer.WriteChunk(c.Writer, chunk)
+			if !committed {
+				committed = true
+				graceC = nil
+				setSSEHeaders()
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			}
+			if writeFirstChunk != nil {
+				writeFirstChunk(chunk)
+			}
 			flusher.Flush()
-
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			if forwardRest != nil {
+				forwardRest(data, errs)
+			}
 			return
 		}
 	}
+}
+
+func (h *OpenAIResponsesAPIHandler) writeResponsesBootstrapClosedError(c *gin.Context, flusher http.Flusher, cancel func(error), committed bool) {
+	err := fmt.Errorf("upstream stream closed before first chunk")
+	if committed {
+		writeResponsesStreamError(c.Writer, http.StatusBadGateway, err.Error())
+		flusher.Flush()
+	} else {
+		h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+	}
+	cancel(err)
+}
+
+func writeResponsesStreamErrorMessage(w io.Writer, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	writeResponsesStreamError(w, status, errText)
+}
+
+func writeResponsesStreamError(w io.Writer, status int, errText string) {
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	_, _ = fmt.Fprintf(w, "\nevent: error\ndata: %s\n\n", string(chunk))
 }
 
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {
@@ -596,7 +820,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 
 	modelName := gjson.GetBytes(chatJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	var param any
 
 	setSSEHeaders := func() {
@@ -606,42 +829,36 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				errChan = nil
-				continue
-			}
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			writeChatAsResponsesChunk(c, cliCtx, modelName, originalResponsesJSON, chunk, &param)
-			flusher.Flush()
-
-			h.forwardChatAsResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, cliCtx, modelName, originalResponsesJSON, &param)
-			return
-		}
-	}
+	h.handleResponsesStreamBootstrap(
+		c,
+		flusher,
+		cliCtx,
+		cliCancel,
+		func(ctx context.Context) responsesStreamBootstrapResult {
+			data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, OpenAI, modelName, chatJSON, "")
+			return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
+		},
+		setSSEHeaders,
+		func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time) {
+			h.forwardStreamAfterBootstrap(
+				c,
+				flusher,
+				func(err error) { cliCancel(err) },
+				data,
+				headers,
+				errs,
+				setSSEHeaders,
+				committed,
+				deadline,
+				func(chunk []byte) {
+					writeChatAsResponsesChunk(c, cliCtx, modelName, originalResponsesJSON, chunk, &param)
+				},
+				func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+					h.forwardChatAsResponsesStream(c, flusher, func(err error) { cliCancel(err) }, data, errs, cliCtx, modelName, originalResponsesJSON, &param)
+				},
+			)
+		},
+	)
 }
 
 func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName string, originalResponsesJSON, chunk []byte, param *any) {
