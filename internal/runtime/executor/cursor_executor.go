@@ -32,6 +32,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/http2"
 )
 
@@ -450,6 +451,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if from.String() != "" && from.String() != "openai" {
 		payload = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
 	}
+	payload = cursorNormalizeExecutionModelInOpenAIPayload(payload, req.Model)
 
 	parsed := parseOpenAIRequest(payload)
 	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
@@ -564,6 +566,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		payload = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), true)
 		log.Debugf("cursor: translated payload len=%d", len(payload))
 	}
+	payload = cursorNormalizeExecutionModelInOpenAIPayload(payload, req.Model)
 
 	parsed := parseOpenAIRequest(payload)
 	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
@@ -2057,6 +2060,18 @@ var cursorCanonicalFamiliesByID = func() map[string]cursorCanonicalFamily {
 
 var cursorUpstreamIDsWithCursorPrefix = map[string]struct{}{
 	"cursor-small": {},
+}
+
+func cursorNormalizeExecutionModelInOpenAIPayload(payload []byte, model string) []byte {
+	model = strings.TrimSpace(model)
+	if model == "" || len(payload) == 0 {
+		return payload
+	}
+	updated, err := sjson.SetBytes(payload, "model", model)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 func cursorResolveRequestedModel(model string) cursorRequestedModel {
