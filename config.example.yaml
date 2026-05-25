@@ -211,6 +211,25 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# Command Code API keys
+# commandcode-api-key:
+#   - api-key: "user_..." # Command Code API key from commandcode.ai
+#     prefix: "test" # optional: require calls like "test/deepseek/deepseek-v4-flash" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://api.commandcode.ai" # optional: override Command Code API endpoint
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "deepseek/deepseek-v4-flash" # upstream model name
+#         alias: "cc-deepseek-flash"         # client alias mapped to the upstream model
+#     excluded-models:
+#       - "gpt-5.5"       # exclude specific models (exact match)
+#       - "claude-*"      # wildcard matching prefix
+#       - "*-mini"        # wildcard matching suffix
+#       - "*deepseek*"    # wildcard matching substring
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
@@ -416,8 +435,8 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai, cursor.
+# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, commandcode-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
 # you select the protocol surface, but inference backend selection can still follow the resolved
