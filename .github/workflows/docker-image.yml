@@ -9,12 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build, e.g. v7.1.21-unstableneutron.0'
+        description: 'Existing tag to build, e.g. v7.1.21-unstableneutron.123'
         required: false
         type: string
   push:
     tags:
-      - 'v*'
+      - 'v*-unstableneutron.*'
+      - 'v*.unstableneutron.*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
