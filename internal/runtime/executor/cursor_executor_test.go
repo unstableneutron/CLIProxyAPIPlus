@@ -269,6 +269,20 @@ func TestBuildRunRequestParamsNormalizesCursorModelForUpstream(t *testing.T) {
 	}
 }
 
+func TestCursorNormalizeExecutionModelInOpenAIPayload(t *testing.T) {
+	payload := []byte(`{"model":"cursor/composer-2.5","messages":[{"role":"user","content":"hello"}]}`)
+	normalized := cursorNormalizeExecutionModelInOpenAIPayload(payload, "composer-2.5")
+	parsed := parseOpenAIRequest(normalized)
+	params := buildRunRequestParams(parsed, "conv-1")
+
+	if parsed.Model != "composer-2.5" {
+		t.Fatalf("parsed model = %q, want composer-2.5", parsed.Model)
+	}
+	if params.ModelId != "composer-2.5" {
+		t.Fatalf("ModelId = %q, want composer-2.5", params.ModelId)
+	}
+}
+
 func TestGetCursorFallbackModelsIncludePrefixedAndRawAliases(t *testing.T) {
 	models := GetCursorFallbackModels()
 	ids := make(map[string]bool, len(models))
