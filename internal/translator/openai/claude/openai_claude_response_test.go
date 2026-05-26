@@ -103,6 +103,36 @@ func lastStopReason(events []sseEvent) string {
 
 const streamReq = `{"stream":true}`
 
+func TestConvertOpenAIResponseToClaudeNonStreamPlacesThinkingBeforeText(t *testing.T) {
+	payload := []byte(`{
+		"id":"chatcmpl-test",
+		"model":"cursor-composer-2.5",
+		"choices":[{
+			"message":{"role":"assistant","content":"Visible answer.","reasoning_content":"Hidden reasoning."},
+			"finish_reason":"stop"
+		}],
+		"usage":{"prompt_tokens":3,"completion_tokens":5}
+	}`)
+
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", []byte(`{"stream":false}`), nil, payload, nil)
+	content := gjson.GetBytes(out, "content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content blocks = %d, want 2; output=%s", len(content), out)
+	}
+	if got := content[0].Get("type").String(); got != "thinking" {
+		t.Fatalf("first content block type = %q, want thinking; output=%s", got, out)
+	}
+	if got := content[0].Get("thinking").String(); got != "Hidden reasoning." {
+		t.Fatalf("thinking text = %q, want Hidden reasoning.; output=%s", got, out)
+	}
+	if got := content[1].Get("type").String(); got != "text" {
+		t.Fatalf("second content block type = %q, want text; output=%s", got, out)
+	}
+	if got := content[1].Get("text").String(); got != "Visible answer." {
+		t.Fatalf("text = %q, want Visible answer.; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponseToClaude_StreamIgnoresNullToolNameDelta(t *testing.T) {
 	originalRequest := []byte(streamReq)
 	var param any

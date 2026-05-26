@@ -113,6 +113,14 @@ func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMc
 	return false
 }
 
+func cursorStreamingTextDeltaJSON(text string) string {
+	return fmt.Sprintf(`{"content":%s}`, jsonString(text))
+}
+
+func cursorStreamingThinkingDeltaJSON(text string) string {
+	return fmt.Sprintf(`{"reasoning_content":%s}`, jsonString(text))
+}
+
 func cursorBuildNonStreamingTextCompletion(id string, created int64, model, content, reasoning string, inputTokens, outputTokens int64) []byte {
 	if outputTokens == 0 {
 		estimated := int64(len(content)+len(reasoning)) / 4
@@ -769,7 +777,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		var resumeOutCh chan cliproxyexecutor.StreamChunk
 		_ = resumeOutCh
-		thinkingActive := false
 		toolCallIndex := 0
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
@@ -777,24 +784,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
 				if isThinking {
-					if !thinkingActive {
-						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(cursorStreamingThinkingDeltaJSON(text), "")
 				} else {
-					if thinkingActive {
-						thinkingActive = false
-						sendChunkSwitchable(`{"content":"</think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(cursorStreamingTextDeltaJSON(text), "")
 				}
 			},
 			func(exec pendingMcpExec) {
-				if thinkingActive {
-					thinkingActive = false
-					sendChunkSwitchable(`{"content":"</think>"}`, "")
-				}
 				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
 					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
 				toolCallIndex++
@@ -882,9 +877,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
-		if thinkingActive {
-			sendChunkSwitchable(`{"content":"</think>"}`, "")
-		}
 		// Include token usage in the final stop chunk.
 		inputTok, outputTok := usage.get()
 		// Build the stop chunk with usage embedded in the choices array level.

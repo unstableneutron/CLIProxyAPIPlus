@@ -254,6 +254,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	auth := &cliproxyauth.Auth{
 		ID:               id,
 		Provider:         provider,
+		Prefix:           authFilePrefix(metadata),
 		FileName:         id,
 		Label:            s.labelFor(metadata),
 		Status:           status,
@@ -326,6 +327,21 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
 	return filepath.Join(dir, auth.ID), nil
+}
+
+func authFilePrefix(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	rawPrefix, ok := metadata["prefix"].(string)
+	if !ok {
+		return ""
+	}
+	trimmed := strings.Trim(strings.TrimSpace(rawPrefix), "/")
+	if trimmed == "" || strings.Contains(trimmed, "/") {
+		return ""
+	}
+	return trimmed
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {
