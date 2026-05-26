@@ -1,6 +1,39 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestFileTokenStoreListReadsAuthFilePrefix(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "cursor.json"), []byte(`{"type":"cursor","prefix":"/cursor/"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "invalid.json"), []byte(`{"type":"cursor","prefix":"team/cursor"}`), 0o600); err != nil {
+		t.Fatalf("write invalid auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+
+	byID := make(map[string]string, len(auths))
+	for _, auth := range auths {
+		byID[auth.ID] = auth.Prefix
+	}
+	if got := byID["cursor.json"]; got != "cursor" {
+		t.Fatalf("cursor.json prefix = %q, want cursor", got)
+	}
+	if got := byID["invalid.json"]; got != "" {
+		t.Fatalf("invalid.json prefix = %q, want empty", got)
+	}
+}
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()

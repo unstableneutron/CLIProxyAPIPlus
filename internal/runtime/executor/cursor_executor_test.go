@@ -12,6 +12,7 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestCursorClientVersionHeaderAllowsEnvOverride(t *testing.T) {
@@ -72,6 +73,31 @@ func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
 	}
 	if cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_missing", Content: "ok"}}, pending) {
 		t.Fatal("unexpected match for unknown tool call id")
+	}
+}
+
+func TestCursorStreamingThinkingDeltaUsesReasoningContent(t *testing.T) {
+	delta := cursorStreamingThinkingDeltaJSON("thinking text")
+
+	if strings.Contains(delta, "<think>") || strings.Contains(delta, "</think>") {
+		t.Fatalf("thinking delta must not be encoded as visible tags: %s", delta)
+	}
+	if gjson.Get(delta, "content").Exists() {
+		t.Fatalf("thinking delta content exists = %s, want reasoning_content only", delta)
+	}
+	if got := gjson.Get(delta, "reasoning_content").String(); got != "thinking text" {
+		t.Fatalf("reasoning_content = %q, want thinking text (delta=%s)", got, delta)
+	}
+}
+
+func TestCursorStreamingTextDeltaUsesContent(t *testing.T) {
+	delta := cursorStreamingTextDeltaJSON("visible text")
+
+	if got := gjson.Get(delta, "content").String(); got != "visible text" {
+		t.Fatalf("content = %q, want visible text (delta=%s)", got, delta)
+	}
+	if gjson.Get(delta, "reasoning_content").Exists() {
+		t.Fatalf("text delta reasoning_content exists = %s, want content only", delta)
 	}
 }
 
@@ -388,7 +414,7 @@ func TestParseModelsResponsePrefixesRemoteIDsAndAddsRawAliases(t *testing.T) {
 			t.Fatalf("expanded model aliases missing %q; got ids=%v", id, ids)
 		}
 	}
-	for _, id := range []string{"small", "cursor-cursor-small"} {
+	for _, id := range []string{"small", "cursor-cursor-small", "cursor/composer-2.5", "cursor/cursor-small"} {
 		if ids[id] {
 			t.Fatalf("expanded model aliases unexpectedly contained %q; got ids=%v", id, ids)
 		}

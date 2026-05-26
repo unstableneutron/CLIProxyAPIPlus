@@ -66,3 +66,35 @@ func TestRegisterLoadedAuthModelsRegistersCursorModelsAfterStoreLoad(t *testing.
 		t.Fatalf("expected prefixed and raw Cursor model aliases after startup registration, got %+v", models)
 	}
 }
+
+func TestRegisterLoadedAuthModelsAppliesConfiguredCursorPrefix(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "cursor-prefixed-startup.json",
+		Provider: "cursor",
+		Prefix:   "cursor",
+		Status:   coreauth.StatusActive,
+	}
+	manager := coreauth.NewManager(&serviceStartupMemoryStore{auths: []*coreauth.Auth{auth}}, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("manager.Load() error = %v", err)
+	}
+
+	service.registerLoadedAuthModels(context.Background())
+
+	models := reg.GetModelsForClient(auth.ID)
+	ids := make(map[string]bool, len(models))
+	for _, model := range models {
+		ids[model.ID] = true
+	}
+	for _, id := range []string{"composer-2.5", "cursor-composer-2.5", "cursor/composer-2.5", "cursor/cursor-composer-2.5"} {
+		if !ids[id] {
+			t.Fatalf("expected configured prefix model %q, got %+v", id, models)
+		}
+	}
+}
