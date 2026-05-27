@@ -58,23 +58,26 @@ type CursorExecutor struct {
 
 // savedCheckpoint stores the server's conversation_checkpoint_update for reuse.
 type savedCheckpoint struct {
-	data      []byte            // raw ConversationStateStructure protobuf bytes
-	blobStore map[string][]byte // blobs referenced by the checkpoint
-	authID    string            // auth that produced this checkpoint (checkpoint is auth-specific)
-	updatedAt time.Time
+	data               []byte            // raw ConversationStateStructure protobuf bytes
+	blobStore          map[string][]byte // blobs referenced by the checkpoint
+	authID             string            // auth that produced this checkpoint (checkpoint is auth-specific)
+	executionSessionID string            // downstream execution session that owns this checkpoint, when known
+	updatedAt          time.Time
 }
 
 type cursorSession struct {
-	stream       *cursorproto.H2Stream
-	blobStore    map[string][]byte
-	mcpTools     []cursorproto.McpToolDef
-	pending      []pendingMcpExec
-	cancel       context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
-	createdAt    time.Time
-	authID       string                                     // auth file ID that created this session (for multi-account isolation)
-	toolResultCh chan []toolResultInfo                      // receives tool results from the next HTTP request
-	resumeOutCh  chan cliproxyexecutor.StreamChunk          // output channel for resumed response
-	switchOutput func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
+	stream             *cursorproto.H2Stream
+	blobStore          map[string][]byte
+	mcpTools           []cursorproto.McpToolDef
+	pending            []pendingMcpExec
+	cancel             context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
+	createdAt          time.Time
+	authID             string // auth file ID that created this session (for multi-account isolation)
+	conversationID     string
+	executionSessionID string
+	toolResultCh       chan []toolResultInfo                      // receives tool results from the next HTTP request
+	resumeOutCh        chan cliproxyexecutor.StreamChunk          // output channel for resumed response
+	switchOutput       func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
 }
 
 type pendingMcpExec struct {
@@ -260,18 +263,68 @@ func (e *CursorExecutor) Identifier() string { return cursorAuthType }
 
 // CloseExecutionSession implements ExecutionSessionCloser.
 func (e *CursorExecutor) CloseExecutionSession(sessionID string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if sessionID == cliproxyauth.CloseAllExecutionSessionsID {
-		for k, s := range e.sessions {
-			s.cancel()
-			delete(e.sessions, k)
-		}
+	if e == nil {
 		return
 	}
-	if s, ok := e.sessions[sessionID]; ok {
-		s.cancel()
-		delete(e.sessions, sessionID)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+
+	var sessionsToClose []*cursorSession
+	e.mu.Lock()
+	if sessionID == cliproxyauth.CloseAllExecutionSessionsID {
+		for k, s := range e.sessions {
+			sessionsToClose = append(sessionsToClose, s)
+			delete(e.sessions, k)
+		}
+		for k := range e.checkpoints {
+			delete(e.checkpoints, k)
+		}
+	} else {
+		conversationIDFromKey := cursorConversationIDFromSessionKey(sessionID)
+		for k, s := range e.sessions {
+			if s == nil {
+				continue
+			}
+			if k == sessionID || s.conversationID == sessionID || s.executionSessionID == sessionID {
+				sessionsToClose = append(sessionsToClose, s)
+				if s.conversationID != "" {
+					delete(e.checkpoints, s.conversationID)
+				}
+				delete(e.sessions, k)
+			}
+		}
+		for k, cp := range e.checkpoints {
+			if k == sessionID || k == conversationIDFromKey || (cp != nil && cp.executionSessionID == sessionID) {
+				delete(e.checkpoints, k)
+			}
+		}
+	}
+	e.mu.Unlock()
+
+	closeCursorSessions(sessionsToClose)
+}
+
+func cursorConversationIDFromSessionKey(sessionID string) string {
+	idx := strings.LastIndexByte(sessionID, ':')
+	if idx < 0 || idx == len(sessionID)-1 {
+		return ""
+	}
+	return sessionID[idx+1:]
+}
+
+func closeCursorSessions(sessions []*cursorSession) {
+	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.stream != nil {
+			s.stream.Close()
+		}
 	}
 }
 
@@ -279,19 +332,21 @@ func (e *CursorExecutor) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
+		var sessionsToClose []*cursorSession
 		e.mu.Lock()
 		for k, s := range e.sessions {
-			if time.Since(s.createdAt) > cursorSessionTTL {
-				s.cancel()
+			if s != nil && time.Since(s.createdAt) > cursorSessionTTL {
+				sessionsToClose = append(sessionsToClose, s)
 				delete(e.sessions, k)
 			}
 		}
 		for k, cp := range e.checkpoints {
-			if time.Since(cp.updatedAt) > cursorCheckpointTTL {
+			if cp != nil && time.Since(cp.updatedAt) > cursorCheckpointTTL {
 				delete(e.checkpoints, k)
 			}
 		}
 		e.mu.Unlock()
+		closeCursorSessions(sessionsToClose)
 	}
 }
 
@@ -466,8 +521,8 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	flattenConversationIntoUserText(parsed)
-	ccSessId := extractClaudeCodeSessionId(req.Payload)
-	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
+	conversation := resolveCursorConversation(apiKeyFromContext(ctx), parsed.SystemPrompt, req, opts, payload)
+	conversationId := conversation.ConversationID
 	params := buildRunRequestParams(parsed, conversationId)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
@@ -555,12 +610,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, fmt.Errorf("cursor: access token not found")
 	}
 
-	// Extract session_id from metadata BEFORE translation (translation strips metadata)
-	ccSessionId := extractClaudeCodeSessionId(req.Payload)
-	if ccSessionId == "" && len(opts.OriginalRequest) > 0 {
-		ccSessionId = extractClaudeCodeSessionId(opts.OriginalRequest)
-	}
-
 	// Translate input to OpenAI format if needed
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -583,9 +632,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
-	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
+	conversation := resolveCursorConversation(apiKeyFromContext(ctx), parsed.SystemPrompt, req, opts, originalPayload, payload)
+	conversationId := conversation.ConversationID
 	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
-	log.Debugf("cursor: conversationId=%s authID=%s", conversationId, authID)
+	log.Debugf("cursor: conversationId=%s authID=%s sessionSource=%s", conversationId, authID, conversation.SessionSource)
 
 	// Session key includes authID (H2 stream is auth-specific, not transferable).
 	// Checkpoint key uses conversationId only — allows detecting auth migration.
@@ -595,6 +645,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Check if we can resume an existing session with tool results
 	if len(parsed.ToolResults) > 0 {
+		var staleSessionsToClose []*cursorSession
 		e.mu.Lock()
 		session, hasSession := e.sessions[sessionKey]
 		if hasSession {
@@ -606,15 +657,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if !hasSession {
 			if oldKey := e.findSessionByConversationLocked(conversationId); oldKey != "" {
 				oldSession := e.sessions[oldKey]
-				log.Infof("cursor: cleaning up stale session from auth %s for conv=%s (auth migrated to %s)", oldSession.authID, conversationId, authID)
-				oldSession.cancel()
-				if oldSession.stream != nil {
-					oldSession.stream.Close()
+				if oldSession != nil {
+					log.Infof("cursor: cleaning up stale session from auth %s for conv=%s (auth migrated to %s)", oldSession.authID, conversationId, authID)
+					staleSessionsToClose = append(staleSessionsToClose, oldSession)
 				}
 				delete(e.sessions, oldKey)
 			}
 		}
 		e.mu.Unlock()
+		closeCursorSessions(staleSessionsToClose)
 
 		if hasSession && session.stream != nil && session.authID == authID {
 			if !cursorToolResultsMatchPending(parsed.ToolResults, session.pending) {
@@ -632,19 +683,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Clean up any stale session for this key (or from a previous auth on same conversation)
+	var oldSessionsToClose []*cursorSession
 	e.mu.Lock()
 	if old, ok := e.sessions[sessionKey]; ok {
-		old.cancel()
+		oldSessionsToClose = append(oldSessionsToClose, old)
 		delete(e.sessions, sessionKey)
 	} else if oldKey := e.findSessionByConversationLocked(conversationId); oldKey != "" {
-		old := e.sessions[oldKey]
-		old.cancel()
-		if old.stream != nil {
-			old.stream.Close()
-		}
+		oldSessionsToClose = append(oldSessionsToClose, e.sessions[oldKey])
 		delete(e.sessions, oldKey)
 	}
 	e.mu.Unlock()
+	closeCursorSessions(oldSessionsToClose)
 
 	// Look up saved checkpoint for this conversation (keyed by conversationId only).
 	// Checkpoint is auth-specific: if auth changed (e.g. quota exhaustion failover),
@@ -810,15 +859,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
 				e.mu.Lock()
 				e.sessions[sessionKey] = &cursorSession{
-					stream:       stream,
-					blobStore:    params.BlobStore,
-					mcpTools:     params.McpTools,
-					pending:      []pendingMcpExec{exec},
-					cancel:       sessionCancel,
-					createdAt:    time.Now(),
-					authID:       authID,
-					toolResultCh: toolResultCh, // reuse same channel across rounds
-					resumeOutCh:  resumeOut,
+					stream:             stream,
+					blobStore:          params.BlobStore,
+					mcpTools:           params.McpTools,
+					pending:            []pendingMcpExec{exec},
+					cancel:             sessionCancel,
+					createdAt:          time.Now(),
+					authID:             authID,
+					conversationID:     conversationId,
+					executionSessionID: conversation.ExecutionSessionID,
+					toolResultCh:       toolResultCh, // reuse same channel across rounds
+					resumeOutCh:        resumeOut,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
 						outMu.Lock()
 						currentOut = ch
@@ -843,10 +894,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// Save checkpoint keyed by conversationId, tagged with authID for migration detection
 				e.mu.Lock()
 				e.checkpoints[checkpointKey] = &savedCheckpoint{
-					data:      cpData,
-					blobStore: params.BlobStore,
-					authID:    authID,
-					updatedAt: time.Now(),
+					data:               cpData,
+					blobStore:          params.BlobStore,
+					authID:             authID,
+					executionSessionID: conversation.ExecutionSessionID,
+					updatedAt:          time.Now(),
 				}
 				e.mu.Unlock()
 				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
@@ -1881,13 +1933,130 @@ func extractCCH(systemPrompt string) string {
 // extractClaudeCodeSessionId extracts session_id from Claude Code's metadata.user_id JSON.
 // Format: {"metadata":{"user_id":"{\"session_id\":\"xxx\",\"device_id\":\"yyy\"}"}}
 func extractClaudeCodeSessionId(payload []byte) string {
-	userIdStr := gjson.GetBytes(payload, "metadata.user_id").String()
-	if userIdStr == "" {
+	userIDStr := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	if userIDStr == "" {
 		return ""
 	}
-	// user_id is a JSON string that needs to be parsed again
-	sid := gjson.Get(userIdStr, "session_id").String()
-	return sid
+	// user_id is a JSON string that needs to be parsed again.
+	if strings.HasPrefix(userIDStr, "{") {
+		return strings.TrimSpace(gjson.Get(userIDStr, "session_id").String())
+	}
+	// Older Claude-style values may end with _session_{uuid}.
+	const marker = "_session_"
+	if idx := strings.LastIndex(userIDStr, marker); idx >= 0 {
+		return strings.TrimSpace(userIDStr[idx+len(marker):])
+	}
+	return ""
+}
+
+type cursorConversationResolution struct {
+	ConversationID     string
+	SessionID          string
+	SessionSource      string
+	ExecutionSessionID string
+}
+
+func resolveCursorConversation(apiKey, systemPrompt string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payloads ...[]byte) cursorConversationResolution {
+	executionSessionID := cursorExecutionSessionID(opts.Metadata)
+	sessionID, source := cursorSessionIDFromRequest(req, opts, executionSessionID, payloads...)
+	return cursorConversationResolution{
+		ConversationID:     deriveConversationId(apiKey, sessionID, systemPrompt),
+		SessionID:          sessionID,
+		SessionSource:      source,
+		ExecutionSessionID: executionSessionID,
+	}
+}
+
+func cursorExecutionSessionID(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	raw, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return ""
+	}
+}
+
+func cursorSessionIDFromRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, executionSessionID string, payloads ...[]byte) (string, string) {
+	candidates := cursorPayloadCandidates(req, opts, payloads...)
+
+	for _, payload := range candidates {
+		if sid := extractClaudeCodeSessionId(payload); sid != "" {
+			return sid, "metadata.user_id.session_id"
+		}
+	}
+	if executionSessionID != "" {
+		return "execution:" + executionSessionID, cliproxyexecutor.ExecutionSessionMetadataKey
+	}
+	if sid := firstCursorPayloadString(candidates, "prompt_cache_key"); sid != "" {
+		return "prompt_cache:" + sid, "prompt_cache_key"
+	}
+	if sid := cursorHeaderValue(opts.Headers, "X-Session-ID"); sid != "" {
+		return "header:" + sid, "X-Session-ID"
+	}
+	if sid := cursorHeaderValue(opts.Headers, "Session_id"); sid != "" {
+		return "codex:" + sid, "Session_id"
+	}
+	if sid := cursorHeaderValue(opts.Headers, "X-Amp-Thread-Id"); sid != "" {
+		return "amp:" + sid, "X-Amp-Thread-Id"
+	}
+	if sid := cursorHeaderValue(opts.Headers, "X-Client-Request-Id"); sid != "" {
+		return "clientreq:" + sid, "X-Client-Request-Id"
+	}
+	if sid := firstCursorPayloadString(candidates, "conversation_id"); sid != "" {
+		return "conv:" + sid, "conversation_id"
+	}
+	if sid := firstCursorPayloadString(candidates, "session_id"); sid != "" {
+		return "body_session:" + sid, "session_id"
+	}
+	return "", "system_prompt_hash"
+}
+
+func cursorPayloadCandidates(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payloads ...[]byte) [][]byte {
+	candidates := make([][]byte, 0, 2+len(payloads))
+	add := func(payload []byte) {
+		if len(payload) == 0 {
+			return
+		}
+		for _, candidate := range candidates {
+			if len(candidate) == len(payload) && &candidate[0] == &payload[0] {
+				return
+			}
+		}
+		candidates = append(candidates, payload)
+	}
+	add(req.Payload)
+	add(opts.OriginalRequest)
+	for _, payload := range payloads {
+		add(payload)
+	}
+	return candidates
+}
+
+func firstCursorPayloadString(payloads [][]byte, path string) string {
+	for _, payload := range payloads {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func cursorHeaderValue(headers http.Header, key string) string {
+	if headers == nil {
+		return ""
+	}
+	return strings.TrimSpace(headers.Get(key))
 }
 
 // deriveConversationId generates a deterministic conversation_id.
