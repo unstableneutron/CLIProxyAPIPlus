@@ -12,6 +12,7 @@ import (
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -60,6 +61,197 @@ func TestCursorBuildNonStreamingTextCompletionIncludesReasoningAndUsage(t *testi
 	}
 	if decoded.Usage.CompletionTokensDetails.ReasoningTokens == 0 {
 		t.Fatal("reasoning_tokens = 0, want non-zero")
+	}
+}
+
+func TestCursorConversationIDUsesExecutionSessionMetadata(t *testing.T) {
+	req := cliproxyexecutor.Request{Payload: []byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[
+			{"role":"system","content":"same system prompt"},
+			{"role":"user","content":"hello"}
+		]
+	}`)}
+	optsA := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "ws-session-a",
+	}}
+	optsB := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "ws-session-b",
+	}}
+
+	gotA := resolveCursorConversation("api-key", "same system prompt", req, optsA)
+	gotB := resolveCursorConversation("api-key", "same system prompt", req, optsB)
+	fallback := resolveCursorConversation("api-key", "same system prompt", req, cliproxyexecutor.Options{})
+
+	if gotA.ConversationID == gotB.ConversationID {
+		t.Fatalf("conversation IDs matched for different execution sessions: %q", gotA.ConversationID)
+	}
+	if gotA.ConversationID == fallback.ConversationID || gotB.ConversationID == fallback.ConversationID {
+		t.Fatalf("execution sessions fell back to system prompt hash: a=%q b=%q fallback=%q", gotA.ConversationID, gotB.ConversationID, fallback.ConversationID)
+	}
+	if gotA.ExecutionSessionID != "ws-session-a" || gotB.ExecutionSessionID != "ws-session-b" {
+		t.Fatalf("execution session tags = %q/%q, want ws-session-a/ws-session-b", gotA.ExecutionSessionID, gotB.ExecutionSessionID)
+	}
+}
+
+func TestCursorConversationIDPrefersClaudeSessionMetadata(t *testing.T) {
+	req := cliproxyexecutor.Request{Payload: []byte(`{
+		"metadata":{"user_id":"{\"session_id\":\"claude-session\",\"device_id\":\"device\"}"},
+		"prompt_cache_key":"cache-session",
+		"messages":[{"role":"user","content":"hello"}]
+	}`)}
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Session-Id": []string{"header-session"},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "execution-session",
+		},
+	}
+
+	got := resolveCursorConversation("api-key", "system", req, opts)
+	wantConversationID := deriveConversationId("api-key", "claude-session", "system")
+
+	if got.ConversationID != wantConversationID {
+		t.Fatalf("ConversationID = %q, want explicit Claude session %q", got.ConversationID, wantConversationID)
+	}
+	if got.SessionSource != "metadata.user_id.session_id" {
+		t.Fatalf("SessionSource = %q, want metadata.user_id.session_id", got.SessionSource)
+	}
+	if got.ExecutionSessionID != "execution-session" {
+		t.Fatalf("ExecutionSessionID = %q, want execution-session", got.ExecutionSessionID)
+	}
+}
+
+func TestCursorConversationIDUsesStableSessionHeaders(t *testing.T) {
+	req := cliproxyexecutor.Request{Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+
+	for _, headerName := range []string{"X-Session-ID", "Session_id"} {
+		t.Run(headerName, func(t *testing.T) {
+			headersA := make(http.Header)
+			headersA.Set(headerName, "stable-session")
+			headersB := make(http.Header)
+			headersB.Set(headerName, "stable-session")
+			headersC := make(http.Header)
+			headersC.Set(headerName, "other-session")
+			optsA := cliproxyexecutor.Options{Headers: headersA}
+			optsB := cliproxyexecutor.Options{Headers: headersB}
+			optsC := cliproxyexecutor.Options{Headers: headersC}
+
+			gotA := resolveCursorConversation("api-key", "system", req, optsA)
+			gotB := resolveCursorConversation("api-key", "system", req, optsB)
+			gotC := resolveCursorConversation("api-key", "system", req, optsC)
+
+			if gotA.ConversationID != gotB.ConversationID {
+				t.Fatalf("same %s produced different conversation IDs: %q vs %q", headerName, gotA.ConversationID, gotB.ConversationID)
+			}
+			if gotA.ConversationID == gotC.ConversationID {
+				t.Fatalf("different %s values produced same conversation ID: %q", headerName, gotA.ConversationID)
+			}
+		})
+	}
+}
+
+func TestCursorCloseExecutionSessionRemovesTaggedSessionsAndCheckpoints(t *testing.T) {
+	exec := &CursorExecutor{
+		sessions:    make(map[string]*cursorSession),
+		checkpoints: make(map[string]*savedCheckpoint),
+	}
+	canceled := 0
+	exec.sessions["auth-a:conv-a"] = &cursorSession{
+		conversationID:     "conv-a",
+		executionSessionID: "execution-a",
+		cancel: func() {
+			canceled++
+		},
+	}
+	exec.sessions["auth-b:conv-b"] = &cursorSession{
+		conversationID:     "conv-b",
+		executionSessionID: "execution-b",
+		cancel: func() {
+			canceled++
+		},
+	}
+	exec.checkpoints["conv-a"] = &savedCheckpoint{executionSessionID: "execution-a"}
+	exec.checkpoints["conv-b"] = &savedCheckpoint{executionSessionID: "execution-b"}
+
+	exec.CloseExecutionSession("execution-a")
+
+	if _, ok := exec.sessions["auth-a:conv-a"]; ok {
+		t.Fatal("session tagged with execution-a was not removed")
+	}
+	if _, ok := exec.checkpoints["conv-a"]; ok {
+		t.Fatal("checkpoint tagged with execution-a was not removed")
+	}
+	if _, ok := exec.sessions["auth-b:conv-b"]; !ok {
+		t.Fatal("session tagged with execution-b was removed")
+	}
+	if _, ok := exec.checkpoints["conv-b"]; !ok {
+		t.Fatal("checkpoint tagged with execution-b was removed")
+	}
+	if canceled != 1 {
+		t.Fatalf("canceled = %d, want 1", canceled)
+	}
+}
+
+func TestCursorCloseExecutionSessionBySessionKeyRemovesCheckpoint(t *testing.T) {
+	exec := &CursorExecutor{
+		sessions:    make(map[string]*cursorSession),
+		checkpoints: make(map[string]*savedCheckpoint),
+	}
+	canceled := 0
+	exec.sessions["auth-a:conv-a"] = &cursorSession{
+		conversationID:     "conv-a",
+		executionSessionID: "execution-a",
+		cancel: func() {
+			canceled++
+		},
+	}
+	exec.sessions["auth-b:conv-b"] = &cursorSession{
+		conversationID:     "conv-b",
+		executionSessionID: "execution-b",
+		cancel: func() {
+			canceled++
+		},
+	}
+	exec.checkpoints["conv-a"] = &savedCheckpoint{executionSessionID: "execution-a"}
+	exec.checkpoints["conv-b"] = &savedCheckpoint{executionSessionID: "execution-b"}
+
+	exec.CloseExecutionSession("auth-a:conv-a")
+
+	if _, ok := exec.sessions["auth-a:conv-a"]; ok {
+		t.Fatal("session keyed by auth-a:conv-a was not removed")
+	}
+	if _, ok := exec.checkpoints["conv-a"]; ok {
+		t.Fatal("checkpoint for conv-a was not removed")
+	}
+	if _, ok := exec.sessions["auth-b:conv-b"]; !ok {
+		t.Fatal("session keyed by auth-b:conv-b was removed")
+	}
+	if _, ok := exec.checkpoints["conv-b"]; !ok {
+		t.Fatal("checkpoint for conv-b was removed")
+	}
+	if canceled != 1 {
+		t.Fatalf("canceled = %d, want 1", canceled)
+	}
+}
+
+func TestCursorPayloadCandidatesDeduplicateExactSliceReferences(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	copyOfPayload := append([]byte(nil), payload...)
+	req := cliproxyexecutor.Request{Payload: payload}
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	candidates := cursorPayloadCandidates(req, opts, payload, copyOfPayload)
+
+	if got, want := len(candidates), 2; got != want {
+		t.Fatalf("len(candidates) = %d, want %d", got, want)
+	}
+	if &candidates[0][0] != &payload[0] {
+		t.Fatal("first candidate is not the original payload slice")
+	}
+	if &candidates[1][0] != &copyOfPayload[0] {
+		t.Fatal("second candidate is not the independent payload copy")
 	}
 }
 
