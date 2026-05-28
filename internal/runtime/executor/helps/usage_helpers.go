@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -26,7 +29,12 @@ type UsageReporter struct {
 	authType    string
 	apiKey      string
 	source      string
+	reasoning   string
 	requestedAt time.Time
+	ttftMu      sync.RWMutex
+	ttft        time.Duration
+	ttftStart   time.Time
+	ttftSet     bool
 	once        sync.Once
 }
 
@@ -44,6 +52,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 		authType:    resolveUsageAuthType(auth),
+		reasoning:   usage.ReasoningEffortFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -62,6 +71,71 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 		return
 	}
 	r.publishRecord(ctx, record)
+}
+
+func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	if r == nil {
+		return
+	}
+	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+}
+
+func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
+	if r == nil || client == nil {
+		return client
+	}
+	tracked := *client
+	transport := tracked.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	tracked.Transport = usageTTFTRoundTripper{
+		base:     transport,
+		reporter: r,
+	}
+	return &tracked
+}
+
+func (r *UsageReporter) ObserveResponse(resp *http.Response) {
+	if r == nil || resp == nil || resp.Body == nil {
+		return
+	}
+	r.StartResponseTTFT()
+	resp.Body = &usageTTFTReadCloser{
+		ReadCloser: resp.Body,
+		mark: func() {
+			r.MarkFirstResponseByte()
+		},
+	}
+}
+
+func (r *UsageReporter) StartResponseTTFT() {
+	if r == nil {
+		return
+	}
+	r.ttftMu.Lock()
+	if !r.ttftSet && r.ttftStart.IsZero() {
+		r.ttftStart = time.Now()
+	}
+	r.ttftMu.Unlock()
+}
+
+func (r *UsageReporter) MarkFirstResponseByte() {
+	if r == nil {
+		return
+	}
+	r.ttftMu.Lock()
+	if r.ttftSet {
+		r.ttftMu.Unlock()
+		return
+	}
+	start := r.ttftStart
+	r.ttftStart = time.Time{}
+	r.ttftMu.Unlock()
+	if start.IsZero() {
+		return
+	}
+	r.setTTFT(time.Since(start))
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -156,19 +230,21 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Alias:       r.alias,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Fail:        fail,
-		Detail:      detail,
+		Provider:        r.provider,
+		Model:           model,
+		Alias:           r.alias,
+		Source:          r.source,
+		APIKey:          r.apiKey,
+		AuthID:          r.authID,
+		AuthIndex:       r.authIndex,
+		AuthType:        r.authType,
+		ReasoningEffort: r.reasoning,
+		RequestedAt:     r.requestedAt,
+		Latency:         r.latency(),
+		TTFT:            r.ttftDuration(),
+		Failed:          failed,
+		Fail:            fail,
+		Detail:          detail,
 	}
 }
 
@@ -198,6 +274,65 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func (r *UsageReporter) setTTFT(ttft time.Duration) {
+	if r == nil {
+		return
+	}
+	if ttft < 0 {
+		ttft = 0
+	}
+	r.ttftMu.Lock()
+	if r.ttftSet {
+		r.ttftMu.Unlock()
+		return
+	}
+	r.ttft = ttft
+	r.ttftSet = true
+	r.ttftStart = time.Time{}
+	r.ttftMu.Unlock()
+}
+
+func (r *UsageReporter) ttftDuration() time.Duration {
+	if r == nil {
+		return 0
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.ttft
+}
+
+type usageTTFTRoundTripper struct {
+	base     http.RoundTripper
+	reporter *UsageReporter
+}
+
+func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.reporter.StartResponseTTFT()
+	resp, errRoundTrip := t.base.RoundTrip(req)
+	if errRoundTrip != nil {
+		return resp, errRoundTrip
+	}
+	t.reporter.ObserveResponse(resp)
+	return resp, nil
+}
+
+type usageTTFTReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	mark func()
+}
+
+func (r *usageTTFTReadCloser) Read(p []byte) (int, error) {
+	if r == nil || r.ReadCloser == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, errRead := r.ReadCloser.Read(p)
+	if n > 0 && r.mark != nil {
+		r.once.Do(r.mark)
+	}
+	return n, errRead
 }
 
 func APIKeyFromContext(ctx context.Context) string {
