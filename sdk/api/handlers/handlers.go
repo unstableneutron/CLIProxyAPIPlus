@@ -955,14 +955,24 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
-	// Fallback: if baseModel has no provider but differs from resolvedModelName,
-	// try using the full model name. This handles edge cases where custom models
-	// may be registered with their full suffixed name (e.g., "my-model(8192)").
-	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
-	// custom model registrations that include thinking suffixes.
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+	if strings.HasPrefix(baseModel, "cursor/") {
+		providers = []string{"cursor"}
+		strippedModel := routeModelBaseName(baseModel)
+		if parsed.HasSuffix {
+			resolvedModelName = fmt.Sprintf("%s(%s)", strippedModel, parsed.RawSuffix)
+		} else {
+			resolvedModelName = strippedModel
+		}
+	} else {
+		providers = util.GetProviderName(baseModel)
+		// Fallback: if baseModel has no provider but differs from resolvedModelName,
+		// try using the full model name. This handles edge cases where custom models
+		// may be registered with their full suffixed name (e.g., "my-model(8192)").
+		// Evaluated in Story 11.8: This fallback is intentionally preserved to support
+		// custom model registrations that include thinking suffixes.
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = util.GetProviderName(resolvedModelName)
+		}
 	}
 
 	if len(providers) == 0 {
