@@ -246,6 +246,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+}
+
 // headersFromContext extracts the original HTTP request headers from the gin context
 // embedded in the provided context. This allows session affinity selectors to read
 // client headers like X-Amp-Thread-Id.
@@ -566,6 +577,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -614,6 +626,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -675,6 +688,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
