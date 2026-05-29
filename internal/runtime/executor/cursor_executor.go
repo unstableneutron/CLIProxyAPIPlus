@@ -116,6 +116,28 @@ func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMc
 	return false
 }
 
+func cursorCanResumeToolSession(session *cursorSession, authID string, results []toolResultInfo, streamDone bool) bool {
+	if session == nil || streamDone {
+		return false
+	}
+	if session.authID != authID {
+		return false
+	}
+	return cursorToolResultsMatchPending(results, session.pending)
+}
+
+func cursorH2StreamDone(stream *cursorproto.H2Stream) bool {
+	if stream == nil {
+		return true
+	}
+	select {
+	case <-stream.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func cursorStreamingTextDeltaJSON(text string) string {
 	return fmt.Sprintf(`{"content":%s}`, jsonString(text))
 }
@@ -667,18 +689,21 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		closeCursorSessions(staleSessionsToClose)
 
-		if hasSession && session.stream != nil && session.authID == authID {
-			if !cursorToolResultsMatchPending(parsed.ToolResults, session.pending) {
-				log.Warnf("cursor: session %s has no pending call matching %d tool results; falling back to cold resume", sessionKey, len(parsed.ToolResults))
-				session.cancel()
-				session.stream.Close()
+		if hasSession && session != nil {
+			streamDone := cursorH2StreamDone(session.stream)
+			if !cursorCanResumeToolSession(session, authID, parsed.ToolResults, streamDone) {
+				log.Warnf("cursor: session %s is not resumable (auth=%s streamDone=%t pending=%d results=%d); falling back to cold resume",
+					sessionKey, session.authID, streamDone, len(session.pending), len(parsed.ToolResults))
+				closeCursorSessions([]*cursorSession{session})
 			} else {
 				log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
-				return e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+				result, resumeErr := e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+				if resumeErr == nil {
+					return result, nil
+				}
+				log.Warnf("cursor: failed to resume session %s: %v; falling back to cold resume", sessionKey, resumeErr)
+				closeCursorSessions([]*cursorSession{session})
 			}
-		}
-		if hasSession && session.authID != authID {
-			log.Warnf("cursor: session %s belongs to auth %s, but request is from %s — skipping resume", sessionKey, session.authID, authID)
 		}
 	}
 
@@ -991,6 +1016,9 @@ func (e *CursorExecutor) resumeWithToolResults(
 	if session.resumeOutCh == nil {
 		return nil, fmt.Errorf("cursor: session has no resumeOutCh")
 	}
+	if cursorH2StreamDone(session.stream) {
+		return nil, fmt.Errorf("cursor: session stream is no longer active")
+	}
 
 	log.Debugf("cursor: resumeWithToolResults: switching output to resumeOutCh and injecting results")
 
@@ -1001,8 +1029,14 @@ func (e *CursorExecutor) resumeWithToolResults(
 		session.switchOutput(session.resumeOutCh)
 	}
 
-	// Inject tool results — this unblocks the waiting processH2SessionFrames
-	session.toolResultCh <- parsed.ToolResults
+	// Inject tool results — this unblocks the waiting processH2SessionFrames.
+	select {
+	case session.toolResultCh <- parsed.ToolResults:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-session.stream.Done():
+		return nil, fmt.Errorf("cursor: session stream closed before tool result injection")
+	}
 
 	// Return the resumeOutCh for the new HTTP handler to read from
 	return &cliproxyexecutor.StreamResult{Chunks: session.resumeOutCh}, nil
@@ -1323,13 +1357,14 @@ func processH2SessionFrames(
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
-							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
+						toolName := cursorOpenAIToolNameForMcpTool(msg.McpToolName, mcpTools)
+						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s cursorToolName=%s toolCallId=%s",
+							msg.ExecMsgId, msg.ExecId, toolName, msg.McpToolName, toolCallId)
 						pending := pendingMcpExec{
 							ExecMsgId:  msg.ExecMsgId,
 							ExecId:     msg.ExecId,
 							ToolCallId: toolCallId,
-							ToolName:   msg.McpToolName,
+							ToolName:   toolName,
 							Args:       decodedArgs,
 						}
 						onMcpExec(pending)
@@ -1855,14 +1890,37 @@ func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *
 		BlobStore:       make(map[string][]byte),
 	}
 
-	// Convert OpenAI tools to McpToolDefs
+	usedToolNames := cursorOpenAIToolNames(parsed.Tools)
+	aliases := make([]cursorToolAlias, 0, len(parsed.Tools))
+
+	// Convert OpenAI tools to Cursor MCP tool definitions. Prefix every
+	// Cursor-facing MCP name so neither current nor future Cursor-native tool
+	// names (web_search/read/grep/etc.) can steal the model's tool selection.
+	// The original OpenAI name is restored before emitting tool_calls.
 	for _, tool := range parsed.Tools {
+		if tool.Get("type").String() != "function" {
+			continue
+		}
 		fn := tool.Get("function")
+		originalName := strings.TrimSpace(fn.Get("name").String())
+		if originalName == "" {
+			continue
+		}
+		cursorName := cursorUniqueOpenAIToolAlias(originalName, usedToolNames)
+		aliases = append(aliases, cursorToolAlias{Original: originalName, Alias: cursorName})
+
+		description := cursorAliasToolDescription(originalName, cursorName, fn.Get("description").String())
 		params.McpTools = append(params.McpTools, cursorproto.McpToolDef{
-			Name:        fn.Get("name").String(),
-			Description: fn.Get("description").String(),
-			InputSchema: json.RawMessage(fn.Get("parameters").Raw),
+			Name:         cursorName,
+			Description:  description,
+			InputSchema:  json.RawMessage(fn.Get("parameters").Raw),
+			OriginalName: originalName,
 		})
+	}
+
+	if instruction := cursorToolAliasInstruction(aliases); instruction != "" {
+		params.SystemPrompt = cursorAppendInstruction(params.SystemPrompt, instruction)
+		params.UserText = cursorAppendInstruction(instruction, params.UserText)
 	}
 
 	return params
@@ -2153,6 +2211,79 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 	}
 	b, _ := json.Marshal(result)
 	return string(b)
+}
+
+type cursorToolAlias struct {
+	Original string
+	Alias    string
+}
+
+const cursorOpenAIToolAliasPrefix = "mcp__"
+
+func cursorOpenAIToolNames(tools []gjson.Result) map[string]struct{} {
+	used := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Get("function.name").String())
+		if name != "" {
+			used[name] = struct{}{}
+		}
+	}
+	return used
+}
+
+func cursorUniqueOpenAIToolAlias(originalName string, used map[string]struct{}) string {
+	base := cursorOpenAIToolAliasPrefix + strings.TrimSpace(originalName)
+	if base == cursorOpenAIToolAliasPrefix {
+		base = cursorOpenAIToolAliasPrefix + "tool"
+	}
+	alias := base
+	for i := 2; ; i++ {
+		if _, exists := used[alias]; !exists {
+			used[alias] = struct{}{}
+			return alias
+		}
+		alias = fmt.Sprintf("%s_%d", base, i)
+	}
+}
+
+func cursorOpenAIToolNameForMcpTool(cursorName string, tools []cursorproto.McpToolDef) string {
+	for _, tool := range tools {
+		if tool.Name == cursorName && strings.TrimSpace(tool.OriginalName) != "" {
+			return tool.OriginalName
+		}
+	}
+	return cursorName
+}
+
+func cursorAliasToolDescription(originalName, cursorName, description string) string {
+	prefix := fmt.Sprintf("External OpenAI tool %s exposed to Cursor as %s.", originalName, cursorName)
+	if strings.TrimSpace(description) == "" {
+		return prefix
+	}
+	return prefix + " " + description
+}
+
+func cursorToolAliasInstruction(aliases []cursorToolAlias) string {
+	if len(aliases) == 0 {
+		return ""
+	}
+	lines := []string{"External OpenAI tools are exposed to Cursor with mcp__ aliases:"}
+	for _, alias := range aliases {
+		lines = append(lines, fmt.Sprintf("- OpenAI tool %s is exposed to Cursor as %s. If asked to call %s, call %s.", alias.Original, alias.Alias, alias.Original, alias.Alias))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func cursorAppendInstruction(first, second string) string {
+	first = strings.TrimSpace(first)
+	second = strings.TrimSpace(second)
+	if first == "" {
+		return second
+	}
+	if second == "" {
+		return first
+	}
+	return first + "\n\n" + second
 }
 
 type cursorRequestedModel struct {

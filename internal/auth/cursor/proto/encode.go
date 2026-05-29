@@ -51,9 +51,10 @@ type TurnData struct {
 }
 
 type McpToolDef struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
+	Name         string
+	Description  string
+	InputSchema  json.RawMessage
+	OriginalName string // OpenAI tool name before any Cursor-side aliasing
 }
 
 // --- Helper: create a dynamic message and set fields ---
