@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -255,6 +256,34 @@ func TestCursorPayloadCandidatesDeduplicateExactSliceReferences(t *testing.T) {
 	}
 }
 
+func TestCursorCanResumeToolSessionRejectsClosedStreams(t *testing.T) {
+	session := &cursorSession{
+		authID:  "cursor-a.json",
+		pending: []pendingMcpExec{{ToolCallId: "call_read"}},
+	}
+	results := []toolResultInfo{{ToolCallId: "call_read", Content: "ok"}}
+
+	if cursorCanResumeToolSession(session, "cursor-a.json", results, true) {
+		t.Fatal("closed stream session should not be resumable")
+	}
+	if !cursorCanResumeToolSession(session, "cursor-a.json", results, false) {
+		t.Fatal("open stream session with matching tool result should be resumable")
+	}
+}
+
+func TestCursorResumeWithToolResultsRejectsMissingStream(t *testing.T) {
+	exec := &CursorExecutor{}
+	session := &cursorSession{
+		toolResultCh: make(chan []toolResultInfo, 1),
+		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
+	}
+	parsed := &parsedOpenAIRequest{ToolResults: []toolResultInfo{{ToolCallId: "call_read", Content: "ok"}}}
+
+	if _, err := exec.resumeWithToolResults(context.Background(), session, parsed, sdktranslator.FromString(""), sdktranslator.FromString(""), cliproxyexecutor.Request{}, nil, nil, false); err == nil {
+		t.Fatal("resumeWithToolResults() error = nil, want missing/dead stream error")
+	}
+}
+
 func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
 	pending := []pendingMcpExec{
 		{ToolCallId: "call_a"},
@@ -290,6 +319,65 @@ func TestCursorStreamingTextDeltaUsesContent(t *testing.T) {
 	}
 	if gjson.Get(delta, "reasoning_content").Exists() {
 		t.Fatalf("text delta reasoning_content exists = %s, want content only", delta)
+	}
+}
+
+func TestBuildRunRequestParamsSkipsToolsWithoutFunctionNames(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[{"role":"user","content":"Use a tool."}],
+		"tools":[
+			{"type":"function","function":{"name":"","description":"missing name","parameters":{"type":"object"}}},
+			{"type":"file_search"},
+			{"type":"function","function":{"name":"get_weather","description":"Get weather.","parameters":{"type":"object"}}}
+		]
+	}`))
+
+	params := buildRunRequestParams(parsed, "conv-1")
+
+	if got, want := len(params.McpTools), 1; got != want {
+		t.Fatalf("McpTools = %d, want %d: %#v", got, want, params.McpTools)
+	}
+	if got := params.McpTools[0].OriginalName; got != "get_weather" {
+		t.Fatalf("remaining original tool name = %q, want get_weather", got)
+	}
+	if strings.Contains(params.UserText, "mcp__tool") {
+		t.Fatalf("UserText contains fallback alias for malformed tool: %q", params.UserText)
+	}
+}
+
+func TestBuildRunRequestParamsPrefixesAllOpenAIToolNames(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[{"role":"user","content":"Use web_search."}],
+		"tools":[
+			{"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"get_weather","description":"Get weather.","parameters":{"type":"object"}}}
+		]
+	}`))
+
+	params := buildRunRequestParams(parsed, "conv-1")
+
+	if got := params.McpTools[0].Name; got != "mcp__web_search" {
+		t.Fatalf("aliased tool name = %q, want mcp__web_search", got)
+	}
+	if got := params.McpTools[0].OriginalName; got != "web_search" {
+		t.Fatalf("original tool name = %q, want web_search", got)
+	}
+	if got := cursorOpenAIToolNameForMcpTool("mcp__web_search", params.McpTools); got != "web_search" {
+		t.Fatalf("mapped tool name = %q, want web_search", got)
+	}
+	if got := params.McpTools[1].Name; got != "mcp__get_weather" {
+		t.Fatalf("non-native tool alias = %q, want mcp__get_weather", got)
+	}
+	if got := cursorOpenAIToolNameForMcpTool("mcp__get_weather", params.McpTools); got != "get_weather" {
+		t.Fatalf("mapped non-native tool name = %q, want get_weather", got)
+	}
+	if !strings.Contains(params.UserText, "OpenAI tool web_search is exposed to Cursor as mcp__web_search") {
+		t.Fatalf("UserText missing web_search alias instruction: %q", params.UserText)
+	}
+	if !strings.Contains(params.UserText, "OpenAI tool get_weather is exposed to Cursor as mcp__get_weather") {
+		t.Fatalf("UserText missing get_weather alias instruction: %q", params.UserText)
 	}
 }
 
