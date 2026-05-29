@@ -1892,7 +1892,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 
-	userAgent := resolveUserAgent(auth)
+	userAgent := resolveLoadCodeAssistUserAgent(auth)
 	loadReqBody, errMarshal := json.Marshal(map[string]any{
 		"metadata": map[string]string{
 			"ideType": "ANTIGRAVITY",
@@ -2199,7 +2199,7 @@ func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return base
 	}
-	return antigravityBaseURLProd
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {
@@ -2218,7 +2218,7 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 }
 
 func resolveLoadCodeAssistUserAgent(auth *cliproxyauth.Auth) string {
-	return misc.AntigravityLoadCodeAssistUserAgent(antigravityConfiguredUserAgent(auth))
+	return misc.AntigravityRequestUserAgent(antigravityConfiguredUserAgent(auth))
 }
 
 func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {

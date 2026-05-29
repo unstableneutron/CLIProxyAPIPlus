@@ -403,6 +403,18 @@ func cloneHeaders(headers map[string][]string) map[string][]string {
 	return out
 }
 
+func cloneHeadersForHome(headers map[string][]string) map[string][]string {
+	cloned := cloneHeaders(headers)
+	for key, values := range cloned {
+		for i, value := range values {
+			if util.MaskSensitiveHeaderValue(key, value) != value {
+				values[i] = "[REDACTED]"
+			}
+		}
+	}
+	return cloned
+}
+
 func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, requestID string, logText string) error {
 	if l == nil || !l.homeEnabled {
 		return nil
@@ -412,7 +424,7 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 		return nil
 	}
 	payload := homeRequestLogPayload{
-		Headers:    cloneHeaders(headers),
+		Headers:    cloneHeadersForHome(headers),
 		RequestID:  strings.TrimSpace(requestID),
 		RequestLog: logText,
 	}
@@ -2058,7 +2070,7 @@ func (w *homeStreamingLogWriter) Close() error {
 	}
 
 	payload := homeRequestLogPayload{
-		Headers:    cloneHeaders(w.requestHeaders),
+		Headers:    cloneHeadersForHome(w.requestHeaders),
 		RequestID:  w.requestID,
 		RequestLog: buf.String(),
 	}
