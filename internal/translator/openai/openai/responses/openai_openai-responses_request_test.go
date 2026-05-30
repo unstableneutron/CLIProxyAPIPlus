@@ -19,6 +19,27 @@ func prettyJSONForTest(raw []byte) string {
 	return out.String()
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsDeveloperToSystem(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"Follow repo instructions."}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the proxy."}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("cursor-composer-2.5", raw, true)
+
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "system" {
+		t.Fatalf("developer message role = %q, want system; output=%s", got, prettyJSONForTest(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "Follow repo instructions." {
+		t.Fatalf("developer message text = %q, want preserved instruction", got)
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "user" {
+		t.Fatalf("user message role = %q, want user", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergeConsecutiveFunctionCalls(t *testing.T) {
 	raw := []byte(`{
 		"input": [
