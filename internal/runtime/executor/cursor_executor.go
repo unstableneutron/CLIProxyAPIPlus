@@ -43,7 +43,7 @@ const (
 	defaultCursorClientVersion = "cli-2026.02.13-41ac335"
 	cursorAuthType             = "cursor"
 	cursorHeartbeatInterval    = 5 * time.Second
-	cursorSessionTTL           = 5 * time.Minute
+	cursorSessionTTL           = 30 * time.Minute
 	cursorCheckpointTTL        = 30 * time.Minute
 	cursorMaxImageBytes        = 20 << 20
 )
@@ -98,22 +98,46 @@ func cursorClientVersionHeader() string {
 	return defaultCursorClientVersion
 }
 
-func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMcpExec) bool {
+func cursorMatchingToolResults(results []toolResultInfo, pending []pendingMcpExec) []toolResultInfo {
 	if len(results) == 0 || len(pending) == 0 {
+		return nil
+	}
+	pendingIDs := make(map[string]struct{}, len(pending))
+	for _, call := range pending {
+		if id := strings.TrimSpace(call.ToolCallId); id != "" {
+			pendingIDs[id] = struct{}{}
+		}
+	}
+	if len(pendingIDs) == 0 {
+		return nil
+	}
+	matched := make([]toolResultInfo, 0, len(pending))
+	seen := make(map[string]struct{}, len(pending))
+	for _, result := range results {
+		if _, ok := pendingIDs[result.ToolCallId]; !ok {
+			continue
+		}
+		if _, ok := seen[result.ToolCallId]; ok {
+			continue
+		}
+		seen[result.ToolCallId] = struct{}{}
+		matched = append(matched, result)
+	}
+	return matched
+}
+
+func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMcpExec) bool {
+	matched := cursorMatchingToolResults(results, pending)
+	if len(matched) == 0 {
 		return false
 	}
 	pendingIDs := make(map[string]struct{}, len(pending))
 	for _, call := range pending {
-		if strings.TrimSpace(call.ToolCallId) != "" {
-			pendingIDs[call.ToolCallId] = struct{}{}
+		if id := strings.TrimSpace(call.ToolCallId); id != "" {
+			pendingIDs[id] = struct{}{}
 		}
 	}
-	for _, result := range results {
-		if _, ok := pendingIDs[result.ToolCallId]; ok {
-			return true
-		}
-	}
-	return false
+	return len(pendingIDs) > 0 && len(matched) == len(pendingIDs)
 }
 
 func cursorCanResumeToolSession(session *cursorSession, authID string, results []toolResultInfo, streamDone bool) bool {
@@ -140,6 +164,19 @@ func cursorH2StreamDone(stream *cursorproto.H2Stream) bool {
 
 func cursorStreamingTextDeltaJSON(text string) string {
 	return fmt.Sprintf(`{"content":%s}`, jsonString(text))
+}
+
+func cursorStreamingToolCallDeltaJSON(index int, exec pendingMcpExec) string {
+	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
+		index, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+}
+
+func cursorStreamingToolCallDeltasJSON(execs []pendingMcpExec) []string {
+	deltas := make([]string, 0, len(execs))
+	for i, exec := range execs {
+		deltas = append(deltas, cursorStreamingToolCallDeltaJSON(i, exec))
+	}
+	return deltas
 }
 
 func cursorStreamingThinkingDeltaJSON(text string) string {
@@ -347,7 +384,41 @@ func closeCursorSessions(sessions []*cursorSession) {
 		if s.stream != nil {
 			s.stream.Close()
 		}
+		closeCursorStreamChunkChannel(s.resumeOutCh)
 	}
+}
+
+func closeCursorStreamChunkChannel(ch chan cliproxyexecutor.StreamChunk) {
+	if ch == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	close(ch)
+}
+
+func sendCursorStreamChunk(ch chan cliproxyexecutor.StreamChunk, chunk cliproxyexecutor.StreamChunk) {
+	if ch == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	ch <- chunk
+}
+
+func (e *CursorExecutor) removeSessionIfCurrent(sessionKey string, session *cursorSession) bool {
+	if e == nil || session == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.sessions == nil || e.sessions[sessionKey] != session {
+		return false
+	}
+	delete(e.sessions, sessionKey)
+	return true
 }
 
 func (e *CursorExecutor) cleanupLoop() {
@@ -581,8 +652,8 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 				fullText.WriteString(text)
 			}
 		},
-		func(exec pendingMcpExec) {
-			pendingToolCalls = append(pendingToolCalls, exec)
+		func(execs []pendingMcpExec) {
+			pendingToolCalls = append(pendingToolCalls, execs...)
 		},
 		nil,
 		usage,
@@ -665,8 +736,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	checkpointKey := conversationId
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
+	forceFlattenToolFallback := false
+
 	// Check if we can resume an existing session with tool results
 	if len(parsed.ToolResults) > 0 {
+		forceFlattenToolFallback = true
 		var staleSessionsToClose []*cursorSession
 		e.mu.Lock()
 		session, hasSession := e.sessions[sessionKey]
@@ -728,7 +802,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	e.mu.Unlock()
 
 	var params *cursorproto.RunRequestParams
-	if hasCheckpoint && saved.data != nil && saved.authID == authID {
+	if hasCheckpoint && saved.data != nil && saved.authID == authID && !forceFlattenToolFallback {
 		// Same auth — use checkpoint normally. The server already has prior
 		// conversation context, so keep only the current user message structured.
 		params = buildRunRequestParams(parsed, conversationId)
@@ -744,7 +818,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 	} else {
-		if hasCheckpoint && saved.data != nil && saved.authID != authID {
+		if forceFlattenToolFallback {
+			log.Debugf("cursor: live tool-result resume unavailable, flattening tool-result history into userText")
+		} else if hasCheckpoint && saved.data != nil && saved.authID != authID {
 			// Auth changed (quota failover) — checkpoint is not portable across accounts.
 			// Discard and flatten conversation history into userText.
 			log.Infof("cursor: auth migrated (%s → %s) for conv=%s, discarding checkpoint and flattening context", saved.authID, authID, checkpointKey)
@@ -755,6 +831,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			log.Debugf("cursor: no checkpoint, flattening full message history into userText")
 		}
 		flattenConversationIntoUserText(parsed)
+		if forceFlattenToolFallback {
+			parsed.UserText = cursorAppendToolFallbackInstruction(parsed.UserText)
+		}
 		params = buildRunRequestParams(parsed, conversationId)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
@@ -797,9 +876,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		outMu.Lock()
 		out := currentOut
 		outMu.Unlock()
-		if out != nil {
-			out <- chunk
-		}
+		sendCursorStreamChunk(out, chunk)
 	}
 
 	// Wrap sendChunk/sendDone to use emitToOut
@@ -849,8 +926,20 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	go func() {
-		var resumeOutCh chan cliproxyexecutor.StreamChunk
-		_ = resumeOutCh
+		var storedToolSession *cursorSession
+		defer func() {
+			if storedToolSession != nil && e.removeSessionIfCurrent(sessionKey, storedToolSession) {
+				closeCursorStreamChunkChannel(storedToolSession.resumeOutCh)
+			}
+			outMu.Lock()
+			out := currentOut
+			currentOut = nil
+			outMu.Unlock()
+			closeCursorStreamChunkChannel(out)
+			sessionCancel()
+			stream.Close()
+		}()
+
 		toolCallIndex := 0
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
@@ -863,31 +952,34 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					sendChunkSwitchable(cursorStreamingTextDeltaJSON(text), "")
 				}
 			},
-			func(exec pendingMcpExec) {
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
-				toolCallIndex++
-				sendChunkSwitchable(toolCallJSON, "")
+			func(execs []pendingMcpExec) {
+				if len(execs) == 0 {
+					return
+				}
+				for _, exec := range execs {
+					toolCallJSON := cursorStreamingToolCallDeltaJSON(toolCallIndex, exec)
+					toolCallIndex++
+					sendChunkSwitchable(toolCallJSON, "")
+				}
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()
 
 				// Close current output to end the current HTTP SSE response
 				outMu.Lock()
 				if currentOut != nil {
-					close(currentOut)
+					closeCursorStreamChunkChannel(currentOut)
 					currentOut = nil
 				}
 				outMu.Unlock()
 
 				// Create new resume output channel, reuse the same toolResultCh
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
-				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
-				e.mu.Lock()
-				e.sessions[sessionKey] = &cursorSession{
+				log.Debugf("cursor: saving session %s for MCP tool resume (tools=%d first=%s)", sessionKey, len(execs), execs[0].ToolName)
+				session := &cursorSession{
 					stream:             stream,
 					blobStore:          params.BlobStore,
 					mcpTools:           params.McpTools,
-					pending:            []pendingMcpExec{exec},
+					pending:            append([]pendingMcpExec(nil), execs...),
 					cancel:             sessionCancel,
 					createdAt:          time.Now(),
 					authID:             authID,
@@ -901,14 +993,19 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						// Reset translator state so the new HTTP response gets
 						// a fresh message_start, content_block_start, etc.
 						streamParam = nil
-						// New response needs its own message ID
+						// New response needs its own message ID and fresh per-message
+						// tool-call indexes. OpenAI streaming indexes are scoped to
+						// one assistant response, not the whole Cursor H2 session.
 						chatId = "chatcmpl-" + uuid.New().String()[:28]
 						created = time.Now().Unix()
+						toolCallIndex = 0
 						outMu.Unlock()
 					},
 				}
+				e.mu.Lock()
+				e.sessions[sessionKey] = session
 				e.mu.Unlock()
-				resumeOutCh = resumeOut
+				storedToolSession = session
 
 				// processH2SessionFrames will now block on toolResultCh (inline wait loop)
 				// while continuing to handle KV messages
@@ -944,12 +1041,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				streamErrCh <- streamErr
 				outMu.Lock()
 				if currentOut != nil {
-					close(currentOut)
+					closeCursorStreamChunkChannel(currentOut)
 					currentOut = nil
 				}
 				outMu.Unlock()
-				sessionCancel()
-				stream.Close()
 				return
 			}
 		}
@@ -971,15 +1066,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		sendDoneSwitchable()
 
-		// Close whatever output channel is still active
-		outMu.Lock()
-		if currentOut != nil {
-			close(currentOut)
-			currentOut = nil
-		}
-		outMu.Unlock()
-		sessionCancel()
-		stream.Close()
 	}()
 
 	// Wait for either the first chunk or a pre-response error.
@@ -1008,7 +1094,16 @@ func (e *CursorExecutor) resumeWithToolResults(
 	originalPayload, payload []byte,
 	needsTranslate bool,
 ) (*cliproxyexecutor.StreamResult, error) {
-	log.Debugf("cursor: resumeWithToolResults: injecting %d tool results via channel", len(parsed.ToolResults))
+	if session == nil {
+		return nil, fmt.Errorf("cursor: missing session")
+	}
+
+	matchedToolResults := cursorMatchingToolResults(parsed.ToolResults, session.pending)
+	log.Debugf("cursor: resumeWithToolResults: injecting %d matching tool results via channel (from %d total)", len(matchedToolResults), len(parsed.ToolResults))
+
+	if len(matchedToolResults) == 0 {
+		return nil, fmt.Errorf("cursor: no tool result matches pending calls")
+	}
 
 	if session.toolResultCh == nil {
 		return nil, fmt.Errorf("cursor: session has no toolResultCh (stale session?)")
@@ -1031,7 +1126,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 
 	// Inject tool results — this unblocks the waiting processH2SessionFrames.
 	select {
-	case session.toolResultCh <- parsed.ToolResults:
+	case session.toolResultCh <- matchedToolResults:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-session.stream.Done():
@@ -1214,8 +1309,8 @@ func cursorIsExecMessage(msgType cursorproto.ServerMessageType) bool {
 	}
 }
 
-func cursorShouldEndAfterKV(receivedContent bool, msgType cursorproto.ServerMessageType) bool {
-	return receivedContent && msgType == cursorproto.ServerMsgKvSetBlob
+func cursorShouldEndAfterKV(receivedContent bool, msgType cursorproto.ServerMessageType, waitingForTool bool) bool {
+	return receivedContent && !waitingForTool && msgType == cursorproto.ServerMsgKvSetBlob
 }
 
 func processH2SessionFrames(
@@ -1224,7 +1319,7 @@ func processH2SessionFrames(
 	blobStore map[string][]byte,
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
-	onMcpExec func(exec pendingMcpExec),
+	onMcpExec func(execs []pendingMcpExec),
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
@@ -1341,7 +1436,7 @@ func processH2SessionFrames(
 					blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
 					resp := cursorproto.EncodeKvSetBlobResult(msg.KvId, msg.RequestMetadata)
 					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
-					if cursorShouldEndAfterKV(receivedContent, msg.Type) {
+					if cursorShouldEndAfterKV(receivedContent, msg.Type, false) {
 						log.Debugf("cursor: KV set after content; treating as clean end of response")
 						return nil
 					}
@@ -1352,110 +1447,125 @@ func processH2SessionFrames(
 
 				case cursorproto.ServerMsgExecMcpArgs:
 					if onMcpExec != nil {
-						decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
-						toolCallId := msg.McpToolCallId
-						if toolCallId == "" {
-							toolCallId = uuid.New().String()
-						}
-						toolName := cursorOpenAIToolNameForMcpTool(msg.McpToolName, mcpTools)
-						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s cursorToolName=%s toolCallId=%s",
-							msg.ExecMsgId, msg.ExecId, toolName, msg.McpToolName, toolCallId)
-						pending := pendingMcpExec{
-							ExecMsgId:  msg.ExecMsgId,
-							ExecId:     msg.ExecId,
-							ToolCallId: toolCallId,
-							ToolName:   toolName,
-							Args:       decodedArgs,
-						}
-						onMcpExec(pending)
+						pendingExecs := []pendingMcpExec{cursorPendingMcpExecFromMessage(msg)}
+						onMcpExec(pendingExecs)
 
 						if toolResultCh == nil {
 							return nil
 						}
 
-						// Inline mode: wait for tool result while handling KV/heartbeat
-						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
-						var toolResults []toolResultInfo
-					waitLoop:
 						for {
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case results, ok := <-toolResultCh:
-								if !ok {
-									return nil
-								}
-								toolResults = results
-								break waitLoop
-							case waitData, ok := <-stream.Data():
-								if !ok {
+							// Inline mode: wait for the current tool result batch while
+							// handling KV/heartbeat and queueing any additional MCP
+							// requests Cursor pipelines before the current batch returns.
+							log.Debugf("cursor: waiting for %d tool result(s) on channel (inline mode)...", len(pendingExecs))
+							var toolResults []toolResultInfo
+							var queuedExecs []pendingMcpExec
+						waitLoop:
+							for {
+								select {
+								case <-ctx.Done():
+									return ctx.Err()
+								case results, ok := <-toolResultCh:
+									if !ok {
+										return nil
+									}
+									toolResults = results
+									break waitLoop
+								case waitData, ok := <-stream.Data():
+									if !ok {
+										return stream.Err()
+									}
+									buf.Write(waitData)
+									for {
+										cb := buf.Bytes()
+										if len(cb) == 0 {
+											break
+										}
+										wf, wp, wc, wok := cursorproto.ParseConnectFrame(cb)
+										if !wok {
+											break
+										}
+										buf.Next(wc)
+										if wf&cursorproto.ConnectEndStreamFlag != 0 {
+											if err := cursorproto.ParseConnectEndStream(wp); err != nil {
+												return err
+											}
+											continue
+										}
+										if jsonErr := cursorJSONErrorFromPayload(wp); jsonErr != nil {
+											if receivedContent {
+												return nil
+											}
+											return jsonErr
+										}
+										wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
+										if werr != nil {
+											continue
+										}
+										if !execDeduper.mark(wmsg) {
+											continue
+										}
+										switch wmsg.Type {
+										case cursorproto.ServerMsgKvGetBlob:
+											blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
+											d := blobStore[blobKey]
+											stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d, wmsg.RequestMetadata), 0))
+										case cursorproto.ServerMsgKvSetBlob:
+											blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
+											blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
+											stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId, wmsg.RequestMetadata), 0))
+											if cursorShouldEndAfterKV(receivedContent, wmsg.Type, true) {
+												return nil
+											}
+										case cursorproto.ServerMsgExecRequestCtx:
+											stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
+										case cursorproto.ServerMsgExecMcpArgs:
+											queued := cursorPendingMcpExecFromMessage(wmsg)
+											log.Debugf("cursor: queued pipelined mcpArgs while waiting: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
+												queued.ExecMsgId, queued.ExecId, queued.ToolName, queued.ToolCallId)
+											queuedExecs = append(queuedExecs, queued)
+										case cursorproto.ServerMsgCheckpoint:
+											if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
+												onCheckpoint(wmsg.CheckpointData)
+											}
+										case cursorproto.ServerMsgTurnEnded:
+											return nil
+										}
+									}
+								case <-stream.Done():
 									return stream.Err()
 								}
-								buf.Write(waitData)
-								for {
-									cb := buf.Bytes()
-									if len(cb) == 0 {
+							}
+
+							// Send MCP results for the current pending batch.
+							for _, exec := range pendingExecs {
+								sentResult := false
+								for _, tr := range toolResults {
+									if tr.ToolCallId == exec.ToolCallId {
+										log.Debugf("cursor: sending inline MCP result for tool=%s", exec.ToolName)
+										resultBytes := cursorproto.EncodeExecMcpResult(exec.ExecMsgId, exec.ExecId, tr.Content, false)
+										stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
+										sentResult = true
 										break
-									}
-									wf, wp, wc, wok := cursorproto.ParseConnectFrame(cb)
-									if !wok {
-										break
-									}
-									buf.Next(wc)
-									if wf&cursorproto.ConnectEndStreamFlag != 0 {
-										continue
-									}
-									if jsonErr := cursorJSONErrorFromPayload(wp); jsonErr != nil {
-										if receivedContent {
-											return nil
-										}
-										return jsonErr
-									}
-									wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
-									if werr != nil {
-										continue
-									}
-									if !execDeduper.mark(wmsg) {
-										continue
-									}
-									switch wmsg.Type {
-									case cursorproto.ServerMsgKvGetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										d := blobStore[blobKey]
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d, wmsg.RequestMetadata), 0))
-									case cursorproto.ServerMsgKvSetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId, wmsg.RequestMetadata), 0))
-										if cursorShouldEndAfterKV(receivedContent, wmsg.Type) {
-											return nil
-										}
-									case cursorproto.ServerMsgExecRequestCtx:
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
-									case cursorproto.ServerMsgCheckpoint:
-										if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
-											onCheckpoint(wmsg.CheckpointData)
-										}
 									}
 								}
-							case <-stream.Done():
-								return stream.Err()
+								if !sentResult {
+									return fmt.Errorf("cursor: no tool result for pending call %s", exec.ToolCallId)
+								}
 							}
-						}
-
-						// Send MCP result
-						sentResult := false
-						for _, tr := range toolResults {
-							if tr.ToolCallId == pending.ToolCallId {
-								log.Debugf("cursor: sending inline MCP result for tool=%s", pending.ToolName)
-								resultBytes := cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)
-								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
-								sentResult = true
+							// The tool_call response has ended and the injected result starts a
+							// new assistant response on the same Cursor H2 stream. Scope
+							// KV-after-content termination to that new response; otherwise text
+							// emitted before the tool call can make post-result KV updates look
+							// like the end of the resumed response and prematurely cut off
+							// multi-tool chains.
+							receivedContent = false
+							if len(queuedExecs) == 0 {
 								break
 							}
-						}
-						if !sentResult {
-							return fmt.Errorf("cursor: no tool result for pending call %s", pending.ToolCallId)
+							pendingExecs = queuedExecs
+							onMcpExec(pendingExecs)
 						}
 						continue
 					}
@@ -1533,18 +1643,16 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 		p.SystemPrompt = "You are a helpful assistant."
 	}
 
-	// Extract turns, tool results, and last user message
+	// Extract turns and last user message. Tool messages are parsed separately
+	// below: only trailing tool results are pending live-resume inputs. Older
+	// tool results are historical context and should not disable checkpoint-based
+	// multi-turn continuation after the assistant has already responded.
 	var pendingUser string
 	for _, msg := range messages {
 		role := msg.Get("role").String()
 		switch role {
-		case "system":
+		case "system", "tool":
 			continue
-		case "tool":
-			p.ToolResults = append(p.ToolResults, toolResultInfo{
-				ToolCallId: msg.Get("tool_call_id").String(),
-				Content:    extractTextContent(msg.Get("content")),
-			})
 		case "user":
 			if pendingUser != "" {
 				p.Turns = append(p.Turns, cursorproto.TurnData{UserText: pendingUser})
@@ -1572,6 +1680,12 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 		}
 	}
 
+	// Only tool messages at the end of the request are pending results for the
+	// previous assistant tool_call. Historical tool results are preserved by
+	// flattenConversationIntoUserText when cold fallback is needed, but they
+	// should not trigger live resume or force cold fallback on later user turns.
+	p.ToolResults = cursorTrailingToolResults(messages)
+
 	if pendingUser != "" {
 		p.UserText = pendingUser
 	} else if len(p.Turns) > 0 && len(p.ToolResults) == 0 {
@@ -1584,6 +1698,31 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p.Tools = gjson.GetBytes(payload, "tools").Array()
 
 	return p
+}
+
+func cursorTrailingToolResults(messages []gjson.Result) []toolResultInfo {
+	if len(messages) == 0 {
+		return nil
+	}
+	var reversed []toolResultInfo
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Get("role").String() != "tool" {
+			break
+		}
+		reversed = append(reversed, toolResultInfo{
+			ToolCallId: msg.Get("tool_call_id").String(),
+			Content:    extractTextContent(msg.Get("content")),
+		})
+	}
+	if len(reversed) == 0 {
+		return nil
+	}
+	results := make([]toolResultInfo, len(reversed))
+	for i := range reversed {
+		results[len(reversed)-1-i] = reversed[i]
+	}
+	return results
 }
 
 // flattenConversationIntoUserText flattens the full OpenAI-shaped message
@@ -1890,13 +2029,11 @@ func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *
 		BlobStore:       make(map[string][]byte),
 	}
 
-	usedToolNames := cursorOpenAIToolNames(parsed.Tools)
-	aliases := make([]cursorToolAlias, 0, len(parsed.Tools))
-
 	// Convert OpenAI tools to Cursor MCP tool definitions. Prefix every
 	// Cursor-facing MCP name so neither current nor future Cursor-native tool
 	// names (web_search/read/grep/etc.) can steal the model's tool selection.
-	// The original OpenAI name is restored before emitting tool_calls.
+	// The original OpenAI name is restored by stripping exactly one prefix
+	// before emitting tool_calls.
 	for _, tool := range parsed.Tools {
 		if tool.Get("type").String() != "function" {
 			continue
@@ -1906,21 +2043,11 @@ func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *
 		if originalName == "" {
 			continue
 		}
-		cursorName := cursorUniqueOpenAIToolAlias(originalName, usedToolNames)
-		aliases = append(aliases, cursorToolAlias{Original: originalName, Alias: cursorName})
-
-		description := cursorAliasToolDescription(originalName, cursorName, fn.Get("description").String())
 		params.McpTools = append(params.McpTools, cursorproto.McpToolDef{
-			Name:         cursorName,
-			Description:  description,
-			InputSchema:  json.RawMessage(fn.Get("parameters").Raw),
-			OriginalName: originalName,
+			Name:        cursorOpenAIToolAliasPrefix + originalName,
+			Description: strings.TrimSpace(fn.Get("description").String()),
+			InputSchema: json.RawMessage(fn.Get("parameters").Raw),
 		})
-	}
-
-	if instruction := cursorToolAliasInstruction(aliases); instruction != "" {
-		params.SystemPrompt = cursorAppendInstruction(params.SystemPrompt, instruction)
-		params.UserText = cursorAppendInstruction(instruction, params.UserText)
 	}
 
 	return params
@@ -2190,6 +2317,24 @@ func jsonString(s string) string {
 	return string(b)
 }
 
+func cursorPendingMcpExecFromMessage(msg *cursorproto.DecodedServerMessage) pendingMcpExec {
+	decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
+	toolCallId := msg.McpToolCallId
+	if toolCallId == "" {
+		toolCallId = uuid.New().String()
+	}
+	toolName := cursorOpenAIToolNameForMcpTool(msg.McpToolName)
+	log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s cursorToolName=%s toolCallId=%s",
+		msg.ExecMsgId, msg.ExecId, toolName, msg.McpToolName, toolCallId)
+	return pendingMcpExec{
+		ExecMsgId:  msg.ExecMsgId,
+		ExecId:     msg.ExecId,
+		ToolCallId: toolCallId,
+		ToolName:   toolName,
+		Args:       decodedArgs,
+	}
+}
+
 func decodeMcpArgsToJSON(args map[string][]byte) string {
 	if len(args) == 0 {
 		return "{}"
@@ -2213,77 +2358,20 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 	return string(b)
 }
 
-type cursorToolAlias struct {
-	Original string
-	Alias    string
-}
-
 const cursorOpenAIToolAliasPrefix = "mcp__"
 
-func cursorOpenAIToolNames(tools []gjson.Result) map[string]struct{} {
-	used := make(map[string]struct{}, len(tools))
-	for _, tool := range tools {
-		name := strings.TrimSpace(tool.Get("function.name").String())
-		if name != "" {
-			used[name] = struct{}{}
-		}
-	}
-	return used
+func cursorOpenAIToolNameForMcpTool(cursorName string) string {
+	return strings.TrimPrefix(cursorName, cursorOpenAIToolAliasPrefix)
 }
 
-func cursorUniqueOpenAIToolAlias(originalName string, used map[string]struct{}) string {
-	base := cursorOpenAIToolAliasPrefix + strings.TrimSpace(originalName)
-	if base == cursorOpenAIToolAliasPrefix {
-		base = cursorOpenAIToolAliasPrefix + "tool"
-	}
-	alias := base
-	for i := 2; ; i++ {
-		if _, exists := used[alias]; !exists {
-			used[alias] = struct{}{}
-			return alias
-		}
-		alias = fmt.Sprintf("%s_%d", base, i)
-	}
-}
+const cursorToolFallbackInstruction = "The tool results above are already completed. Continue from those results; do not repeat tool calls that already have results unless the user explicitly asks to rerun them."
 
-func cursorOpenAIToolNameForMcpTool(cursorName string, tools []cursorproto.McpToolDef) string {
-	for _, tool := range tools {
-		if tool.Name == cursorName && strings.TrimSpace(tool.OriginalName) != "" {
-			return tool.OriginalName
-		}
+func cursorAppendToolFallbackInstruction(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return cursorToolFallbackInstruction
 	}
-	return cursorName
-}
-
-func cursorAliasToolDescription(originalName, cursorName, description string) string {
-	prefix := fmt.Sprintf("External OpenAI tool %s exposed to Cursor as %s.", originalName, cursorName)
-	if strings.TrimSpace(description) == "" {
-		return prefix
-	}
-	return prefix + " " + description
-}
-
-func cursorToolAliasInstruction(aliases []cursorToolAlias) string {
-	if len(aliases) == 0 {
-		return ""
-	}
-	lines := []string{"External OpenAI tools are exposed to Cursor with mcp__ aliases:"}
-	for _, alias := range aliases {
-		lines = append(lines, fmt.Sprintf("- OpenAI tool %s is exposed to Cursor as %s. If asked to call %s, call %s.", alias.Original, alias.Alias, alias.Original, alias.Alias))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func cursorAppendInstruction(first, second string) string {
-	first = strings.TrimSpace(first)
-	second = strings.TrimSpace(second)
-	if first == "" {
-		return second
-	}
-	if second == "" {
-		return first
-	}
-	return first + "\n\n" + second
+	return text + "\n\n" + cursorToolFallbackInstruction
 }
 
 type cursorRequestedModel struct {

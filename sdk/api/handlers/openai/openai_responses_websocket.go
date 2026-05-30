@@ -380,6 +380,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 
+		if !allowIncrementalInputWithPreviousResponseID && responsesWebsocketShouldBufferPartialToolOutputs(defaultWebsocketToolOutputCache, downstreamSessionKey, payload, lastResponseOutput) {
+			if errWrite := writeResponsesWebsocketSyntheticToolWaitAck(c, conn, requestJSON, wsTimelineLog, passthroughSessionID); errWrite != nil {
+				wsTerminateErr = errWrite
+				return
+			}
+			continue
+		}
+
 		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
 		requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
 		updatedLastRequest = bytes.Clone(requestJSON)
@@ -992,8 +1000,42 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	return nil
 }
 
+func writeResponsesWebsocketSyntheticToolWaitAck(
+	c *gin.Context,
+	conn *websocket.Conn,
+	requestJSON []byte,
+	wsTimelineLog websocketTimelineAppender,
+	sessionID string,
+) error {
+	payloads, errPayloads := syntheticResponsesWebsocketPayloads(requestJSON, "resp_toolwait_")
+	if errPayloads != nil {
+		return errPayloads
+	}
+	for i := 0; i < len(payloads); i++ {
+		markAPIResponseTimestamp(c)
+		if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
+			log.Warnf(
+				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+				sessionID,
+				websocketPayloadEventType(payloads[i]),
+				errWrite,
+			)
+			return errWrite
+		}
+	}
+	return nil
+}
+
 func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {
-	responseID := "resp_prewarm_" + uuid.NewString()
+	return syntheticResponsesWebsocketPayloads(requestJSON, "resp_prewarm_")
+}
+
+func syntheticResponsesWebsocketPayloads(requestJSON []byte, responseIDPrefix string) ([][]byte, error) {
+	responseIDPrefix = strings.TrimSpace(responseIDPrefix)
+	if responseIDPrefix == "" {
+		responseIDPrefix = "resp_"
+	}
+	responseID := responseIDPrefix + uuid.NewString()
 	createdAt := time.Now().Unix()
 	modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String())
 
