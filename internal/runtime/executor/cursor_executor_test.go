@@ -11,6 +11,7 @@ import (
 
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -488,6 +489,29 @@ func TestCursorBuildNonStreamingToolCallCompletion(t *testing.T) {
 	call := choice.Message.ToolCalls[0]
 	if call.ID != "call_weather" || call.Function.Name != "get_weather" || call.Function.Arguments != `{"city":"Paris"}` {
 		t.Fatalf("tool call = %+v, want weather call with JSON string args", call)
+	}
+}
+
+func TestParseTranslatedResponsesDeveloperDoesNotCreateHistoricalTurn(t *testing.T) {
+	responsesPayload := []byte(`{
+		"model":"cursor-composer-2.5",
+		"input":[
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are running in /workspace."}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the proxy transport paths."}]}
+		]
+	}`)
+
+	chatPayload := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions("cursor-composer-2.5", responsesPayload, true)
+	parsed := parseOpenAIRequest(chatPayload)
+
+	if parsed.UserText != "Inspect the proxy transport paths." {
+		t.Fatalf("UserText = %q, want actual user prompt", parsed.UserText)
+	}
+	if len(parsed.Turns) != 0 {
+		t.Fatalf("Turns = %d, want no historical turns for developer+user responses input", len(parsed.Turns))
+	}
+	if !strings.Contains(parsed.SystemPrompt, "You are running in /workspace.") {
+		t.Fatalf("SystemPrompt = %q, want developer instruction preserved as system context", parsed.SystemPrompt)
 	}
 }
 
