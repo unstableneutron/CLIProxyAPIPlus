@@ -709,6 +709,53 @@ func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketShouldBufferPartialToolOutputsUntilCacheCompletesBatch(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+	lastResponseOutput := []byte(`[
+		{"type":"function_call","id":"fc-a","call_id":"call-a","name":"read"},
+		{"type":"function_call","id":"fc-b","call_id":"call-b","name":"grep"},
+		{"type":"message","id":"assistant-1"}
+	]`)
+
+	firstPartial := []byte(`{"input":[{"type":"function_call_output","id":"out-a","call_id":"call-a","output":"read result"}]}`)
+	if !responsesWebsocketShouldBufferPartialToolOutputs(cache, sessionKey, firstPartial, lastResponseOutput) {
+		t.Fatalf("expected first partial output to be buffered")
+	}
+	if cached, ok := cache.get(sessionKey, "call-a"); !ok || gjson.GetBytes(cached, "output").String() != "read result" {
+		t.Fatalf("call-a output was not cached: ok=%v cached=%s", ok, cached)
+	}
+
+	secondPartial := []byte(`{"input":[{"type":"function_call_output","id":"out-b","call_id":"call-b","output":"grep result"}]}`)
+	if responsesWebsocketShouldBufferPartialToolOutputs(cache, sessionKey, secondPartial, lastResponseOutput) {
+		t.Fatalf("complete current+cached outputs should not be buffered")
+	}
+	if cached, ok := cache.get(sessionKey, "call-b"); !ok || gjson.GetBytes(cached, "output").String() != "grep result" {
+		t.Fatalf("call-b output was not cached: ok=%v cached=%s", ok, cached)
+	}
+	unrelated := []byte(`{"input":[{"type":"function_call_output","id":"out-c","call_id":"call-c","output":"stale"}]}`)
+	if responsesWebsocketShouldBufferPartialToolOutputs(cache, sessionKey, unrelated, lastResponseOutput) {
+		t.Fatalf("unrelated output should not trigger buffering")
+	}
+}
+
+func TestRepairResponsesWebsocketToolCallsPrefersCurrentOutputOverCached(t *testing.T) {
+	cache := newWebsocketToolOutputCache(time.Minute, 10)
+	sessionKey := "session-1"
+	cache.record(sessionKey, "call-1", []byte(`{"type":"function_call_output","call_id":"call-1","output":"old"}`))
+
+	raw := []byte(`{"input":[{"type":"function_call","call_id":"call-1","name":"tool"},{"type":"function_call_output","call_id":"call-1","output":"new"}]}`)
+	repaired := repairResponsesWebsocketToolCallsWithCache(cache, sessionKey, raw)
+
+	input := gjson.GetBytes(repaired, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
+	}
+	if got := input[1].Get("output").String(); got != "new" {
+		t.Fatalf("output = %q, want current payload output", got)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -1320,6 +1367,155 @@ func TestWebsocketUpstreamSupportsCompactionReplayForModelFalseWhenMixedBackends
 	h := NewOpenAIResponsesAPIHandler(base)
 	if h.websocketUpstreamSupportsCompactionReplayForModel("test-model") {
 		t.Fatalf("expected mixed backend model to disable compaction replay bypass")
+	}
+}
+
+type websocketPartialToolCaptureExecutor struct {
+	mu       sync.Mutex
+	payloads [][]byte
+}
+
+func (e *websocketPartialToolCaptureExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketPartialToolCaptureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPartialToolCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	callIndex := len(e.payloads)
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	e.mu.Unlock()
+
+	var payload []byte
+	if callIndex == 0 {
+		payload = []byte(`{"type":"response.completed","response":{"id":"resp-tools","output":[{"type":"function_call","id":"fc-a","call_id":"call-a","name":"read","arguments":"{}"},{"type":"function_call","id":"fc-b","call_id":"call-b","name":"grep","arguments":"{}"}]}}`)
+	} else {
+		payload = []byte(`{"type":"response.completed","response":{"id":"resp-final","output":[{"type":"message","id":"assistant-final"}]}}`)
+	}
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: payload}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketPartialToolCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketPartialToolCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketPartialToolCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketPartialToolCaptureExecutor) Payloads() [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([][]byte, len(e.payloads))
+	for i := range e.payloads {
+		out[i] = bytes.Clone(e.payloads[i])
+	}
+	return out
+}
+
+func TestResponsesWebsocketBuffersPartialToolOutputsUntilBatchComplete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketPartialToolCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-sse", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	headers := http.Header{"X-Client-Request-Id": []string{"partial-tool-session"}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1","role":"user","content":"use tools"}]}`)); errWrite != nil {
+		t.Fatalf("write initial websocket message: %v", errWrite)
+	}
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read initial websocket response: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("initial payload type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+	if len(executor.Payloads()) != 1 {
+		t.Fatalf("stream payload count after initial call = %d, want 1", len(executor.Payloads()))
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","input":[{"type":"function_call_output","id":"out-a","call_id":"call-a","output":"read result"}]}`)); errWrite != nil {
+		t.Fatalf("write first partial tool output: %v", errWrite)
+	}
+	_, createdAck, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read partial ack created: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(createdAck, "type").String(); got != "response.created" {
+		t.Fatalf("partial ack first event = %s, want response.created: %s", got, createdAck)
+	}
+	_, completedAck, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read partial ack completed: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(completedAck, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("partial ack completed type = %s, want %s: %s", got, wsEventTypeCompleted, completedAck)
+	}
+	if outputCount := len(gjson.GetBytes(completedAck, "response.output").Array()); outputCount != 0 {
+		t.Fatalf("partial ack output count = %d, want 0: %s", outputCount, completedAck)
+	}
+	if len(executor.Payloads()) != 1 {
+		t.Fatalf("stream payload count after partial output = %d, want 1", len(executor.Payloads()))
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","input":[{"type":"function_call_output","id":"out-b","call_id":"call-b","output":"grep result"}]}`)); errWrite != nil {
+		t.Fatalf("write second partial tool output: %v", errWrite)
+	}
+	_, finalPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read completed batch response: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(finalPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("final payload type = %s, want %s: %s", got, wsEventTypeCompleted, finalPayload)
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("stream payload count after complete batch = %d, want 2", len(payloads))
+	}
+	forwarded := payloads[1]
+	input := gjson.GetBytes(forwarded, "input").Array()
+	seenOutputs := map[string]string{}
+	for _, item := range input {
+		if item.Get("type").String() == "function_call_output" {
+			seenOutputs[item.Get("call_id").String()] = item.Get("output").String()
+		}
+	}
+	if seenOutputs["call-a"] != "read result" || seenOutputs["call-b"] != "grep result" {
+		t.Fatalf("forwarded payload missing complete cached outputs: %s", forwarded)
 	}
 }
 

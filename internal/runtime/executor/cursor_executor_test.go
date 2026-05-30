@@ -289,11 +289,32 @@ func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
 		{ToolCallId: "call_a"},
 		{ToolCallId: "call_b"},
 	}
-	if !cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_b", Content: "ok"}}, pending) {
-		t.Fatal("expected tool result to match one pending call")
+	if cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_b", Content: "ok"}}, pending) {
+		t.Fatal("partial tool results must not resume a batched pending call")
+	}
+	if !cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_a", Content: "ok-a"}, {ToolCallId: "call_b", Content: "ok-b"}}, pending) {
+		t.Fatal("expected complete tool result batch to match all pending calls")
 	}
 	if cursorToolResultsMatchPending([]toolResultInfo{{ToolCallId: "call_missing", Content: "ok"}}, pending) {
 		t.Fatal("unexpected match for unknown tool call id")
+	}
+}
+
+func TestCursorMatchingToolResultsFiltersHistoricalResults(t *testing.T) {
+	pending := []pendingMcpExec{{ToolCallId: "call_current"}}
+	results := []toolResultInfo{
+		{ToolCallId: "call_old", Content: "old"},
+		{ToolCallId: "call_current", Content: "current"},
+		{ToolCallId: "call_other", Content: "other"},
+	}
+
+	matched := cursorMatchingToolResults(results, pending)
+
+	if got, want := len(matched), 1; got != want {
+		t.Fatalf("matched results = %d, want %d: %#v", got, want, matched)
+	}
+	if matched[0].ToolCallId != "call_current" || matched[0].Content != "current" {
+		t.Fatalf("matched result = %#v, want current result only", matched[0])
 	}
 }
 
@@ -322,6 +343,51 @@ func TestCursorStreamingTextDeltaUsesContent(t *testing.T) {
 	}
 }
 
+func TestCursorStreamingToolCallDeltaUsesResponseScopedIndex(t *testing.T) {
+	delta := cursorStreamingToolCallDeltaJSON(0, pendingMcpExec{
+		ToolCallId: "call_read",
+		ToolName:   "read",
+		Args:       `{"path":"file.go"}`,
+	})
+
+	call := gjson.Get(delta, "tool_calls.0")
+	if got := call.Get("index").Int(); got != 0 {
+		t.Fatalf("tool call index = %d, want response-scoped 0 (delta=%s)", got, delta)
+	}
+	if got := call.Get("id").String(); got != "call_read" {
+		t.Fatalf("tool call id = %q, want call_read", got)
+	}
+	if got := call.Get("function.name").String(); got != "read" {
+		t.Fatalf("tool call function name = %q, want read", got)
+	}
+	if got := call.Get("function.arguments").String(); got != `{"path":"file.go"}` {
+		t.Fatalf("tool call arguments = %q, want JSON string", got)
+	}
+}
+
+func TestCursorStreamingToolCallDeltasSupportBatchedToolCalls(t *testing.T) {
+	deltas := cursorStreamingToolCallDeltasJSON([]pendingMcpExec{
+		{ToolCallId: "call_read", ToolName: "read", Args: `{"path":"file.go"}`},
+		{ToolCallId: "call_grep", ToolName: "grep", Args: `{"pattern":"func"}`},
+	})
+
+	if got, want := len(deltas), 2; got != want {
+		t.Fatalf("tool call deltas = %d, want %d: %#v", got, want, deltas)
+	}
+	for i, delta := range deltas {
+		call := gjson.Get(delta, "tool_calls.0")
+		if got := int(call.Get("index").Int()); got != i {
+			t.Fatalf("delta %d index = %d, want %d (%s)", i, got, i, delta)
+		}
+	}
+	if got := gjson.Get(deltas[0], "tool_calls.0.function.name").String(); got != "read" {
+		t.Fatalf("first tool name = %q, want read", got)
+	}
+	if got := gjson.Get(deltas[1], "tool_calls.0.function.name").String(); got != "grep" {
+		t.Fatalf("second tool name = %q, want grep", got)
+	}
+}
+
 func TestBuildRunRequestParamsSkipsToolsWithoutFunctionNames(t *testing.T) {
 	parsed := parseOpenAIRequest([]byte(`{
 		"model":"cursor-composer-2.5",
@@ -338,8 +404,8 @@ func TestBuildRunRequestParamsSkipsToolsWithoutFunctionNames(t *testing.T) {
 	if got, want := len(params.McpTools), 1; got != want {
 		t.Fatalf("McpTools = %d, want %d: %#v", got, want, params.McpTools)
 	}
-	if got := params.McpTools[0].OriginalName; got != "get_weather" {
-		t.Fatalf("remaining original tool name = %q, want get_weather", got)
+	if got := params.McpTools[0].Name; got != "mcp__get_weather" {
+		t.Fatalf("remaining tool name = %q, want mcp__get_weather", got)
 	}
 	if strings.Contains(params.UserText, "mcp__tool") {
 		t.Fatalf("UserText contains fallback alias for malformed tool: %q", params.UserText)
@@ -352,7 +418,8 @@ func TestBuildRunRequestParamsPrefixesAllOpenAIToolNames(t *testing.T) {
 		"messages":[{"role":"user","content":"Use web_search."}],
 		"tools":[
 			{"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object"}}},
-			{"type":"function","function":{"name":"get_weather","description":"Get weather.","parameters":{"type":"object"}}}
+			{"type":"function","function":{"name":"get_weather","description":"Get weather.","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"mcp__custom","description":"Already prefixed original.","parameters":{"type":"object"}}}
 		]
 	}`))
 
@@ -361,23 +428,26 @@ func TestBuildRunRequestParamsPrefixesAllOpenAIToolNames(t *testing.T) {
 	if got := params.McpTools[0].Name; got != "mcp__web_search" {
 		t.Fatalf("aliased tool name = %q, want mcp__web_search", got)
 	}
-	if got := params.McpTools[0].OriginalName; got != "web_search" {
-		t.Fatalf("original tool name = %q, want web_search", got)
-	}
-	if got := cursorOpenAIToolNameForMcpTool("mcp__web_search", params.McpTools); got != "web_search" {
+	if got := cursorOpenAIToolNameForMcpTool("mcp__web_search"); got != "web_search" {
 		t.Fatalf("mapped tool name = %q, want web_search", got)
 	}
 	if got := params.McpTools[1].Name; got != "mcp__get_weather" {
 		t.Fatalf("non-native tool alias = %q, want mcp__get_weather", got)
 	}
-	if got := cursorOpenAIToolNameForMcpTool("mcp__get_weather", params.McpTools); got != "get_weather" {
+	if got := cursorOpenAIToolNameForMcpTool("mcp__get_weather"); got != "get_weather" {
 		t.Fatalf("mapped non-native tool name = %q, want get_weather", got)
 	}
-	if !strings.Contains(params.UserText, "OpenAI tool web_search is exposed to Cursor as mcp__web_search") {
-		t.Fatalf("UserText missing web_search alias instruction: %q", params.UserText)
+	if got := params.McpTools[2].Name; got != "mcp__mcp__custom" {
+		t.Fatalf("already-prefixed original alias = %q, want mcp__mcp__custom", got)
 	}
-	if !strings.Contains(params.UserText, "OpenAI tool get_weather is exposed to Cursor as mcp__get_weather") {
-		t.Fatalf("UserText missing get_weather alias instruction: %q", params.UserText)
+	if got := cursorOpenAIToolNameForMcpTool("mcp__mcp__custom"); got != "mcp__custom" {
+		t.Fatalf("mapped already-prefixed original = %q, want mcp__custom", got)
+	}
+	if params.McpTools[0].Description != "Search the web." {
+		t.Fatalf("tool description = %q, want original description only", params.McpTools[0].Description)
+	}
+	if strings.Contains(params.SystemPrompt, "External OpenAI tools are exposed to Cursor") || strings.Contains(params.UserText, "External OpenAI tools are exposed to Cursor") {
+		t.Fatalf("alias instructions must not be injected into prompts: system=%q user=%q", params.SystemPrompt, params.UserText)
 	}
 }
 
@@ -437,6 +507,53 @@ func TestCursorFlattenMessagesPrependsSystemForSingleUser(t *testing.T) {
 	}
 	if len(parsed.Turns) != 0 || len(parsed.ToolResults) != 0 {
 		t.Fatalf("Turns/ToolResults not cleared: turns=%d tools=%d", len(parsed.Turns), len(parsed.ToolResults))
+	}
+}
+
+func TestParseOpenAIRequestOnlyTreatsTrailingToolMessagesAsPendingResults(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[
+			{"role":"user","content":"inspect"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_old","type":"function","function":{"name":"ls","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_old","content":"old files"},
+			{"role":"assistant","content":"I found old files."},
+			{"role":"user","content":"now continue"}
+		]
+	}`))
+
+	if len(parsed.ToolResults) != 0 {
+		t.Fatalf("historical tool results parsed as pending: %#v", parsed.ToolResults)
+	}
+	if parsed.UserText != "now continue" {
+		t.Fatalf("UserText = %q, want latest user turn", parsed.UserText)
+	}
+}
+
+func TestParseOpenAIRequestKeepsOnlyTrailingToolResultsForLiveResume(t *testing.T) {
+	parsed := parseOpenAIRequest([]byte(`{
+		"model":"cursor-composer-2.5",
+		"messages":[
+			{"role":"user","content":"inspect"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_old","type":"function","function":{"name":"ls","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_old","content":"old files"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read","arguments":"{}"}},{"id":"call_b","type":"function","function":{"name":"grep","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_a","content":"read result"},
+			{"role":"tool","tool_call_id":"call_b","content":"grep result"}
+		]
+	}`))
+
+	if got, want := len(parsed.ToolResults), 2; got != want {
+		t.Fatalf("pending tool results = %d, want %d: %#v", got, want, parsed.ToolResults)
+	}
+	if parsed.ToolResults[0].ToolCallId != "call_a" || parsed.ToolResults[0].Content != "read result" {
+		t.Fatalf("first pending result = %#v, want call_a", parsed.ToolResults[0])
+	}
+	if parsed.ToolResults[1].ToolCallId != "call_b" || parsed.ToolResults[1].Content != "grep result" {
+		t.Fatalf("second pending result = %#v, want call_b", parsed.ToolResults[1])
+	}
+	if parsed.UserText != "" {
+		t.Fatalf("UserText = %q, want empty while trailing tool results await live resume", parsed.UserText)
 	}
 }
 
@@ -514,15 +631,67 @@ func TestCursorExecDeduperSeparatesRequestContextAndMCPWithEmptyExecID(t *testin
 	}
 }
 
-func TestCursorShouldEndAfterKVOnlyAfterContent(t *testing.T) {
-	if cursorShouldEndAfterKV(false, cursorproto.ServerMsgKvSetBlob) {
+func TestCursorShouldEndAfterKVOnlyAfterContentOutsideToolWait(t *testing.T) {
+	if cursorShouldEndAfterKV(false, cursorproto.ServerMsgKvSetBlob, false) {
 		t.Fatal("KV before content should not end stream")
 	}
-	if !cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvSetBlob) {
-		t.Fatal("KV set after content should end stream")
+	if !cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvSetBlob, false) {
+		t.Fatal("KV set after content should end stream outside tool wait")
 	}
-	if cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvGetBlob) {
+	if cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvGetBlob, false) {
 		t.Fatal("KV get after content should not end stream")
+	}
+	if cursorShouldEndAfterKV(true, cursorproto.ServerMsgKvSetBlob, true) {
+		t.Fatal("KV set during pending tool wait must not end the upstream stream")
+	}
+}
+
+func TestCursorRemoveStoredSessionIfCurrent(t *testing.T) {
+	exec := &CursorExecutor{sessions: make(map[string]*cursorSession)}
+	current := &cursorSession{}
+	other := &cursorSession{}
+	exec.sessions["session"] = current
+
+	if !exec.removeSessionIfCurrent("session", current) {
+		t.Fatal("removeSessionIfCurrent() = false, want true for matching session")
+	}
+	if _, ok := exec.sessions["session"]; ok {
+		t.Fatal("matching session was not removed")
+	}
+
+	exec.sessions["session"] = other
+	if exec.removeSessionIfCurrent("session", current) {
+		t.Fatal("removeSessionIfCurrent() = true, want false for stale pointer")
+	}
+	if got := exec.sessions["session"]; got != other {
+		t.Fatal("non-matching session was removed")
+	}
+}
+
+func TestCloseCursorSessionsClosesResumeOutput(t *testing.T) {
+	ch := make(chan cliproxyexecutor.StreamChunk)
+	closeCursorSessions([]*cursorSession{{resumeOutCh: ch}})
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("resumeOutCh is still open")
+		}
+	default:
+		t.Fatal("resumeOutCh was not closed")
+	}
+
+	closeCursorSessions([]*cursorSession{{resumeOutCh: ch}})
+}
+
+func TestCursorToolFallbackInstructionPreventsRepeatingCompletedCalls(t *testing.T) {
+	got := cursorAppendToolFallbackInstruction("User: inspect files")
+
+	if !strings.Contains(got, "The tool results above are already completed") {
+		t.Fatalf("fallback instruction missing completed-tool guidance: %q", got)
+	}
+	if !strings.Contains(got, "User: inspect files") {
+		t.Fatalf("fallback instruction dropped original text: %q", got)
 	}
 }
 
