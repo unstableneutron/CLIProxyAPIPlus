@@ -43,6 +43,18 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 			wantTexts:        []string{"Be helpful"},
 		},
 		{
+			name: "System role in messages",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [
+					{"role": "system", "content": "Follow the project instructions"},
+					{"role": "user", "content": "hello"}
+				]
+			}`,
+			wantHasDeveloper: true,
+			wantTexts:        []string{"Follow the project instructions"},
+		},
+		{
 			name: "Array system field with filtered billing header",
 			inputJSON: `{
 				"model": "claude-3-opus",
@@ -183,6 +195,40 @@ func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
 	}
 	if callID == longID {
 		t.Fatalf("long call_id was not shortened: %q", callID)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceTier string
+		want        string
+	}{
+		{name: "priority passes through", serviceTier: "priority", want: "priority"},
+		{name: "fast normalizes to priority", serviceTier: "fast", want: "priority"},
+		{name: "invalid tier is omitted", serviceTier: "default", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("test-model", []byte(`{
+				"model": "claude-3-opus",
+				"service_tier": "`+tt.serviceTier+`",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if tt.want == "" {
+				if resultJSON.Get("service_tier").Exists() {
+					t.Fatalf("service_tier should be omitted. Output: %s", string(result))
+				}
+				return
+			}
+
+			if got := resultJSON.Get("service_tier").String(); got != tt.want {
+				t.Fatalf("service_tier = %q, want %q. Output: %s", got, tt.want, string(result))
+			}
+		})
 	}
 }
 

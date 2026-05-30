@@ -11,26 +11,6 @@ tls:
   cert: ''
   key: ''
 
-# Optional "home" control plane integration over Redis protocol.
-home:
-  enabled: false
-  host: "127.0.0.1"
-  port: 6379
-  password: ""
-  # Keep CPA pinned to the configured home address instead of switching to CLUSTER NODES entries.
-  # Useful when Home is behind NAT, Docker networking, or a reverse proxy.
-  disable-cluster-discovery: false
-  # Optional TLS for the outbound Redis connection to the home control plane.
-  # Enable this when connecting through rediss:// or an SSL stream proxy.
-  tls:
-    enable: false
-    # Optional SNI/certificate name override. Leave empty to use the configured home host.
-    server-name: ""
-    # Trust a private CA bundle in addition to system roots.
-    ca-cert: ""
-    # Only for testing self-signed endpoints; disables certificate verification.
-    insecure-skip-verify: false
-
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.
@@ -91,8 +71,8 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
-# How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
-# Note: the in-process Redis RESP usage output is disabled when home.enabled is true.
+# How long (in seconds) usage queue items are retained in memory for the Management API.
+# The local Redis RESP usage output is disabled.
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 
@@ -124,6 +104,10 @@ disable-cooling: false
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
 disable-image-generation: false
+
+# Base model used when proxying gpt-image-2 via the hosted image_generation tool (Responses API).
+# Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
+# gpt-image-2-base-model: "gpt-5.4-mini"
 
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
