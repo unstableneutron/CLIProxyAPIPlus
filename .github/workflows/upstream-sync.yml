@@ -131,8 +131,30 @@ jobs:
           else
             FORK_TAG_PREFIX="${UPSTREAM_TAG}-unstableneutron"
           fi
-          LATEST_FORK_TAG=$(git tag --list "${FORK_TAG_PREFIX}.[0-9]*" --sort=-v:refname | head -n 1 || true)
-          NEXT_FORK_TAG="${FORK_TAG_PREFIX}.${GITHUB_RUN_NUMBER}"
+          FORK_TAGS=$(git ls-remote --tags --refs origin "${FORK_TAG_PREFIX}.[0-9]*" \
+            | awk '{ sub("refs/tags/", "", $2); print $2 }' \
+            || true)
+          LATEST_FORK_TAG=$(printf '%s\n' "${FORK_TAGS}" | awk 'NF' | sort -V | tail -n 1 || true)
+          LATEST_FORK_SUFFIX=$(printf '%s\n' "${FORK_TAGS}" \
+            | awk -v prefix="${FORK_TAG_PREFIX}." '
+                index($0, prefix) == 1 {
+                  suffix = substr($0, length(prefix) + 1)
+                  if (suffix ~ /^[0-9]+$/) {
+                    if (!found || suffix + 0 > max) max = suffix + 0
+                    found = 1
+                  }
+                }
+                END { if (found) print max }
+              ')
+          if [ -n "${LATEST_FORK_SUFFIX}" ]; then
+            NEXT_FORK_SUFFIX=$((LATEST_FORK_SUFFIX + 1))
+          else
+            NEXT_FORK_SUFFIX=0
+          fi
+          NEXT_FORK_TAG="${FORK_TAG_PREFIX}.${NEXT_FORK_SUFFIX}"
+          if [ -n "${LATEST_FORK_TAG}" ]; then
+            git fetch --no-tags origin "refs/tags/${LATEST_FORK_TAG}"
+          fi
 
           {
             echo "local=${LOCAL}"
@@ -141,6 +163,7 @@ jobs:
             echo "merge_base=${MERGE_BASE}"
             echo "safe_tag=${SAFE_TAG}"
             echo "latest_fork_tag=${LATEST_FORK_TAG}"
+            echo "latest_fork_suffix=${LATEST_FORK_SUFFIX}"
             echo "next_fork_tag=${NEXT_FORK_TAG}"
           } >> "$GITHUB_OUTPUT"
 
