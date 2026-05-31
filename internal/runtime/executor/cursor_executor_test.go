@@ -353,6 +353,50 @@ func TestCursorInteractionToolCollectorEmitsWhenArgsDeltaIsComplete(t *testing.T
 	}
 }
 
+func TestCursorShouldRejectExecMcpArgsWithMismatchedKnownToolArgs(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "grep",
+		McpToolCallId: "call_bad_grep",
+		ExecMsgId:     8,
+		ExecId:        "exec-grep",
+		McpArgs: map[string][]byte{
+			"block_until_ms": []byte(`"120000"`),
+			"command":        []byte(`"cd /repo && gitchamber kaitranntt/ccs"`),
+			"description":    []byte(`"Fetch ccs source via gitchamber"`),
+		},
+	}
+
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "grep"}}) {
+		t.Fatal("exec grep with bash-shaped args was emittable")
+	}
+}
+
+func TestCursorShouldNormalizeSingularWebFetchURLArg(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "web_fetch",
+		McpToolCallId: "call_web_fetch",
+		ExecMsgId:     9,
+		ExecId:        "exec-web-fetch",
+		McpArgs: map[string][]byte{
+			"url":       []byte(`"https://example.com/a"`),
+			"objective": []byte(`"Read example"`),
+		},
+	}
+
+	if !cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "web_fetch"}}) {
+		t.Fatal("web_fetch with singular url was not normalized and emitted")
+	}
+	var urls []string
+	if err := json.Unmarshal(msg.McpArgs["urls"], &urls); err != nil {
+		t.Fatalf("urls arg is not JSON string array: %v raw=%q", err, msg.McpArgs["urls"])
+	}
+	if len(urls) != 1 || urls[0] != "https://example.com/a" {
+		t.Fatalf("urls = %#v, want one normalized URL", urls)
+	}
+}
+
 func TestCursorShouldEmitExecMcpArgsWithoutDeclaredClientTool(t *testing.T) {
 	msg := &cursorproto.DecodedServerMessage{
 		Type:          cursorproto.ServerMsgExecMcpArgs,
@@ -360,6 +404,7 @@ func TestCursorShouldEmitExecMcpArgsWithoutDeclaredClientTool(t *testing.T) {
 		McpToolCallId: "call_read",
 		ExecMsgId:     7,
 		ExecId:        "exec-read",
+		McpArgs:       map[string][]byte{"path": []byte(`"README.md"`)},
 	}
 
 	if !cursorShouldEmitMcpExec(msg, nil) {
