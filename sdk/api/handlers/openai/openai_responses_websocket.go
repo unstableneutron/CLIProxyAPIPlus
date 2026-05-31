@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -225,6 +226,44 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	wsDone := make(chan struct{})
 	defer close(wsDone)
 
+	var downstreamCloseOnce sync.Once
+	closeDownstream := func() {
+		downstreamCloseOnce.Do(func() {
+			if errClose := conn.Close(); errClose != nil {
+				log.Warnf("responses websocket: close connection error: %v", errClose)
+			}
+		})
+	}
+
+	var upstreamDisconnectMu sync.Mutex
+	forwardingUpstream := false
+	closeAfterForward := false
+	beginUpstreamForward := func() {
+		upstreamDisconnectMu.Lock()
+		forwardingUpstream = true
+		upstreamDisconnectMu.Unlock()
+	}
+	endUpstreamForward := func() {
+		upstreamDisconnectMu.Lock()
+		shouldClose := closeAfterForward
+		forwardingUpstream = false
+		closeAfterForward = false
+		upstreamDisconnectMu.Unlock()
+		if shouldClose {
+			closeDownstream()
+		}
+	}
+	requestCloseForUpstreamDisconnect := func() {
+		upstreamDisconnectMu.Lock()
+		if forwardingUpstream {
+			closeAfterForward = true
+			upstreamDisconnectMu.Unlock()
+			return
+		}
+		upstreamDisconnectMu.Unlock()
+		closeDownstream()
+	}
+
 	if h != nil && h.AuthManager != nil {
 		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
 			type upstreamDisconnectSubscriber interface {
@@ -238,7 +277,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						case <-wsDone:
 							return
 						case <-disconnectCh:
-							_ = conn.Close()
+							requestCloseForUpstreamDisconnect()
 						}
 					}()
 				}
@@ -260,9 +299,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		wsTimelineLog.SetContext(c)
-		if errClose := conn.Close(); errClose != nil {
-			log.Warnf("responses websocket: close connection error: %v", errClose)
-		}
+		closeDownstream()
 	}()
 
 	var lastRequest []byte
@@ -420,9 +457,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			})
 		}
+		beginUpstreamForward()
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
 		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID)
+		endUpstreamForward()
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)

@@ -92,6 +92,13 @@ type websocketUpstreamDisconnectExecutor struct {
 	sessions   map[string]chan error
 }
 
+type websocketDisconnectThenErrorExecutor struct {
+	mu                  sync.Mutex
+	disconnectCh        chan error
+	disconnectDelivered chan struct{}
+	releaseError        chan struct{}
+}
+
 func (e *websocketUpstreamDisconnectExecutor) Identifier() string { return "codex" }
 
 func (e *websocketUpstreamDisconnectExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
@@ -156,6 +163,69 @@ func (e *websocketUpstreamDisconnectExecutor) CountTokens(context.Context, *core
 }
 
 func (e *websocketUpstreamDisconnectExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketDisconnectThenErrorExecutor) Identifier() string { return "codex" }
+
+func (e *websocketDisconnectThenErrorExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	e.mu.Lock()
+	if e.disconnectCh == nil {
+		e.disconnectCh = make(chan error)
+	}
+	ch := e.disconnectCh
+	e.mu.Unlock()
+	return ch
+}
+
+func (e *websocketDisconnectThenErrorExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketDisconnectThenErrorExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	disconnectCh := e.disconnectCh
+	disconnectDelivered := e.disconnectDelivered
+	releaseError := e.releaseError
+	e.mu.Unlock()
+
+	go func() {
+		if disconnectCh != nil {
+			disconnectCh <- errors.New("upstream disconnected")
+			close(disconnectCh)
+		}
+		if disconnectDelivered != nil {
+			close(disconnectDelivered)
+		}
+	}()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	go func() {
+		if releaseError != nil {
+			<-releaseError
+		}
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusBadRequest,
+			msg:    `{"error":{"message":"The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_encrypted_content"}}`,
+		}}
+		close(chunks)
+	}()
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketDisconnectThenErrorExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketDisconnectThenErrorExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketDisconnectThenErrorExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -1260,6 +1330,63 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for websocket timeline")
+	}
+}
+
+func TestResponsesWebsocketForwardsUpstreamErrorBeforeDisconnectClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDisconnectThenErrorExecutor{
+		disconnectDelivered: make(chan struct{}),
+		releaseError:        make(chan struct{}),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-codex", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if err = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[]}`)); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+
+	select {
+	case <-executor.disconnectDelivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream disconnect notification")
+	}
+	close(executor.releaseError)
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket error frame: %v", errRead)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("payload type = %q, want %q; payload=%s", got, wsEventTypeError, payload)
+	}
+	if got := gjson.GetBytes(payload, "error.code").String(); got != "invalid_encrypted_content" {
+		t.Fatalf("error.code = %q, want invalid_encrypted_content; payload=%s", got, payload)
 	}
 }
 
