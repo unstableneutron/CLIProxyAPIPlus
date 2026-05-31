@@ -276,6 +276,97 @@ func TestCursorCanResumeToolSessionRejectsClosedStreams(t *testing.T) {
 	}
 }
 
+func TestCursorShouldEmitInteractionToolCallRequiresDeclaredClientTool(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:                cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:         "readLints",
+		McpToolCallId:       "call_read_lints",
+		InteractionToolCall: true,
+		McpArgs:             map[string][]byte{"paths": []byte(`["AGENTS.md"]`)},
+	}
+
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "readLints"}}) != true {
+		t.Fatal("declared interaction tool call was not emittable")
+	}
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "read"}}) != false {
+		t.Fatal("undeclared interaction tool call was emittable")
+	}
+}
+
+func TestCursorShouldNotEmitDeclaredInteractionToolCallWithMissingRequiredArgs(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:                cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:         "grep",
+		McpToolCallId:       "call_empty_grep",
+		InteractionToolCall: true,
+		McpArgs:             map[string][]byte{},
+	}
+
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "grep"}}) {
+		t.Fatal("declared interaction grep with no pattern was emittable")
+	}
+
+	msg.McpArgs = map[string][]byte{"pattern": []byte(`"InteractionUpdate"`)}
+	if !cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "grep"}}) {
+		t.Fatal("declared interaction grep with pattern was not emittable")
+	}
+}
+
+func TestCursorInteractionToolCollectorEmitsWhenArgsDeltaIsComplete(t *testing.T) {
+	collector := newCursorInteractionToolCollector()
+	started := &cursorproto.DecodedServerMessage{
+		Type:                cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:         "grep",
+		McpToolCallId:       "call_grep",
+		InteractionToolCall: true,
+	}
+	partial := &cursorproto.DecodedServerMessage{
+		Type:                     cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:              "grep",
+		McpToolCallId:            "call_grep",
+		InteractionToolCall:      true,
+		InteractionArgsTextDelta: `{"pattern":"InteractionUpdate"}`,
+	}
+	completed := &cursorproto.DecodedServerMessage{
+		Type:                         cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:                  "grep",
+		McpToolCallId:                "call_grep",
+		InteractionToolCall:          true,
+		InteractionToolCallCompleted: true,
+	}
+
+	if got := collector.absorb(started); got != nil {
+		t.Fatalf("started update emitted %#v, want nil", got)
+	}
+	got := collector.absorb(partial)
+	if got == nil {
+		t.Fatal("complete args delta did not emit collected tool call")
+	}
+	if got.McpToolName != "grep" || got.McpToolCallId != "call_grep" {
+		t.Fatalf("collected msg = %#v, want grep/call_grep", got)
+	}
+	if string(got.McpArgs["pattern"]) != `"InteractionUpdate"` {
+		t.Fatalf("pattern arg = %q, want JSON string", got.McpArgs["pattern"])
+	}
+	if got := collector.absorb(completed); got != nil {
+		t.Fatalf("completed update emitted duplicate %#v, want nil", got)
+	}
+}
+
+func TestCursorShouldEmitExecMcpArgsWithoutDeclaredClientTool(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "read",
+		McpToolCallId: "call_read",
+		ExecMsgId:     7,
+		ExecId:        "exec-read",
+	}
+
+	if !cursorShouldEmitMcpExec(msg, nil) {
+		t.Fatal("exec mcpArgs should remain emittable regardless of declared client tool list")
+	}
+}
+
 func TestCursorCanResumeToolSessionRejectsInteractionToolCallsWithoutExecMetadata(t *testing.T) {
 	session := &cursorSession{
 		authID: "cursor-a.json",

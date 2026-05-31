@@ -52,6 +52,9 @@ func TestDecodeAgentServerMessageDecodesReadLintsToolCallStarted(t *testing.T) {
 	if msg.McpToolCallId != "call_read_lints" {
 		t.Fatalf("McpToolCallId = %q, want call_read_lints", msg.McpToolCallId)
 	}
+	if !msg.InteractionToolCall {
+		t.Fatal("InteractionToolCall = false, want true")
+	}
 	var paths []string
 	if err := json.Unmarshal(msg.McpArgs["paths"], &paths); err != nil {
 		t.Fatalf("paths args are not JSON: %v; raw=%q", err, msg.McpArgs["paths"])
@@ -59,6 +62,35 @@ func TestDecodeAgentServerMessageDecodesReadLintsToolCallStarted(t *testing.T) {
 	want := []string{"AGENTS.md", "internal/auth/cursor/proto/decode.go"}
 	if !sliceStringsEqual(paths, want) {
 		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestDecodeAgentServerMessageDecodesPartialToolCallArgsDeltaWithoutToolCallPayload(t *testing.T) {
+	var partial []byte
+	partial = appendTestBytesField(partial, 1, []byte("call_grep"))
+	partial = appendTestBytesField(partial, 3, []byte(`{"pattern":"InteractionUpdate"}`))
+
+	var interaction []byte
+	interaction = appendTestBytesField(interaction, IU_PartialToolCall, partial)
+
+	var agentServer []byte
+	agentServer = appendTestBytesField(agentServer, ASM_InteractionUpdate, interaction)
+
+	msg, err := DecodeAgentServerMessage(agentServer)
+	if err != nil {
+		t.Fatalf("DecodeAgentServerMessage() error = %v", err)
+	}
+	if msg.Type != ServerMsgExecMcpArgs {
+		t.Fatalf("Type = %v, want ServerMsgExecMcpArgs", msg.Type)
+	}
+	if !msg.InteractionToolCall {
+		t.Fatal("InteractionToolCall = false, want true")
+	}
+	if msg.McpToolCallId != "call_grep" {
+		t.Fatalf("McpToolCallId = %q, want call_grep", msg.McpToolCallId)
+	}
+	if msg.InteractionArgsTextDelta != `{"pattern":"InteractionUpdate"}` {
+		t.Fatalf("InteractionArgsTextDelta = %q", msg.InteractionArgsTextDelta)
 	}
 }
 

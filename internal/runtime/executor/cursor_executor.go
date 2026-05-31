@@ -140,6 +140,84 @@ func cursorToolResultsMatchPending(results []toolResultInfo, pending []pendingMc
 	return len(pendingIDs) > 0 && len(matched) == len(pendingIDs)
 }
 
+func cursorShouldEmitMcpExec(msg *cursorproto.DecodedServerMessage, mcpTools []cursorproto.McpToolDef) bool {
+	if msg == nil || msg.Type != cursorproto.ServerMsgExecMcpArgs {
+		return false
+	}
+	if !msg.InteractionToolCall {
+		return true
+	}
+	toolName := strings.TrimSpace(msg.McpToolName)
+	if toolName == "" {
+		return false
+	}
+	declared := false
+	for _, tool := range mcpTools {
+		if cursorOpenAIToolNameForMcpTool(tool.Name) == toolName {
+			declared = true
+			break
+		}
+	}
+	return declared && cursorInteractionToolCallHasRequiredArgs(toolName, msg.McpArgs)
+}
+
+func cursorInteractionToolCallHasRequiredArgs(toolName string, args map[string][]byte) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "grep":
+		return cursorJSONArgString(args, "pattern") != ""
+	case "read", "delete":
+		return cursorJSONArgString(args, "path") != ""
+	case "shell", "bash":
+		return cursorJSONArgString(args, "command") != ""
+	case "write":
+		return cursorJSONArgString(args, "path") != "" && cursorJSONArgString(args, "fileText") != ""
+	case "edit":
+		return cursorJSONArgString(args, "path") != "" && (cursorJSONArgString(args, "patchContent") != "" || cursorJSONArgString(args, "oldText") != "" || cursorJSONArgString(args, "newText") != "" || cursorJSONArgString(args, "streamContent") != "")
+	case "readlints":
+		return len(cursorJSONArgStringSlice(args, "paths")) > 0
+	case "mcp":
+		return false
+	default:
+		return len(args) > 0
+	}
+}
+
+func cursorJSONArgString(args map[string][]byte, key string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	raw, ok := args[key]
+	if !ok {
+		return ""
+	}
+	var decoded string
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return strings.TrimSpace(decoded)
+}
+
+func cursorJSONArgStringSlice(args map[string][]byte, key string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	raw, ok := args[key]
+	if !ok {
+		return nil
+	}
+	var decoded []string
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil
+	}
+	out := decoded[:0]
+	for _, item := range decoded {
+		if strings.TrimSpace(item) != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 func cursorCanResumeToolSession(session *cursorSession, authID string, results []toolResultInfo, streamDone bool) bool {
 	if session == nil || streamDone {
 		return false
@@ -1282,6 +1360,98 @@ func cursorJSONErrorFromPayload(payload []byte) error {
 	}
 }
 
+type cursorInteractionToolCollector struct {
+	calls   map[string]*cursorInteractionToolState
+	emitted map[string]struct{}
+}
+
+type cursorInteractionToolState struct {
+	toolName string
+	args     map[string][]byte
+	argsText strings.Builder
+}
+
+func newCursorInteractionToolCollector() *cursorInteractionToolCollector {
+	return &cursorInteractionToolCollector{
+		calls:   make(map[string]*cursorInteractionToolState),
+		emitted: make(map[string]struct{}),
+	}
+}
+
+func (c *cursorInteractionToolCollector) absorb(msg *cursorproto.DecodedServerMessage) *cursorproto.DecodedServerMessage {
+	if msg == nil || !msg.InteractionToolCall {
+		return msg
+	}
+	callID := strings.TrimSpace(msg.McpToolCallId)
+	if callID == "" {
+		return nil
+	}
+	if _, ok := c.emitted[callID]; ok {
+		return nil
+	}
+	state := c.calls[callID]
+	if state == nil {
+		state = &cursorInteractionToolState{}
+		c.calls[callID] = state
+	}
+	if strings.TrimSpace(msg.McpToolName) != "" {
+		state.toolName = msg.McpToolName
+	}
+	if len(msg.McpArgs) > 0 {
+		if state.args == nil {
+			state.args = make(map[string][]byte, len(msg.McpArgs))
+		}
+		for key, value := range msg.McpArgs {
+			state.args[key] = append([]byte(nil), value...)
+		}
+	}
+	if msg.InteractionArgsTextDelta != "" {
+		state.argsText.WriteString(msg.InteractionArgsTextDelta)
+	}
+	args := state.args
+	if len(args) == 0 {
+		args = cursorArgsMapFromJSONObject(state.argsText.String())
+	}
+	if state.toolName != "" && cursorInteractionToolCallHasRequiredArgs(state.toolName, args) {
+		delete(c.calls, callID)
+		c.emitted[callID] = struct{}{}
+		return &cursorproto.DecodedServerMessage{
+			Type:                cursorproto.ServerMsgExecMcpArgs,
+			McpToolName:         state.toolName,
+			McpToolCallId:       callID,
+			McpArgs:             args,
+			InteractionToolCall: true,
+		}
+	}
+	if !msg.InteractionToolCallCompleted {
+		return nil
+	}
+	delete(c.calls, callID)
+	c.emitted[callID] = struct{}{}
+	return &cursorproto.DecodedServerMessage{
+		Type:                cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:         state.toolName,
+		McpToolCallId:       callID,
+		McpArgs:             args,
+		InteractionToolCall: true,
+	}
+}
+
+func cursorArgsMapFromJSONObject(text string) map[string][]byte {
+	if strings.TrimSpace(text) == "" {
+		return map[string][]byte{}
+	}
+	decoded := make(map[string]json.RawMessage)
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return map[string][]byte{}
+	}
+	args := make(map[string][]byte, len(decoded))
+	for key, value := range decoded {
+		args[key] = append([]byte(nil), value...)
+	}
+	return args
+}
+
 type cursorExecDeduper struct {
 	seen map[string]struct{}
 }
@@ -1345,6 +1515,7 @@ func processH2SessionFrames(
 	var buf bytes.Buffer
 	rejectReason := "Tool not available in this environment. Use the MCP tools provided instead."
 	execDeduper := newCursorExecDeduper()
+	interactionTools := newCursorInteractionToolCollector()
 	receivedContent := false
 	log.Debugf("cursor: processH2SessionFrames started for streamID=%s, waiting for data...", stream.ID())
 	for {
@@ -1464,6 +1635,14 @@ func processH2SessionFrames(
 					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
 
 				case cursorproto.ServerMsgExecMcpArgs:
+					msg = interactionTools.absorb(msg)
+					if msg == nil {
+						continue
+					}
+					if !cursorShouldEmitMcpExec(msg, mcpTools) {
+						log.Debugf("cursor: skipping interaction tool call not declared or not ready for client: toolName=%q toolCallId=%q", msg.McpToolName, msg.McpToolCallId)
+						continue
+					}
 					if onMcpExec != nil {
 						pendingExecs := []pendingMcpExec{cursorPendingMcpExecFromMessage(msg)}
 						onMcpExec(pendingExecs)
@@ -1539,6 +1718,14 @@ func processH2SessionFrames(
 										case cursorproto.ServerMsgExecRequestCtx:
 											stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
 										case cursorproto.ServerMsgExecMcpArgs:
+											wmsg = interactionTools.absorb(wmsg)
+											if wmsg == nil {
+												continue
+											}
+											if !cursorShouldEmitMcpExec(wmsg, mcpTools) {
+												log.Debugf("cursor: skipping queued interaction tool call not declared or not ready for client: toolName=%q toolCallId=%q", wmsg.McpToolName, wmsg.McpToolCallId)
+												continue
+											}
 											queued := cursorPendingMcpExecFromMessage(wmsg)
 											log.Debugf("cursor: queued pipelined mcpArgs while waiting: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
 												queued.ExecMsgId, queued.ExecId, queued.ToolName, queued.ToolCallId)

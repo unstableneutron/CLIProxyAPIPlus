@@ -62,9 +62,12 @@ type DecodedServerMessage struct {
 	ExecId    string
 
 	// For MCP args
-	McpToolName   string
-	McpToolCallId string
-	McpArgs       map[string][]byte // arg name -> protobuf-encoded value
+	McpToolName                  string
+	McpToolCallId                string
+	McpArgs                      map[string][]byte // arg name -> protobuf-encoded value
+	InteractionToolCall          bool              // true when decoded from InteractionUpdate tool_call_* fields
+	InteractionToolCallCompleted bool              // true for InteractionUpdate tool_call_completed
+	InteractionArgsTextDelta     string            // partial JSON args delta from PartialToolCallUpdate
 
 	// For rejection context
 	Path             string
@@ -215,6 +218,7 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedServerMessage) {
 	var callID string
 	var toolCallBytes []byte
+	var argsTextDelta string
 	for len(data) > 0 {
 		num, typ, n := protowire.ConsumeTag(data)
 		if n < 0 {
@@ -233,6 +237,8 @@ func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedSe
 				callID = string(val)
 			case 2:
 				toolCallBytes = append([]byte(nil), val...)
+			case 3:
+				argsTextDelta = string(val)
 			}
 		} else {
 			n := protowire.ConsumeFieldValue(num, typ, data)
@@ -243,6 +249,13 @@ func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedSe
 		}
 	}
 	if len(toolCallBytes) == 0 {
+		if callID != "" && argsTextDelta != "" {
+			msg.Type = ServerMsgExecMcpArgs
+			msg.McpToolCallId = callID
+			msg.InteractionToolCall = true
+			msg.InteractionToolCallCompleted = completed
+			msg.InteractionArgsTextDelta = argsTextDelta
+		}
 		return
 	}
 	toolName, args, hasResult := decodeCursorToolCall(toolCallBytes)
@@ -253,6 +266,9 @@ func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedSe
 	msg.McpToolName = toolName
 	msg.McpToolCallId = callID
 	msg.McpArgs = args
+	msg.InteractionToolCall = true
+	msg.InteractionToolCallCompleted = completed
+	msg.InteractionArgsTextDelta = argsTextDelta
 }
 
 func decodeCursorToolCall(data []byte) (string, map[string][]byte, bool) {
