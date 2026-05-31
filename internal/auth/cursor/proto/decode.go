@@ -2,10 +2,16 @@ package proto
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/encoding/protowire"
+	goproto "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // ServerMessageType identifies the kind of decoded server message.
@@ -166,28 +172,31 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 			case IU_ThinkingCompleted:
 				msg.Type = ServerMsgThinkingCompleted
 				log.Debugf("decodeInteractionUpdate: ThinkingCompleted")
-			case 2:
-				// tool_call_started - ignore but log
-				log.Debugf("decodeInteractionUpdate: ToolCallStarted (ignored)")
-			case 3:
-				// tool_call_completed - ignore but log
-				log.Debugf("decodeInteractionUpdate: ToolCallCompleted (ignored)")
-			case 8:
+			case IU_ToolCallStarted:
+				decodeInteractionToolCallUpdate(val, false, msg)
+				log.Debugf("decodeInteractionUpdate: ToolCallStarted decoded type=%d tool=%q callId=%q", msg.Type, msg.McpToolName, msg.McpToolCallId)
+			case IU_PartialToolCall:
+				decodeInteractionToolCallUpdate(val, false, msg)
+				log.Debugf("decodeInteractionUpdate: PartialToolCall decoded type=%d tool=%q callId=%q", msg.Type, msg.McpToolName, msg.McpToolCallId)
+			case IU_ToolCallCompleted:
+				decodeInteractionToolCallUpdate(val, true, msg)
+				log.Debugf("decodeInteractionUpdate: ToolCallCompleted decoded type=%d tool=%q callId=%q", msg.Type, msg.McpToolName, msg.McpToolCallId)
+			case IU_TokenDelta:
 				// token_delta - extract token count
 				msg.Type = ServerMsgTokenDelta
 				msg.TokenDelta = decodeVarintField(val, 1)
 				log.Debugf("decodeInteractionUpdate: TokenDeltaUpdate tokens=%d", msg.TokenDelta)
-			case 13:
+			case IU_Heartbeat:
 				// heartbeat from server
 				msg.Type = ServerMsgHeartbeat
-			case 14:
+			case IU_TurnEnded:
 				// turn_ended - critical: model finished generating
 				msg.Type = ServerMsgTurnEnded
 				log.Debugf("decodeInteractionUpdate: TurnEndedUpdate - stream should end")
-			case 16:
+			case IU_StepStarted:
 				// step_started - ignore
 				log.Debugf("decodeInteractionUpdate: StepStartedUpdate (ignored)")
-			case 17:
+			case IU_StepCompleted:
 				// step_completed - ignore
 				log.Debugf("decodeInteractionUpdate: StepCompletedUpdate (ignored)")
 			default:
@@ -201,6 +210,134 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 			data = data[n:]
 		}
 	}
+}
+
+func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedServerMessage) {
+	var callID string
+	var toolCallBytes []byte
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+
+		if typ == protowire.BytesType {
+			val, n := protowire.ConsumeBytes(data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+			switch num {
+			case 1:
+				callID = string(val)
+			case 2:
+				toolCallBytes = append([]byte(nil), val...)
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+		}
+	}
+	if len(toolCallBytes) == 0 {
+		return
+	}
+	toolName, args, hasResult := decodeCursorToolCall(toolCallBytes)
+	if toolName == "" || (completed && hasResult) {
+		return
+	}
+	msg.Type = ServerMsgExecMcpArgs
+	msg.McpToolName = toolName
+	msg.McpToolCallId = callID
+	msg.McpArgs = args
+}
+
+func decodeCursorToolCall(data []byte) (string, map[string][]byte, bool) {
+	toolCallDesc := Msg("ToolCall")
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return "", nil, false
+		}
+		data = data[n:]
+
+		if typ != protowire.BytesType {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return "", nil, false
+			}
+			data = data[n:]
+			continue
+		}
+
+		val, n := protowire.ConsumeBytes(data)
+		if n < 0 {
+			return "", nil, false
+		}
+		data = data[n:]
+
+		field := toolCallDesc.Fields().ByNumber(num)
+		if field == nil || field.Kind() != protoreflect.MessageKind {
+			continue
+		}
+		callMsg := dynamicpb.NewMessage(field.Message())
+		if err := goproto.Unmarshal(val, callMsg); err != nil {
+			log.Debugf("decodeCursorToolCall: failed to decode %s: %v", field.Name(), err)
+			continue
+		}
+		args := decodeDynamicToolCallArgs(callMsg)
+		return cursorToolNameFromFieldName(string(field.Name())), args, dynamicMessageHasField(callMsg, "result")
+	}
+	return "", nil, false
+}
+
+func decodeDynamicToolCallArgs(msg *dynamicpb.Message) map[string][]byte {
+	argsField := msg.Descriptor().Fields().ByName("args")
+	if argsField == nil || !msg.Has(argsField) || argsField.Kind() != protoreflect.MessageKind {
+		return map[string][]byte{}
+	}
+	argsMessage := msg.Get(argsField).Message().Interface()
+	raw, err := protojson.MarshalOptions{UseProtoNames: false}.Marshal(argsMessage)
+	if err != nil {
+		log.Debugf("decodeDynamicToolCallArgs: failed to marshal args JSON: %v", err)
+		return map[string][]byte{}
+	}
+	decoded := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		log.Debugf("decodeDynamicToolCallArgs: failed to decode args JSON object: %v", err)
+		return map[string][]byte{}
+	}
+	args := make(map[string][]byte, len(decoded))
+	for key, value := range decoded {
+		args[key] = append([]byte(nil), value...)
+	}
+	return args
+}
+
+func dynamicMessageHasField(msg *dynamicpb.Message, name protoreflect.Name) bool {
+	field := msg.Descriptor().Fields().ByName(name)
+	return field != nil && msg.Has(field)
+}
+
+func cursorToolNameFromFieldName(fieldName string) string {
+	name := strings.TrimSuffix(fieldName, "_tool_call")
+	parts := strings.Split(name, "_")
+	var b strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString(part)
+			continue
+		}
+		b.WriteString(strings.ToUpper(part[:1]))
+		b.WriteString(part[1:])
+	}
+	return b.String()
 }
 
 func decodeKvServerMessage(data []byte, msg *DecodedServerMessage) {

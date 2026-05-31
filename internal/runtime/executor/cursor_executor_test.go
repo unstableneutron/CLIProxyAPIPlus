@@ -259,8 +259,12 @@ func TestCursorPayloadCandidatesDeduplicateExactSliceReferences(t *testing.T) {
 
 func TestCursorCanResumeToolSessionRejectsClosedStreams(t *testing.T) {
 	session := &cursorSession{
-		authID:  "cursor-a.json",
-		pending: []pendingMcpExec{{ToolCallId: "call_read"}},
+		authID: "cursor-a.json",
+		pending: []pendingMcpExec{{
+			ExecMsgId:  7,
+			ExecId:     "exec-read",
+			ToolCallId: "call_read",
+		}},
 	}
 	results := []toolResultInfo{{ToolCallId: "call_read", Content: "ok"}}
 
@@ -269,6 +273,22 @@ func TestCursorCanResumeToolSessionRejectsClosedStreams(t *testing.T) {
 	}
 	if !cursorCanResumeToolSession(session, "cursor-a.json", results, false) {
 		t.Fatal("open stream session with matching tool result should be resumable")
+	}
+}
+
+func TestCursorCanResumeToolSessionRejectsInteractionToolCallsWithoutExecMetadata(t *testing.T) {
+	session := &cursorSession{
+		authID: "cursor-a.json",
+		pending: []pendingMcpExec{{
+			ToolCallId: "call_read_lints",
+			ToolName:   "readLints",
+			Args:       `{"paths":["AGENTS.md"]}`,
+		}},
+	}
+	results := []toolResultInfo{{ToolCallId: "call_read_lints", Content: "[]"}}
+
+	if cursorCanResumeToolSession(session, "cursor-a.json", results, false) {
+		t.Fatal("interaction tool calls without exec metadata must cold-resume instead of sending exec results")
 	}
 }
 
@@ -282,6 +302,28 @@ func TestCursorResumeWithToolResultsRejectsMissingStream(t *testing.T) {
 
 	if _, err := exec.resumeWithToolResults(context.Background(), session, parsed, sdktranslator.FromString(""), sdktranslator.FromString(""), cliproxyexecutor.Request{}, nil, nil, false); err == nil {
 		t.Fatal("resumeWithToolResults() error = nil, want missing/dead stream error")
+	}
+}
+
+func TestCursorExecDeduperAllowsDistinctInteractionToolCalls(t *testing.T) {
+	deduper := newCursorExecDeduper()
+	first := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolCallId: "call_read_lints",
+	}
+	second := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolCallId: "call_read_lints_again",
+	}
+
+	if !deduper.mark(first) {
+		t.Fatal("first interaction tool call was treated as duplicate")
+	}
+	if !deduper.mark(second) {
+		t.Fatal("second interaction tool call with a different call id was treated as duplicate")
+	}
+	if deduper.mark(first) {
+		t.Fatal("same interaction tool call id was not treated as duplicate")
 	}
 }
 

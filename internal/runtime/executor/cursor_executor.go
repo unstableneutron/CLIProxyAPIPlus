@@ -147,7 +147,22 @@ func cursorCanResumeToolSession(session *cursorSession, authID string, results [
 	if session.authID != authID {
 		return false
 	}
+	if !cursorPendingExecsCanUseExecResult(session.pending) {
+		return false
+	}
 	return cursorToolResultsMatchPending(results, session.pending)
+}
+
+func cursorPendingExecsCanUseExecResult(pending []pendingMcpExec) bool {
+	if len(pending) == 0 {
+		return false
+	}
+	for _, exec := range pending {
+		if exec.ExecMsgId == 0 && strings.TrimSpace(exec.ExecId) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func cursorH2StreamDone(stream *cursorproto.H2Stream) bool {
@@ -1280,6 +1295,9 @@ func (d *cursorExecDeduper) mark(msg *cursorproto.DecodedServerMessage) bool {
 		return true
 	}
 	key := fmt.Sprintf("%d:%s:%d", msg.Type, msg.ExecId, msg.ExecMsgId)
+	if msg.Type == cursorproto.ServerMsgExecMcpArgs && msg.ExecId == "" && msg.ExecMsgId == 0 && msg.McpToolCallId != "" {
+		key = fmt.Sprintf("%d:tool:%s", msg.Type, msg.McpToolCallId)
+	}
 	if _, ok := d.seen[key]; ok {
 		return false
 	}

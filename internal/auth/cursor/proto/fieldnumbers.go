@@ -136,9 +136,18 @@ const (
 
 // InteractionUpdate oneof "message"
 const (
-	IU_TextDelta         = 1 // TextDeltaUpdate
-	IU_ThinkingDelta     = 4 // ThinkingDeltaUpdate
-	IU_ThinkingCompleted = 5 // ThinkingCompletedUpdate
+	IU_TextDelta         = 1  // TextDeltaUpdate
+	IU_ToolCallStarted   = 2  // ToolCallStartedUpdate
+	IU_ToolCallCompleted = 3  // ToolCallCompletedUpdate
+	IU_ThinkingDelta     = 4  // ThinkingDeltaUpdate
+	IU_ThinkingCompleted = 5  // ThinkingCompletedUpdate
+	IU_PartialToolCall   = 7  // PartialToolCallUpdate
+	IU_TokenDelta        = 8  // TokenDeltaUpdate
+	IU_Heartbeat         = 13 // HeartbeatUpdate
+	IU_TurnEnded         = 14 // TurnEndedUpdate
+	IU_ToolCallDelta     = 15 // ToolCallDeltaUpdate
+	IU_StepStarted       = 16 // StepStartedUpdate
+	IU_StepCompleted     = 17 // StepCompletedUpdate
 )
 
 // TextDeltaUpdate (msg 92)
