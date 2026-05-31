@@ -193,6 +193,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		addConfigQueryParamsToAttrs(ck.QueryParams, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -319,6 +320,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -358,6 +360,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,

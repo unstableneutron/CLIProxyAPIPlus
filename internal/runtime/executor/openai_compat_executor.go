@@ -63,6 +63,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(req, attrs)
 	return nil
 }
 
@@ -144,6 +145,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(httpReq, attrs)
+	url = httpReq.URL.String()
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -235,6 +238,8 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(httpReq, attrs)
+	url = httpReq.URL.String()
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -342,6 +347,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(httpReq, attrs)
+	url = httpReq.URL.String()
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -495,6 +502,8 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(httpReq, attrs)
+	url = httpReq.URL.String()
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

@@ -511,6 +511,9 @@ type CodexKey struct {
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// QueryParams optionally adds extra URL query parameters for requests sent with this key.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
+
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
@@ -725,6 +728,9 @@ type OpenAICompatibility struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// QueryParams optionally adds extra URL query parameters for requests sent to this provider.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
@@ -1095,6 +1101,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -1116,6 +1123,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
 			continue
@@ -1232,11 +1240,20 @@ func looksLikeBcrypt(s string) bool {
 
 // NormalizeHeaders trims header keys and values and removes empty pairs.
 func NormalizeHeaders(headers map[string]string) map[string]string {
-	if len(headers) == 0 {
+	return normalizeStringMap(headers)
+}
+
+// NormalizeQueryParams trims query parameter keys and values and removes empty pairs.
+func NormalizeQueryParams(params map[string]string) map[string]string {
+	return normalizeStringMap(params)
+}
+
+func normalizeStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
 		return nil
 	}
-	clean := make(map[string]string, len(headers))
-	for k, v := range headers {
+	clean := make(map[string]string, len(values))
+	for k, v := range values {
 		key := strings.TrimSpace(k)
 		val := strings.TrimSpace(v)
 		if key == "" || val == "" {

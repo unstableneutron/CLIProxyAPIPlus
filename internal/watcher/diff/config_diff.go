@@ -211,6 +211,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
 			}
+			if !equalStringMap(o.QueryParams, n.QueryParams) {
+				changes = append(changes, fmt.Sprintf("codex[%d].query-params: updated", i))
+			}
 			oldModels := SummarizeCodexModels(o.Models)
 			newModels := SummarizeCodexModels(n.Models)
 			if oldModels.hash != newModels.hash {

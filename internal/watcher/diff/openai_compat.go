@@ -78,6 +78,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if !equalStringMap(oldEntry.QueryParams, newEntry.QueryParams) {
+		details = append(details, "query-params updated")
+	}
 	if len(details) == 0 {
 		return ""
 	}
@@ -170,6 +173,18 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 		if len(keys) > 0 {
 			sort.Strings(keys)
 			parts = append(parts, "headers="+strings.Join(keys, ","))
+		}
+	}
+	if len(entry.QueryParams) > 0 {
+		keys := make([]string, 0, len(entry.QueryParams))
+		for k := range entry.QueryParams {
+			if trimmed := strings.TrimSpace(k); trimmed != "" {
+				keys = append(keys, strings.ToLower(trimmed))
+			}
+		}
+		if len(keys) > 0 {
+			sort.Strings(keys)
+			parts = append(parts, "query-params="+strings.Join(keys, ","))
 		}
 	}
 

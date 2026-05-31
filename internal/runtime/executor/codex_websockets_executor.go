@@ -220,6 +220,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if err != nil {
 		return resp, err
 	}
+	wsURL, err = applyCodexWebsocketQueryParams(wsURL, auth)
+	if err != nil {
+		return resp, err
+	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
@@ -414,6 +418,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, body, requestedModel, requestPath, opts.Headers)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -422,6 +427,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
+	if err != nil {
+		return nil, err
+	}
+	wsURL, err = applyCodexWebsocketQueryParams(wsURL, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -811,6 +820,14 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 		return "", fmt.Errorf("codex websockets executor: responses websocket URL host is empty")
 	}
 	return parsed.String(), nil
+}
+
+func applyCodexWebsocketQueryParams(wsURL string, auth *cliproxyauth.Auth) (string, error) {
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	return util.ApplyCustomQueryParamsToURL(wsURL, attrs)
 }
 
 func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {

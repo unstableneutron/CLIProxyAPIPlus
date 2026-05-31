@@ -295,7 +295,11 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 			CodexKey: []config.CodexKey{
 				{APIKey: ""},   // empty, should be skipped
 				{APIKey: "  "}, // whitespace, should be skipped
-				{APIKey: "valid-key", Headers: map[string]string{"Authorization": "Bearer xyz"}},
+				{
+					APIKey:      "valid-key",
+					Headers:     map[string]string{"Authorization": "Bearer xyz"},
+					QueryParams: map[string]string{"api-version": "preview"},
+				},
 			},
 		},
 		Now:         time.Now(),
@@ -312,6 +316,9 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	if auths[0].Attributes["header:Authorization"] != "Bearer xyz" {
 		t.Errorf("expected header:Authorization=Bearer xyz, got %s", auths[0].Attributes["header:Authorization"])
 	}
+	if auths[0].Attributes["query:api-version"] != "preview" {
+		t.Errorf("expected query:api-version=preview, got %s", auths[0].Attributes["query:api-version"])
+	}
 }
 
 func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
@@ -327,6 +334,8 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 					Name:           "CustomProvider",
 					BaseURL:        "https://custom.api.com",
 					DisableCooling: true,
+					Headers:        map[string]string{"X-Custom": "value"},
+					QueryParams:    map[string]string{"api-version": "preview"},
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 						{APIKey: "key-1"},
 						{APIKey: "key-2"},
@@ -393,6 +402,12 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 				for i := range auths {
 					if v, ok := auths[i].Metadata["disable_cooling"].(bool); !ok || !v {
 						t.Fatalf("expected auth[%d].disable_cooling=true, got %v", i, auths[i].Metadata["disable_cooling"])
+					}
+					if got := auths[i].Attributes["header:X-Custom"]; got != "value" {
+						t.Fatalf("auth[%d] header:X-Custom = %q, want value", i, got)
+					}
+					if got := auths[i].Attributes["query:api-version"]; got != "preview" {
+						t.Fatalf("auth[%d] query:api-version = %q, want preview", i, got)
 					}
 				}
 			}

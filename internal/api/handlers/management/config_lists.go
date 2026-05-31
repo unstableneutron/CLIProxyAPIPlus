@@ -469,6 +469,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers       *map[string]string                  `json:"headers"`
+		QueryParams   *map[string]string                  `json:"query-params"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -528,6 +529,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.QueryParams != nil {
+		entry.QueryParams = config.NormalizeQueryParams(*body.Value.QueryParams)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
@@ -965,6 +969,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		ProxyURL       *string              `json:"proxy-url"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
+		QueryParams    *map[string]string   `json:"query-params"`
 		ExcludedModels *[]string            `json:"excluded-models"`
 	}
 	var body struct {
@@ -1022,6 +1027,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.QueryParams != nil {
+		entry.QueryParams = config.NormalizeQueryParams(*body.Value.QueryParams)
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
@@ -1092,6 +1100,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.QueryParams = config.NormalizeQueryParams(entry.QueryParams)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
@@ -1152,6 +1161,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.QueryParams = config.NormalizeQueryParams(entry.QueryParams)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {
 		return

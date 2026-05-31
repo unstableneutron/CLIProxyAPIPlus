@@ -39,6 +39,98 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamRewritesPayloadModelToExecutionModel(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	capturedQuery := make(chan map[string]string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("request path = %s, want /responses", r.URL.Path)
+		}
+		query := r.URL.Query()
+		capturedQuery <- map[string]string{
+			"api-version":           query.Get("api-version"),
+			"deployment":            query.Get("deployment"),
+			"region":                query.Get("region"),
+			"azure-resource-bucket": query.Get("azure-resource-bucket"),
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read upstream websocket message: %v", err)
+		}
+		if msgType != websocket.TextMessage {
+			t.Fatalf("message type = %d, want text", msgType)
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","output":[]}}`)); errWrite != nil {
+			t.Fatalf("write created websocket message: %v", errWrite)
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Fatalf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":                     "sk-test",
+		"base_url":                    server.URL,
+		"query:api-version":           "preview",
+		"query:deployment":            "gpt-5.4-nomoderation",
+		"query:region":                "global",
+		"query:azure-resource-bucket": "internal-productivity",
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4-nomoderation",
+		Payload: []byte(`{"model":"prototype/gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		if got := gjson.GetBytes(payload, "model").String(); got != "gpt-5.4-nomoderation" {
+			t.Fatalf("upstream model = %s, want gpt-5.4-nomoderation; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+
+	select {
+	case query := <-capturedQuery:
+		want := map[string]string{
+			"api-version":           "preview",
+			"deployment":            "gpt-5.4-nomoderation",
+			"region":                "global",
+			"azure-resource-bucket": "internal-productivity",
+		}
+		for key, wantValue := range want {
+			if got := query[key]; got != wantValue {
+				t.Fatalf("query %s = %q, want %q", key, got, wantValue)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket query")
+	}
+}
+
 func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)
