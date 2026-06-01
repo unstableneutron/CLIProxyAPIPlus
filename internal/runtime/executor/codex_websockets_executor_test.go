@@ -23,7 +23,7 @@ import (
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, "wss://chatgpt.com/backend-api/codex/responses")
 
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
@@ -36,6 +36,32 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyStripsTokenLimitsOnlyForChatGPTBackend(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[],"max_output_tokens":123,"max_completion_tokens":456,"max_tokens":789}`)
+
+	chatgptPayload := buildCodexWebsocketRequestBody(body, "wss://chatgpt.com/backend-api/codex/responses")
+
+	if got := gjson.GetBytes(chatgptPayload, "type").String(); got != "response.create" {
+		t.Fatalf("type = %s, want response.create", got)
+	}
+	for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+		if gjson.GetBytes(chatgptPayload, field).Exists() {
+			t.Fatalf("%s should be stripped for ChatGPT Codex websocket payload: %s", field, chatgptPayload)
+		}
+	}
+	if got := gjson.GetBytes(chatgptPayload, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("model = %s, want gpt-5-codex", got)
+	}
+
+	customPayload := buildCodexWebsocketRequestBody(body, "wss://example.test/backend-api/codex/responses")
+
+	for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
+		if !gjson.GetBytes(customPayload, field).Exists() {
+			t.Fatalf("%s should be preserved for non-ChatGPT websocket payload: %s", field, customPayload)
+		}
 	}
 }
 

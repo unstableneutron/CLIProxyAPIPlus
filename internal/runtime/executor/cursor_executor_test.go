@@ -674,6 +674,42 @@ func TestCursorExecDeduperAllowsDistinctInteractionToolCalls(t *testing.T) {
 	}
 }
 
+func TestCursorExecDeduperDoesNotHideInteractionToolStartedAfterPartial(t *testing.T) {
+	deduper := newCursorExecDeduper()
+	collector := newCursorInteractionToolCollector()
+	partial := &cursorproto.DecodedServerMessage{
+		Type:                     cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:              "grep",
+		McpToolCallId:            "call_grep",
+		InteractionToolCall:      true,
+		InteractionArgsTextDelta: `{"pattern":`,
+	}
+	started := &cursorproto.DecodedServerMessage{
+		Type:                cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:         "grep",
+		McpToolCallId:       "call_grep",
+		McpArgs:             map[string][]byte{"pattern": []byte(`"InteractionUpdate"`)},
+		InteractionToolCall: true,
+	}
+
+	if !deduper.mark(partial) {
+		t.Fatal("partial interaction tool update was treated as duplicate")
+	}
+	if got := collector.absorb(partial); got != nil {
+		t.Fatalf("incomplete partial update emitted %#v, want nil", got)
+	}
+	if !deduper.mark(started) {
+		t.Fatal("tool started update was hidden as a duplicate after an incomplete partial update")
+	}
+	got := collector.absorb(started)
+	if got == nil {
+		t.Fatal("complete started update did not emit collected tool call")
+	}
+	if got.McpToolName != "grep" || got.McpToolCallId != "call_grep" {
+		t.Fatalf("collected msg = %#v, want grep/call_grep", got)
+	}
+}
+
 func TestCursorToolResultsMatchPendingCalls(t *testing.T) {
 	pending := []pendingMcpExec{
 		{ToolCallId: "call_a"},

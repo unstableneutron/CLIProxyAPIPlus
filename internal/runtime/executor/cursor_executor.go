@@ -1767,6 +1767,9 @@ func (d *cursorExecDeduper) mark(msg *cursorproto.DecodedServerMessage) bool {
 	if d == nil || msg == nil || !cursorIsExecMessage(msg.Type) {
 		return true
 	}
+	if msg.Type == cursorproto.ServerMsgExecMcpArgs && msg.InteractionToolCall {
+		return true
+	}
 	key := fmt.Sprintf("%d:%s:%d", msg.Type, msg.ExecId, msg.ExecMsgId)
 	if msg.Type == cursorproto.ServerMsgExecMcpArgs && msg.ExecId == "" && msg.ExecMsgId == 0 && msg.McpToolCallId != "" {
 		key = fmt.Sprintf("%d:tool:%s", msg.Type, msg.McpToolCallId)
