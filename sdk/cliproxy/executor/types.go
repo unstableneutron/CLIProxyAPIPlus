@@ -80,6 +80,10 @@ type StreamChunk struct {
 	Payload []byte
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
+	// Bootstrap reports that the upstream stream has produced meaningful
+	// protocol activity before any downstream-visible payload. It is an
+	// internal control marker and must not be forwarded to clients.
+	Bootstrap bool
 }
 
 // StreamResult wraps the streaming response, providing both the chunk channel

@@ -2,14 +2,18 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -17,6 +21,120 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestCursorRawProtoLogFrameUsesBase64AndHashes(t *testing.T) {
+	payload := []byte{0x01, 0x02, 0x03, 0xff}
+	frame := cursorproto.FrameConnectMessage(payload, cursorproto.ConnectCompressionFlag)
+
+	got := cursorFormatRawProtoLogFrame("response", "stream-1", 7, cursorproto.ConnectCompressionFlag, frame, payload, "type=1")
+
+	for _, want := range []string{
+		"Direction: response",
+		"Stream ID: stream-1",
+		"Sequence: 7",
+		"Flags: 0x01",
+		"Frame Bytes: 9",
+		"Payload Bytes: 4",
+		"Decoded Message: type=1",
+		"Frame-Base64: " + base64.StdEncoding.EncodeToString(frame),
+		"Payload-Base64: " + base64.StdEncoding.EncodeToString(payload),
+		"Frame-SHA256:",
+		"Payload-SHA256:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("raw proto log missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestCursorRawProtoLoggingUsesAPIRequestAndResponseSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.Config{Debug: true}
+	cfg.RequestLog = true
+
+	payload := []byte{0x08, 0x01}
+	frame := cursorproto.FrameConnectMessage(payload, 0)
+	cursorRecordRunAPIRequest(ctx, cfg, &cliproxyauth.Auth{ID: "cursor.test.json", Provider: "cursor"}, map[string]string{
+		":path":         cursorRunPath,
+		"authorization": "Bearer local-secret",
+		"content-type":  "application/connect+proto",
+	}, payload, frame)
+	cursorRecordRunAPIResponseMetadata(ctx, cfg)
+	newCursorRawProtoLogger(ctx, cfg).appendResponseFrame("stream-1", 0, frame, payload, "type=1")
+
+	requestValue, exists := ginCtx.Get("API_REQUEST")
+	if !exists {
+		t.Fatal("API_REQUEST was not recorded")
+	}
+	requestText := string(requestValue.([]byte))
+	for _, want := range []string{
+		"=== API REQUEST 1 ===",
+		"Transport: h2-connect",
+		"Frame-Base64: " + base64.StdEncoding.EncodeToString(frame),
+		"Payload-Base64: " + base64.StdEncoding.EncodeToString(payload),
+		"Authorization: Bearer loca...cret",
+	} {
+		if !strings.Contains(requestText, want) {
+			t.Fatalf("API request log missing %q in:\n%s", want, requestText)
+		}
+	}
+
+	responseValue, exists := ginCtx.Get("API_RESPONSE")
+	if !exists {
+		t.Fatal("API_RESPONSE was not recorded")
+	}
+	responseText := string(responseValue.([]byte))
+	for _, want := range []string{
+		"=== API RESPONSE 1 ===",
+		"X-Cursor-Transport: h2-connect",
+		"Direction: response",
+		"Frame-Base64: " + base64.StdEncoding.EncodeToString(frame),
+	} {
+		if !strings.Contains(responseText, want) {
+			t.Fatalf("API response log missing %q in:\n%s", want, responseText)
+		}
+	}
+}
+
+func TestCursorWaitForStreamStartReturnsOnBootstrapMarker(t *testing.T) {
+	chunks := make(chan cliproxyexecutor.StreamChunk)
+	streamErrCh := make(chan error)
+	bootstrapStarted := make(chan struct{}, 1)
+	payloadSent := make(chan struct{})
+	bootstrapStarted <- struct{}{}
+
+	result, err := cursorWaitForStreamStart(context.Background(), chunks, streamErrCh, bootstrapStarted, payloadSent, func() {})
+	if err != nil {
+		t.Fatalf("cursorWaitForStreamStart() error = %v", err)
+	}
+	if result == nil || result.Chunks != chunks {
+		t.Fatal("cursorWaitForStreamStart() did not return the original stream chunks after bootstrap")
+	}
+}
+
+func TestCursorWaitForStreamStartClosesStreamOnContextCancel(t *testing.T) {
+	chunks := make(chan cliproxyexecutor.StreamChunk)
+	streamErrCh := make(chan error)
+	bootstrapStarted := make(chan struct{})
+	payloadSent := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	closed := false
+	result, err := cursorWaitForStreamStart(ctx, chunks, streamErrCh, bootstrapStarted, payloadSent, func() { closed = true })
+	if result != nil {
+		t.Fatalf("cursorWaitForStreamStart() result = %#v, want nil", result)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cursorWaitForStreamStart() error = %v, want context.Canceled", err)
+	}
+	if !closed {
+		t.Fatal("cursorWaitForStreamStart() did not close the upstream stream on context cancellation")
+	}
+}
 
 func TestCursorClientVersionHeaderAllowsEnvOverride(t *testing.T) {
 	t.Setenv("CLIPROXY_CURSOR_CLIENT_VERSION", "9.9.9")
@@ -372,7 +490,7 @@ func TestCursorShouldRejectExecMcpArgsWithMismatchedKnownToolArgs(t *testing.T) 
 	}
 }
 
-func TestCursorShouldNormalizeSingularWebFetchURLArg(t *testing.T) {
+func TestCursorShouldRejectSingularWebFetchURLArg(t *testing.T) {
 	msg := &cursorproto.DecodedServerMessage{
 		Type:          cursorproto.ServerMsgExecMcpArgs,
 		McpToolName:   cursorOpenAIToolAliasPrefix + "web_fetch",
@@ -384,16 +502,109 @@ func TestCursorShouldNormalizeSingularWebFetchURLArg(t *testing.T) {
 			"objective": []byte(`"Read example"`),
 		},
 	}
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"urls":{"type":"array"},"objective":{"type":"string"}},
+		"required":["urls"],
+		"additionalProperties":false
+	}`)
 
-	if !cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "web_fetch"}}) {
-		t.Fatal("web_fetch with singular url was not normalized and emitted")
+	emit, reason := cursorValidateMcpExecForEmission(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "web_fetch", InputSchema: schema}})
+	if emit {
+		t.Fatal("web_fetch with singular url was emittable")
 	}
-	var urls []string
-	if err := json.Unmarshal(msg.McpArgs["urls"], &urls); err != nil {
-		t.Fatalf("urls arg is not JSON string array: %v raw=%q", err, msg.McpArgs["urls"])
+	for _, want := range []string{`missing required argument "urls"`, `argument "url" is not declared`} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want to contain %q", reason, want)
+		}
 	}
-	if len(urls) != 1 || urls[0] != "https://example.com/a" {
-		t.Fatalf("urls = %#v, want one normalized URL", urls)
+	if _, exists := msg.McpArgs["urls"]; exists {
+		t.Fatal("singular url was repaired into urls")
+	}
+}
+
+func TestCursorShouldRejectFffGrepSingularPatternArg(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "fff_grep",
+		McpToolCallId: "call_fff_grep",
+		ExecMsgId:     10,
+		ExecId:        "exec-fff-grep",
+		McpArgs: map[string][]byte{
+			"literal": []byte(`true`),
+			"pattern": []byte(`"[\"cursor:\", \"chatPath\", \"StreamChat\"]"`),
+			"within":  []byte(`["/repo/open-sse/config/providers.js"]`),
+		},
+	}
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"literal":{"type":"boolean"},"patterns":{"type":"array"},"within":{"type":"array"}},
+		"required":["patterns"],
+		"additionalProperties":false
+	}`)
+
+	emit, reason := cursorValidateMcpExecForEmission(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "fff_grep", InputSchema: schema}})
+	if emit {
+		t.Fatal("fff_grep with singular pattern was emittable")
+	}
+	for _, want := range []string{`missing required argument "patterns"`, `argument "pattern" is not declared`} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want to contain %q", reason, want)
+		}
+	}
+	if _, exists := msg.McpArgs["patterns"]; exists {
+		t.Fatal("singular pattern was repaired into patterns")
+	}
+}
+
+func TestCursorShouldRejectReadWithFffGrepArgs(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "read",
+		McpToolCallId: "call_read_but_grep_args",
+		ExecMsgId:     11,
+		ExecId:        "exec-read-but-grep-args",
+		McpArgs: map[string][]byte{
+			"literal":  []byte(`true`),
+			"patterns": []byte(`["cursor:","chatPath","StreamChat"]`),
+			"within":   []byte(`["/repo/open-sse/config/providers.js"]`),
+		},
+	}
+
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{
+		{Name: cursorOpenAIToolAliasPrefix + "read"},
+		{Name: cursorOpenAIToolAliasPrefix + "fff_grep"},
+	}) {
+		t.Fatal("read with fff_grep-shaped args was emittable")
+	}
+	if got := cursorOpenAIToolNameForMcpTool(msg.McpToolName); got != "read" {
+		t.Fatalf("tool name = %q, want read", got)
+	}
+}
+
+func TestCursorShouldRejectMcpArgsWithUndeclaredSchemaProperties(t *testing.T) {
+	msg := &cursorproto.DecodedServerMessage{
+		Type:          cursorproto.ServerMsgExecMcpArgs,
+		McpToolName:   cursorOpenAIToolAliasPrefix + "fff_grep",
+		McpToolCallId: "call_bad_fff_grep",
+		ExecMsgId:     12,
+		ExecId:        "exec-bad-fff-grep",
+		McpArgs: map[string][]byte{
+			"literal":    []byte(`true`),
+			"patterns":   []byte(`["cursor:"]`),
+			"within":     []byte(`["/repo/open-sse/config/providers.js"]`),
+			"unexpected": []byte(`"nope"`),
+		},
+	}
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"literal":{"type":"boolean"},"patterns":{"type":"array"},"within":{"type":"array"}},
+		"required":["patterns"],
+		"additionalProperties":false
+	}`)
+
+	if cursorShouldEmitMcpExec(msg, []cursorproto.McpToolDef{{Name: cursorOpenAIToolAliasPrefix + "fff_grep", InputSchema: schema}}) {
+		t.Fatal("fff_grep with undeclared schema property was emittable")
 	}
 }
 

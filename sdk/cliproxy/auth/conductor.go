@@ -784,9 +784,9 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, bool, error) {
 	if ch == nil {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
 	for {
@@ -797,26 +797,29 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
-				return nil, false, ctx.Err()
+				return nil, false, false, ctx.Err()
 			case chunk, ok = <-ch:
 			}
 		} else {
 			chunk, ok = <-ch
 		}
 		if !ok {
-			return buffered, true, nil
+			return buffered, true, false, nil
 		}
 		if chunk.Err != nil {
-			return nil, false, chunk.Err
+			return nil, false, false, chunk.Err
+		}
+		if chunk.Bootstrap {
+			return buffered, false, true, nil
 		}
 		buffered = append(buffered, chunk)
 		if len(chunk.Payload) > 0 {
-			return buffered, false, nil
+			return buffered, false, false, nil
 		}
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, bootstrapped bool) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -844,6 +847,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			case out <- chunk:
 				return true
+			}
+		}
+		if bootstrapped {
+			if ok := emit(cliproxyexecutor.StreamChunk{Bootstrap: true}); !ok {
+				discardStreamChunks(remaining)
+				return
 			}
 		}
 		for _, chunk := range buffered {
@@ -894,7 +903,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapped, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -951,7 +960,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, bootstrapped), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

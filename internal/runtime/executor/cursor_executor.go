@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -153,43 +154,32 @@ func cursorValidateMcpExecForEmission(msg *cursorproto.DecodedServerMessage, mcp
 	if toolName == "" {
 		return false, "missing tool name"
 	}
-	declared := cursorMcpToolDeclared(toolName, mcpTools)
+
+	toolDef, declared := cursorMcpToolDefinition(toolName, mcpTools)
 	if len(mcpTools) > 0 && !declared {
 		return false, fmt.Sprintf("tool %q was not declared by the client", toolName)
 	}
 	if msg.InteractionToolCall && !declared {
 		return false, fmt.Sprintf("interaction tool %q was not declared by the client", toolName)
 	}
-	msg.McpArgs = cursorNormalizeMcpArgsForClient(toolName, msg.McpArgs)
+	if declared {
+		if ok, reason := cursorMcpArgsMatchInputSchema(msg.McpArgs, toolDef.InputSchema); !ok {
+			return false, fmt.Sprintf("tool %q arguments violate schema: %s", toolName, reason)
+		}
+	}
 	if !cursorMcpToolCallHasRequiredArgs(toolName, msg.McpArgs) {
 		return false, fmt.Sprintf("tool %q missing required arguments", toolName)
 	}
 	return true, ""
 }
 
-func cursorMcpToolDeclared(toolName string, mcpTools []cursorproto.McpToolDef) bool {
+func cursorMcpToolDefinition(toolName string, mcpTools []cursorproto.McpToolDef) (cursorproto.McpToolDef, bool) {
 	for _, tool := range mcpTools {
 		if cursorOpenAIToolNameForMcpTool(tool.Name) == toolName {
-			return true
+			return tool, true
 		}
 	}
-	return false
-}
-
-func cursorNormalizeMcpArgsForClient(toolName string, args map[string][]byte) map[string][]byte {
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "web_fetch":
-		if len(cursorJSONArgStringSlice(args, "urls")) == 0 {
-			if url := cursorJSONArgString(args, "url"); url != "" {
-				if args == nil {
-					args = make(map[string][]byte, 1)
-				}
-				encoded, _ := json.Marshal([]string{url})
-				args["urls"] = encoded
-			}
-		}
-	}
-	return args
+	return cursorproto.McpToolDef{}, false
 }
 
 func cursorMcpToolCallHasRequiredArgs(toolName string, args map[string][]byte) bool {
@@ -235,6 +225,10 @@ func cursorJSONArgStringSlice(args map[string][]byte, key string) []string {
 	if !ok {
 		return nil
 	}
+	return cursorMcpValueStringSlice(value)
+}
+
+func cursorMcpValueStringSlice(value interface{}) []string {
 	switch typed := value.(type) {
 	case []string:
 		return cursorTrimStringSlice(typed)
@@ -277,6 +271,72 @@ func cursorTrimStringSlice(items []string) []string {
 		}
 	}
 	return out
+}
+
+func cursorMcpArgsMatchInputSchema(args map[string][]byte, schema json.RawMessage) (bool, string) {
+	if len(schema) == 0 {
+		return true, ""
+	}
+	var decoded struct {
+		Required             []string                   `json:"required"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+		AdditionalProperties json.RawMessage            `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(schema, &decoded); err != nil {
+		return true, ""
+	}
+	var violations []string
+	for _, required := range decoded.Required {
+		if !cursorMcpArgHasValue(args, required) {
+			violations = append(violations, fmt.Sprintf("missing required argument %q", required))
+		}
+	}
+	if cursorSchemaDisallowsAdditionalProperties(decoded.AdditionalProperties) && len(decoded.Properties) > 0 {
+		keys := make([]string, 0, len(args))
+		for key := range args {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if _, ok := decoded.Properties[key]; !ok {
+				violations = append(violations, fmt.Sprintf("argument %q is not declared", key))
+			}
+		}
+	}
+	if len(violations) > 0 {
+		return false, strings.Join(violations, "; ")
+	}
+	return true, ""
+}
+
+func cursorSchemaDisallowsAdditionalProperties(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var allowed bool
+	if err := json.Unmarshal(raw, &allowed); err != nil {
+		return false
+	}
+	return !allowed
+}
+
+func cursorMcpArgHasValue(args map[string][]byte, key string) bool {
+	value, ok := cursorMcpArgValue(args, key)
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []string:
+		return len(cursorTrimStringSlice(typed)) > 0
+	case []interface{}:
+		return len(cursorMcpValueStringSlice(typed)) > 0
+	default:
+		return true
+	}
 }
 
 func cursorCanResumeToolSession(session *cursorSession, authID string, results []toolResultInfo, streamDone bool) bool {
@@ -562,6 +622,143 @@ func sendCursorStreamChunk(ch chan cliproxyexecutor.StreamChunk, chunk cliproxye
 	ch <- chunk
 }
 
+func cursorSignalOnce(ch chan struct{}, state *atomic.Bool) {
+	if ch == nil || state == nil || !state.CompareAndSwap(false, true) {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func cursorWaitForStreamStart(ctx context.Context, chunks chan cliproxyexecutor.StreamChunk, streamErrCh <-chan error, bootstrapStarted <-chan struct{}, payloadSent <-chan struct{}, closeUpstream func()) (*cliproxyexecutor.StreamResult, error) {
+	select {
+	case streamErr := <-streamErrCh:
+		return nil, classifyCursorError(fmt.Errorf("cursor: stream failed before response: %w", streamErr))
+	case <-bootstrapStarted:
+		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	case <-payloadSent:
+		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	case <-ctx.Done():
+		if closeUpstream != nil {
+			closeUpstream()
+		}
+		return nil, ctx.Err()
+	}
+}
+
+func cursorRawProtoLoggingEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.Debug && cfg.RequestLog
+}
+
+func cursorSHA256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func cursorFormatRawProtoLogFrame(direction, streamID string, sequence int, flags byte, frame []byte, payload []byte, decoded string) string {
+	var builder strings.Builder
+	builder.WriteString("=== CURSOR RAW PROTO FRAME ===\n")
+	builder.WriteString(fmt.Sprintf("Direction: %s\n", direction))
+	if streamID != "" {
+		builder.WriteString(fmt.Sprintf("Stream ID: %s\n", streamID))
+	}
+	if sequence > 0 {
+		builder.WriteString(fmt.Sprintf("Sequence: %d\n", sequence))
+	}
+	builder.WriteString(fmt.Sprintf("Flags: 0x%02x\n", flags))
+	builder.WriteString(fmt.Sprintf("Frame Bytes: %d\n", len(frame)))
+	builder.WriteString(fmt.Sprintf("Payload Bytes: %d\n", len(payload)))
+	if decoded != "" {
+		builder.WriteString(fmt.Sprintf("Decoded Message: %s\n", decoded))
+	}
+	builder.WriteString(fmt.Sprintf("Frame-SHA256: %s\n", cursorSHA256Hex(frame)))
+	builder.WriteString(fmt.Sprintf("Payload-SHA256: %s\n", cursorSHA256Hex(payload)))
+	builder.WriteString(fmt.Sprintf("Frame-Base64: %s\n", base64.StdEncoding.EncodeToString(frame)))
+	builder.WriteString(fmt.Sprintf("Payload-Base64: %s\n", base64.StdEncoding.EncodeToString(payload)))
+	return builder.String()
+}
+
+func cursorRawProtoRequestBody(cfg *config.Config, frame []byte, payload []byte) []byte {
+	var builder strings.Builder
+	builder.WriteString("Transport: h2-connect\n")
+	builder.WriteString(fmt.Sprintf("Connect Path: %s\n", cursorRunPath))
+	if !cursorRawProtoLoggingEnabled(cfg) {
+		builder.WriteString("Raw Cursor Connect/protobuf logging omitted; set debug: true with request-log: true to include base64 frames.\n")
+		return []byte(builder.String())
+	}
+	builder.WriteString("\n")
+	builder.WriteString(cursorFormatRawProtoLogFrame("request", "", 1, 0, frame, payload, "AgentClientMessage RunRequest"))
+	return []byte(builder.String())
+}
+
+func cursorHTTPHeaderFromMap(headers map[string]string) http.Header {
+	out := http.Header{}
+	for key, value := range headers {
+		out.Set(key, value)
+	}
+	return out
+}
+
+func cursorRecordRunAPIRequest(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, headers map[string]string, requestBytes []byte, framedRequest []byte) {
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{
+		URL:       cursorAPIURL + cursorRunPath,
+		Method:    http.MethodPost,
+		Headers:   cursorHTTPHeaderFromMap(headers),
+		Body:      cursorRawProtoRequestBody(cfg, framedRequest, requestBytes),
+		Provider:  cursorAuthType,
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+}
+
+func cursorRecordRunAPIResponseMetadata(ctx context.Context, cfg *config.Config) {
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
+	helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{
+		"Content-Type":       []string{"application/connect+proto"},
+		"X-Cursor-Transport": []string{"h2-connect"},
+	})
+}
+
+type cursorRawProtoLogger struct {
+	ctx context.Context
+	cfg *config.Config
+	mu  sync.Mutex
+	seq int
+}
+
+func newCursorRawProtoLogger(ctx context.Context, cfg *config.Config) *cursorRawProtoLogger {
+	if !cursorRawProtoLoggingEnabled(cfg) {
+		return nil
+	}
+	return &cursorRawProtoLogger{ctx: ctx, cfg: cfg}
+}
+
+func (l *cursorRawProtoLogger) appendResponseFrame(streamID string, flags byte, frame []byte, payload []byte, decoded string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.seq++
+	seq := l.seq
+	l.mu.Unlock()
+	helps.AppendAPIResponseChunk(l.ctx, l.cfg, []byte(cursorFormatRawProtoLogFrame("response", streamID, seq, flags, frame, payload, decoded)))
+}
+
 func (e *CursorExecutor) removeSessionIfCurrent(sessionKey string, session *cursorSession) bool {
 	if e == nil || session == nil {
 		return false
@@ -774,15 +971,20 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
+	requestHeaders := cursorH2RequestHeaders(accessToken)
+	cursorRecordRunAPIRequest(ctx, e.cfg, auth, requestHeaders, requestBytes, framedRequest)
 
-	stream, err := openCursorH2Stream(accessToken)
+	stream, err := openCursorH2StreamWithHeaders(requestHeaders)
 	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer stream.Close()
+	cursorRecordRunAPIResponseMetadata(ctx, e.cfg)
 
 	// Send the request frame
 	if err := stream.Write(framedRequest); err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, fmt.Errorf("cursor: failed to send request: %w", err)
 	}
 
@@ -812,7 +1014,10 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		nil,
 		usage,
 		nil, // onCheckpoint - non-streaming doesn't persist
+		nil,
+		newCursorRawProtoLogger(ctx, e.cfg),
 	); streamErr != nil && fullText.Len() == 0 && len(pendingToolCalls) == 0 {
+		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
 	}
 
@@ -992,13 +1197,18 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
+	requestHeaders := cursorH2RequestHeaders(accessToken)
+	cursorRecordRunAPIRequest(ctx, e.cfg, auth, requestHeaders, requestBytes, framedRequest)
 
-	stream, err := openCursorH2Stream(accessToken)
+	stream, err := openCursorH2StreamWithHeaders(requestHeaders)
 	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+	cursorRecordRunAPIResponseMetadata(ctx, e.cfg)
 
 	if err := stream.Write(framedRequest); err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		stream.Close()
 		return nil, fmt.Errorf("cursor: failed to send request: %w", err)
 	}
@@ -1065,16 +1275,36 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Pre-response error detection for transparent failover:
-	// If the stream fails before any chunk is emitted (e.g. quota exceeded),
-	// ExecuteStream returns an error so the conductor retries with a different auth.
+	// If the stream fails before Cursor produces any meaningful protocol
+	// activity, ExecuteStream returns an error so the conductor retries with a
+	// different auth. Once protocol activity starts, a Bootstrap marker lets the
+	// auth manager stop treating the request as pre-bootstrap while downstream
+	// handlers keep sending SSE keepalives until visible payload arrives.
 	streamErrCh := make(chan error, 1)
-	firstChunkSent := make(chan struct{}, 1) // buffered: goroutine won't block signaling
+	bootstrapStarted := make(chan struct{}, 1)
+	payloadSent := make(chan struct{}, 1)
+	var upstreamStarted atomic.Bool
+	var visiblePayloadSent atomic.Bool
 
 	origEmitToOut := emitToOut
-	emitToOut = func(chunk cliproxyexecutor.StreamChunk) {
+	signalBootstrapActivity := func() {
+		if !upstreamStarted.CompareAndSwap(false, true) {
+			return
+		}
+		origEmitToOut(cliproxyexecutor.StreamChunk{Bootstrap: true})
 		select {
-		case firstChunkSent <- struct{}{}:
+		case bootstrapStarted <- struct{}{}:
 		default:
+		}
+	}
+	emitToOut = func(chunk cliproxyexecutor.StreamChunk) {
+		if chunk.Bootstrap {
+			signalBootstrapActivity()
+			return
+		}
+		if len(chunk.Payload) > 0 {
+			signalBootstrapActivity()
+			cursorSignalOnce(payloadSent, &visiblePayloadSent)
 		}
 		origEmitToOut(chunk)
 	}
@@ -1098,6 +1328,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
 
+		rawProtoLogger := newCursorRawProtoLogger(ctx, e.cfg)
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
 				if isThinking {
@@ -1179,19 +1410,25 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				e.mu.Unlock()
 				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
 			},
+			signalBootstrapActivity,
+			rawProtoLogger,
 		)
 
 		// processH2SessionFrames returned — stream is done.
-		// Check if error happened before any chunks were emitted.
+		// Check if error happened before any upstream protocol activity.
 		if streamErr != nil {
-			select {
-			case <-firstChunkSent:
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			if visiblePayloadSent.Load() {
 				// Chunks were already sent to client — can't transparently retry.
-				// Next request will failover via conductor's cooldown mechanism.
+				// Preserve existing behavior for post-content Cursor stream errors.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
-			default:
-				// No data sent yet — propagate error for transparent conductor retry.
-				log.Warnf("cursor: stream error before data sent (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
+			} else if upstreamStarted.Load() {
+				log.Warnf("cursor: stream error after upstream bootstrap (auth=%s conv=%s): %v", authID, conversationId, streamErr)
+				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))})
+				return
+			} else {
+				// No protocol activity yet — propagate error for transparent conductor retry.
+				log.Warnf("cursor: stream error before upstream bootstrap (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
 				streamErrCh <- streamErr
 				outMu.Lock()
 				if currentOut != nil {
@@ -1222,16 +1459,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	}()
 
-	// Wait for either the first chunk or a pre-response error.
-	// If the stream fails before emitting any data (e.g. quota exceeded),
-	// return an error so the conductor retries with a different auth.
-	select {
-	case streamErr := <-streamErrCh:
-		return nil, classifyCursorError(fmt.Errorf("cursor: stream failed before response: %w", streamErr))
-	case <-firstChunkSent:
-		// Data started flowing — return stream to client
-		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
-	}
+	// Wait for either upstream protocol activity, first visible payload, a
+	// pre-bootstrap error, or caller cancellation. The Bootstrap marker is still
+	// delivered through chunks so the auth manager can consume it and stop
+	// treating the request as pre-bootstrap without forwarding bytes to clients.
+	return cursorWaitForStreamStart(ctx, chunks, streamErrCh, bootstrapStarted, payloadSent, func() {
+		sessionCancel()
+		stream.Close()
+	})
 }
 
 // resumeWithToolResults injects tool results into the running processH2SessionFrames
@@ -1293,10 +1528,10 @@ func (e *CursorExecutor) resumeWithToolResults(
 
 // --- H2Stream helpers ---
 
-func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
+func cursorH2RequestHeaders(accessToken string) map[string]string {
 	requestID := uuid.New().String()
 	traceParent := cursorTraceParent()
-	headers := map[string]string{
+	return map[string]string{
 		":path":                    cursorRunPath,
 		"content-type":             "application/connect+proto",
 		"connect-protocol-version": "1",
@@ -1312,6 +1547,13 @@ func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
 		"x-original-request-id":    requestID,
 		"x-request-id":             requestID,
 	}
+}
+
+func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
+	return openCursorH2StreamWithHeaders(cursorH2RequestHeaders(accessToken))
+}
+
+func openCursorH2StreamWithHeaders(headers map[string]string) (*cursorproto.H2Stream, error) {
 	return cursorproto.DialH2Stream("api2.cursor.sh", headers)
 }
 
@@ -1536,11 +1778,12 @@ func (d *cursorExecDeduper) mark(msg *cursorproto.DecodedServerMessage) bool {
 	return true
 }
 
-func cursorSendInvalidMcpExecResult(stream *cursorproto.H2Stream, msg *cursorproto.DecodedServerMessage, reason string) {
+func cursorSendInvalidMcpExecResult(stream *cursorproto.H2Stream, msg *cursorproto.DecodedServerMessage, reason string) bool {
 	if stream == nil || msg == nil || msg.InteractionToolCall || (msg.ExecMsgId == 0 && strings.TrimSpace(msg.ExecId) == "") {
-		return
+		return false
 	}
 	stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecMcpError(msg.ExecMsgId, msg.ExecId, reason), 0))
+	return true
 }
 
 func cursorIsExecMessage(msgType cursorproto.ServerMessageType) bool {
@@ -1579,6 +1822,8 @@ func processH2SessionFrames(
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
+	onActivity func(), // called when Cursor sends meaningful protocol activity
+	rawLogger *cursorRawProtoLogger,
 ) error {
 	var buf bytes.Buffer
 	rejectReason := "Tool not available in this environment. Use the MCP tools provided instead."
@@ -1615,10 +1860,12 @@ func processH2SessionFrames(
 					log.Debugf("cursor: incomplete frame in buffer, waiting for more data (buf=%d bytes, first bytes: %x = %q)", len(currentBuf), currentBuf[:previewLen], string(currentBuf[:previewLen]))
 					break
 				}
+				rawFrame := bytes.Clone(currentBuf[:consumed])
 				buf.Next(consumed)
 				log.Debugf("cursor: parsed Connect frame flags=0x%02x payload=%d bytes consumed=%d", flags, len(payload), consumed)
 
 				if flags&cursorproto.ConnectEndStreamFlag != 0 {
+					rawLogger.appendResponseFrame(stream.ID(), flags, rawFrame, payload, "connect_end_stream")
 					if err := cursorproto.ParseConnectEndStream(payload); err != nil {
 						log.Warnf("cursor: connect end stream error: %v", err)
 						return err // propagate server-side errors (quota, rate limit, etc.)
@@ -1626,6 +1873,7 @@ func processH2SessionFrames(
 					continue
 				}
 				if jsonErr := cursorJSONErrorFromPayload(payload); jsonErr != nil {
+					rawLogger.appendResponseFrame(stream.ID(), flags, rawFrame, payload, "json_error")
 					if receivedContent {
 						log.Debugf("cursor: JSON error after content; ending stream cleanly: %v", jsonErr)
 						return nil
@@ -1635,10 +1883,15 @@ func processH2SessionFrames(
 
 				msg, err := cursorproto.DecodeAgentServerMessage(payload)
 				if err != nil {
+					rawLogger.appendResponseFrame(stream.ID(), flags, rawFrame, payload, "decode_error: "+err.Error())
 					log.Debugf("cursor: failed to decode server message: %v", err)
 					continue
 				}
 
+				rawLogger.appendResponseFrame(stream.ID(), flags, rawFrame, payload, fmt.Sprintf("type=%d", msg.Type))
+				if onActivity != nil {
+					onActivity()
+				}
 				log.Debugf("cursor: decoded server message type=%d", msg.Type)
 				if !execDeduper.mark(msg) {
 					log.Debugf("cursor: skipping duplicate exec message type=%d execMsgId=%d execId=%q", msg.Type, msg.ExecMsgId, msg.ExecId)
@@ -1708,9 +1961,11 @@ func processH2SessionFrames(
 						continue
 					}
 					if emit, invalidReason := cursorValidateMcpExecForEmission(msg, mcpTools); !emit {
-						log.Debugf("cursor: skipping invalid MCP tool call: toolName=%q toolCallId=%q argKeys=%v reason=%s", msg.McpToolName, msg.McpToolCallId, cursorMcpArgKeys(msg.McpArgs), invalidReason)
-						cursorSendInvalidMcpExecResult(stream, msg, invalidReason)
-						continue
+						log.Debugf("cursor: rejecting invalid MCP tool call: toolName=%q toolCallId=%q argKeys=%v reason=%s", msg.McpToolName, msg.McpToolCallId, cursorMcpArgKeys(msg.McpArgs), invalidReason)
+						if cursorSendInvalidMcpExecResult(stream, msg, invalidReason) {
+							continue
+						}
+						return fmt.Errorf("cursor: invalid MCP tool call from upstream: %s", invalidReason)
 					}
 					if onMcpExec != nil {
 						pendingExecs := []pendingMcpExec{cursorPendingMcpExecFromMessage(msg)}
@@ -1752,14 +2007,17 @@ func processH2SessionFrames(
 										if !wok {
 											break
 										}
+										wrawFrame := bytes.Clone(cb[:wc])
 										buf.Next(wc)
 										if wf&cursorproto.ConnectEndStreamFlag != 0 {
+											rawLogger.appendResponseFrame(stream.ID(), wf, wrawFrame, wp, "connect_end_stream")
 											if err := cursorproto.ParseConnectEndStream(wp); err != nil {
 												return err
 											}
 											continue
 										}
 										if jsonErr := cursorJSONErrorFromPayload(wp); jsonErr != nil {
+											rawLogger.appendResponseFrame(stream.ID(), wf, wrawFrame, wp, "json_error")
 											if receivedContent {
 												return nil
 											}
@@ -1767,7 +2025,12 @@ func processH2SessionFrames(
 										}
 										wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
 										if werr != nil {
+											rawLogger.appendResponseFrame(stream.ID(), wf, wrawFrame, wp, "decode_error: "+werr.Error())
 											continue
+										}
+										rawLogger.appendResponseFrame(stream.ID(), wf, wrawFrame, wp, fmt.Sprintf("type=%d", wmsg.Type))
+										if onActivity != nil {
+											onActivity()
 										}
 										if !execDeduper.mark(wmsg) {
 											continue
@@ -1792,9 +2055,11 @@ func processH2SessionFrames(
 												continue
 											}
 											if emit, invalidReason := cursorValidateMcpExecForEmission(wmsg, mcpTools); !emit {
-												log.Debugf("cursor: skipping invalid queued MCP tool call: toolName=%q toolCallId=%q argKeys=%v reason=%s", wmsg.McpToolName, wmsg.McpToolCallId, cursorMcpArgKeys(wmsg.McpArgs), invalidReason)
-												cursorSendInvalidMcpExecResult(stream, wmsg, invalidReason)
-												continue
+												log.Debugf("cursor: rejecting invalid queued MCP tool call: toolName=%q toolCallId=%q argKeys=%v reason=%s", wmsg.McpToolName, wmsg.McpToolCallId, cursorMcpArgKeys(wmsg.McpArgs), invalidReason)
+												if cursorSendInvalidMcpExecResult(stream, wmsg, invalidReason) {
+													continue
+												}
+												return fmt.Errorf("cursor: invalid queued MCP tool call from upstream: %s", invalidReason)
 											}
 											queued := cursorPendingMcpExecFromMessage(wmsg)
 											log.Debugf("cursor: queued pipelined mcpArgs while waiting: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
@@ -2303,7 +2568,6 @@ func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *
 		Turns:           parsed.Turns,
 		BlobStore:       make(map[string][]byte),
 	}
-
 	// Convert OpenAI tools to Cursor MCP tool definitions. Prefix every
 	// Cursor-facing MCP name so neither current nor future Cursor-native tool
 	// names (web_search/read/grep/etc.) can steal the model's tool selection.

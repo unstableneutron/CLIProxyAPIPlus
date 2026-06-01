@@ -761,7 +761,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
-		sentPayload := false
+		streamStarted := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
@@ -822,11 +822,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 				if !ok {
 					return
 				}
+				if chunk.Bootstrap {
+					streamStarted = true
+					continue
+				}
 				if chunk.Err != nil {
 					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
+					// Safe bootstrap recovery: if the upstream fails before any protocol activity or payload bytes are sent,
 					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
+					if !streamStarted {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
@@ -863,7 +867,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 							return
 						}
 					}
-					sentPayload = true
+					streamStarted = true
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
 						return
 					}

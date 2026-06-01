@@ -106,15 +106,25 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
-	if len(headers) == 0 || attrs == nil {
+	addConfigStringMapToAttrs(headers, attrs, "header:")
+}
+
+// addConfigQueryParamsToAttrs adds query parameter configuration to auth attributes.
+// Query parameters are prefixed with "query:" in the attributes map.
+func addConfigQueryParamsToAttrs(params map[string]string, attrs map[string]string) {
+	addConfigStringMapToAttrs(params, attrs, "query:")
+}
+
+func addConfigStringMapToAttrs(values map[string]string, attrs map[string]string, prefix string) {
+	if len(values) == 0 || attrs == nil {
 		return
 	}
-	for hk, hv := range headers {
-		key := strings.TrimSpace(hk)
-		val := strings.TrimSpace(hv)
+	for rawKey, rawValue := range values {
+		key := strings.TrimSpace(rawKey)
+		val := strings.TrimSpace(rawValue)
 		if key == "" || val == "" {
 			continue
 		}
-		attrs["header:"+key] = val
+		attrs[prefix+key] = val
 	}
 }
