@@ -380,17 +380,59 @@ func cursorStreamingTextDeltaJSON(text string) string {
 	return fmt.Sprintf(`{"content":%s}`, jsonString(text))
 }
 
+const cursorToolCallArgumentChunkSize = 2048
+
 func cursorStreamingToolCallDeltaJSON(index int, exec pendingMcpExec) string {
 	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
 		index, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
 }
 
+func cursorStreamingToolCallArgsDeltaJSON(index int, argsDelta string) string {
+	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"function":{"arguments":%s}}]}`,
+		index, jsonString(argsDelta))
+}
+
 func cursorStreamingToolCallDeltasJSON(execs []pendingMcpExec) []string {
 	deltas := make([]string, 0, len(execs))
 	for i, exec := range execs {
-		deltas = append(deltas, cursorStreamingToolCallDeltaJSON(i, exec))
+		deltas = append(deltas, cursorStreamingToolCallArgumentDeltasJSON(i, exec)...)
 	}
 	return deltas
+}
+
+func cursorStreamingToolCallArgumentDeltasJSON(index int, exec pendingMcpExec) []string {
+	chunks := cursorSplitToolCallArgument(exec.Args, cursorToolCallArgumentChunkSize)
+	if len(chunks) <= 1 {
+		return []string{cursorStreamingToolCallDeltaJSON(index, exec)}
+	}
+	deltas := make([]string, 0, len(chunks))
+	first := exec
+	first.Args = chunks[0]
+	deltas = append(deltas, cursorStreamingToolCallDeltaJSON(index, first))
+	for _, chunk := range chunks[1:] {
+		deltas = append(deltas, cursorStreamingToolCallArgsDeltaJSON(index, chunk))
+	}
+	return deltas
+}
+
+func cursorSplitToolCallArgument(args string, maxBytes int) []string {
+	if maxBytes <= 0 || len(args) <= maxBytes {
+		return []string{args}
+	}
+	chunks := make([]string, 0, len(args)/maxBytes+1)
+	start := 0
+	chunkBytes := 0
+	for idx, r := range args {
+		runeBytes := len(string(r))
+		if chunkBytes > 0 && chunkBytes+runeBytes > maxBytes {
+			chunks = append(chunks, args[start:idx])
+			start = idx
+			chunkBytes = 0
+		}
+		chunkBytes += runeBytes
+	}
+	chunks = append(chunks, args[start:])
+	return chunks
 }
 
 func cursorStreamingThinkingDeltaJSON(text string) string {
@@ -1342,9 +1384,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					return
 				}
 				for _, exec := range execs {
-					toolCallJSON := cursorStreamingToolCallDeltaJSON(toolCallIndex, exec)
+					toolCallJSONs := cursorStreamingToolCallArgumentDeltasJSON(toolCallIndex, exec)
 					toolCallIndex++
-					sendChunkSwitchable(toolCallJSON, "")
+					for _, toolCallJSON := range toolCallJSONs {
+						sendChunkSwitchable(toolCallJSON, "")
+					}
 				}
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()

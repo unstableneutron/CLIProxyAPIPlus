@@ -353,6 +353,9 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 
 func validateModelSection(section string, models []*ModelInfo) error {
 	if len(models) == 0 {
+		if modelSectionHasBuiltinFallback(section) {
+			return nil
+		}
 		log.Warnf("models catalog: %s section is empty, continuing without those model definitions", section)
 		return nil
 	}
@@ -372,4 +375,13 @@ func validateModelSection(section string, models []*ModelInfo) error {
 		seen[modelID] = struct{}{}
 	}
 	return nil
+}
+
+func modelSectionHasBuiltinFallback(section string) bool {
+	switch strings.ToLower(strings.TrimSpace(section)) {
+	case "commandcode":
+		return true
+	default:
+		return false
+	}
 }

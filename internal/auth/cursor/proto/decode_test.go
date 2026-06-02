@@ -94,6 +94,47 @@ func TestDecodeAgentServerMessageDecodesPartialToolCallArgsDeltaWithoutToolCallP
 	}
 }
 
+func TestDecodeAgentServerMessageDecodesToolCallDelta(t *testing.T) {
+	var stdout []byte
+	stdout = appendTestBytesField(stdout, 1, []byte("chunk one"))
+
+	var shellDelta []byte
+	shellDelta = appendTestBytesField(shellDelta, 1, stdout)
+
+	var toolCallDelta []byte
+	toolCallDelta = appendTestBytesField(toolCallDelta, 1, shellDelta)
+
+	var deltaUpdate []byte
+	deltaUpdate = appendTestBytesField(deltaUpdate, 1, []byte("call_shell"))
+	deltaUpdate = appendTestBytesField(deltaUpdate, 2, toolCallDelta)
+
+	var interaction []byte
+	interaction = appendTestBytesField(interaction, IU_ToolCallDelta, deltaUpdate)
+
+	var agentServer []byte
+	agentServer = appendTestBytesField(agentServer, ASM_InteractionUpdate, interaction)
+
+	msg, err := DecodeAgentServerMessage(agentServer)
+	if err != nil {
+		t.Fatalf("DecodeAgentServerMessage() error = %v", err)
+	}
+	if msg.Type != ServerMsgInteractionToolCallDelta {
+		t.Fatalf("Type = %v, want ServerMsgInteractionToolCallDelta", msg.Type)
+	}
+	if msg.McpToolCallId != "call_shell" {
+		t.Fatalf("McpToolCallId = %q, want call_shell", msg.McpToolCallId)
+	}
+	if !msg.InteractionToolCallDelta {
+		t.Fatal("InteractionToolCallDelta = false, want true")
+	}
+	if msg.ToolCallDeltaKind != "shell_stdout" {
+		t.Fatalf("ToolCallDeltaKind = %q, want shell_stdout", msg.ToolCallDeltaKind)
+	}
+	if msg.ToolCallDeltaText != "chunk one" {
+		t.Fatalf("ToolCallDeltaText = %q, want chunk one", msg.ToolCallDeltaText)
+	}
+}
+
 func TestDecodeAgentServerMessageIgnoresCompletedToolCallWithResult(t *testing.T) {
 	var args []byte
 	args = appendTestBytesField(args, 1, []byte("AGENTS.md"))

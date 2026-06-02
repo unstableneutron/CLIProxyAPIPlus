@@ -814,6 +814,43 @@ func TestCursorStreamingToolCallDeltasSupportBatchedToolCalls(t *testing.T) {
 	}
 }
 
+func TestCursorStreamingToolCallDeltasSplitLargeArguments(t *testing.T) {
+	longValue := strings.Repeat("x", cursorToolCallArgumentChunkSize*2+17)
+	args := `{"command":"` + longValue + `"}`
+	deltas := cursorStreamingToolCallDeltasJSON([]pendingMcpExec{
+		{ToolCallId: "call_bash", ToolName: "bash", Args: args},
+	})
+
+	if len(deltas) < 3 {
+		t.Fatalf("tool call deltas = %d, want split start + argument chunks", len(deltas))
+	}
+	first := gjson.Get(deltas[0], "tool_calls.0")
+	if got := first.Get("id").String(); got != "call_bash" {
+		t.Fatalf("first delta call id = %q, want call_bash", got)
+	}
+	if got := first.Get("function.name").String(); got != "bash" {
+		t.Fatalf("first delta function name = %q, want bash", got)
+	}
+	var reconstructed strings.Builder
+	for i, delta := range deltas {
+		call := gjson.Get(delta, "tool_calls.0")
+		if got := int(call.Get("index").Int()); got != 0 {
+			t.Fatalf("delta %d index = %d, want 0 (%s)", i, got, delta)
+		}
+		chunk := call.Get("function.arguments").String()
+		if chunk == "" {
+			t.Fatalf("delta %d has empty arguments chunk: %s", i, delta)
+		}
+		if len(chunk) > cursorToolCallArgumentChunkSize+len(`{"command":"`) {
+			t.Fatalf("delta %d arguments chunk len = %d, want bounded chunk", i, len(chunk))
+		}
+		reconstructed.WriteString(chunk)
+	}
+	if got := reconstructed.String(); got != args {
+		t.Fatalf("reconstructed args len = %d, want %d", len(got), len(args))
+	}
+}
+
 func TestBuildRunRequestParamsSkipsToolsWithoutFunctionNames(t *testing.T) {
 	parsed := parseOpenAIRequest([]byte(`{
 		"model":"cursor-composer-2.5",

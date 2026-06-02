@@ -18,30 +18,31 @@ import (
 type ServerMessageType int
 
 const (
-	ServerMsgUnknown             ServerMessageType = iota
-	ServerMsgTextDelta                             // Text content delta
-	ServerMsgThinkingDelta                         // Thinking/reasoning delta
-	ServerMsgThinkingCompleted                     // Thinking completed
-	ServerMsgKvGetBlob                             // Server wants a blob
-	ServerMsgKvSetBlob                             // Server wants to store a blob
-	ServerMsgExecRequestCtx                        // Server requests context (tools, etc.)
-	ServerMsgExecMcpArgs                           // Server wants MCP tool execution
-	ServerMsgExecShellArgs                         // Rejected: shell command
-	ServerMsgExecReadArgs                          // Rejected: file read
-	ServerMsgExecWriteArgs                         // Rejected: file write
-	ServerMsgExecDeleteArgs                        // Rejected: file delete
-	ServerMsgExecLsArgs                            // Rejected: directory listing
-	ServerMsgExecGrepArgs                          // Rejected: grep search
-	ServerMsgExecFetchArgs                         // Rejected: HTTP fetch
-	ServerMsgExecDiagnostics                       // Respond with empty diagnostics
-	ServerMsgExecShellStream                       // Rejected: shell stream
-	ServerMsgExecBgShellSpawn                      // Rejected: background shell
-	ServerMsgExecWriteShellStdin                   // Rejected: write shell stdin
-	ServerMsgExecOther                             // Other exec types (respond with empty)
-	ServerMsgTurnEnded                             // Turn has ended (no more output)
-	ServerMsgHeartbeat                             // Server heartbeat
-	ServerMsgTokenDelta                            // Token usage delta
-	ServerMsgCheckpoint                            // Conversation checkpoint update
+	ServerMsgUnknown                  ServerMessageType = iota
+	ServerMsgTextDelta                                  // Text content delta
+	ServerMsgThinkingDelta                              // Thinking/reasoning delta
+	ServerMsgThinkingCompleted                          // Thinking completed
+	ServerMsgKvGetBlob                                  // Server wants a blob
+	ServerMsgKvSetBlob                                  // Server wants to store a blob
+	ServerMsgExecRequestCtx                             // Server requests context (tools, etc.)
+	ServerMsgExecMcpArgs                                // Server wants MCP tool execution
+	ServerMsgExecShellArgs                              // Rejected: shell command
+	ServerMsgExecReadArgs                               // Rejected: file read
+	ServerMsgExecWriteArgs                              // Rejected: file write
+	ServerMsgExecDeleteArgs                             // Rejected: file delete
+	ServerMsgExecLsArgs                                 // Rejected: directory listing
+	ServerMsgExecGrepArgs                               // Rejected: grep search
+	ServerMsgExecFetchArgs                              // Rejected: HTTP fetch
+	ServerMsgExecDiagnostics                            // Respond with empty diagnostics
+	ServerMsgExecShellStream                            // Rejected: shell stream
+	ServerMsgExecBgShellSpawn                           // Rejected: background shell
+	ServerMsgExecWriteShellStdin                        // Rejected: write shell stdin
+	ServerMsgExecOther                                  // Other exec types (respond with empty)
+	ServerMsgTurnEnded                                  // Turn has ended (no more output)
+	ServerMsgHeartbeat                                  // Server heartbeat
+	ServerMsgTokenDelta                                 // Token usage delta
+	ServerMsgCheckpoint                                 // Conversation checkpoint update
+	ServerMsgInteractionToolCallDelta                   // Tool call output/content delta
 )
 
 // DecodedServerMessage holds parsed data from an AgentServerMessage.
@@ -67,7 +68,10 @@ type DecodedServerMessage struct {
 	McpArgs                      map[string][]byte // arg name -> protobuf-encoded value
 	InteractionToolCall          bool              // true when decoded from InteractionUpdate tool_call_* fields
 	InteractionToolCallCompleted bool              // true for InteractionUpdate tool_call_completed
+	InteractionToolCallDelta     bool              // true for InteractionUpdate tool_call_delta
 	InteractionArgsTextDelta     string            // partial JSON args delta from PartialToolCallUpdate
+	ToolCallDeltaKind            string            // shell_stdout, shell_stderr, edit_stream_content, etc.
+	ToolCallDeltaText            string            // decoded textual delta payload
 
 	// For rejection context
 	Path             string
@@ -184,6 +188,9 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 			case IU_ToolCallCompleted:
 				decodeInteractionToolCallUpdate(val, true, msg)
 				log.Debugf("decodeInteractionUpdate: ToolCallCompleted decoded type=%d tool=%q callId=%q", msg.Type, msg.McpToolName, msg.McpToolCallId)
+			case IU_ToolCallDelta:
+				decodeInteractionToolCallDeltaUpdate(val, msg)
+				log.Debugf("decodeInteractionUpdate: ToolCallDelta decoded type=%d kind=%q callId=%q", msg.Type, msg.ToolCallDeltaKind, msg.McpToolCallId)
 			case IU_TokenDelta:
 				// token_delta - extract token count
 				msg.Type = ServerMsgTokenDelta
@@ -269,6 +276,110 @@ func decodeInteractionToolCallUpdate(data []byte, completed bool, msg *DecodedSe
 	msg.InteractionToolCall = true
 	msg.InteractionToolCallCompleted = completed
 	msg.InteractionArgsTextDelta = argsTextDelta
+}
+
+func decodeInteractionToolCallDeltaUpdate(data []byte, msg *DecodedServerMessage) {
+	var callID string
+	var deltaBytes []byte
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+
+		if typ == protowire.BytesType {
+			val, n := protowire.ConsumeBytes(data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+			switch num {
+			case 1:
+				callID = string(val)
+			case 2:
+				deltaBytes = append([]byte(nil), val...)
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return
+			}
+			data = data[n:]
+		}
+	}
+	kind, text := decodeCursorToolCallDelta(deltaBytes)
+	if callID == "" || (kind == "" && text == "") {
+		return
+	}
+	msg.Type = ServerMsgInteractionToolCallDelta
+	msg.McpToolCallId = callID
+	msg.InteractionToolCall = true
+	msg.InteractionToolCallDelta = true
+	msg.ToolCallDeltaKind = kind
+	msg.ToolCallDeltaText = text
+}
+
+func decodeCursorToolCallDelta(data []byte) (string, string) {
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return "", ""
+		}
+		data = data[n:]
+		if typ != protowire.BytesType {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return "", ""
+			}
+			data = data[n:]
+			continue
+		}
+		val, n := protowire.ConsumeBytes(data)
+		if n < 0 {
+			return "", ""
+		}
+		data = data[n:]
+		switch num {
+		case 1:
+			return decodeShellToolCallDelta(val)
+		case 3:
+			return "edit_stream_content", decodeStringField(val, 1)
+		case 4:
+			return "replace_env", decodeStringField(val, 1)
+		}
+	}
+	return "", ""
+}
+
+func decodeShellToolCallDelta(data []byte) (string, string) {
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return "", ""
+		}
+		data = data[n:]
+		if typ != protowire.BytesType {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return "", ""
+			}
+			data = data[n:]
+			continue
+		}
+		val, n := protowire.ConsumeBytes(data)
+		if n < 0 {
+			return "", ""
+		}
+		data = data[n:]
+		switch num {
+		case 1:
+			return "shell_stdout", decodeStringField(val, 1)
+		case 2:
+			return "shell_stderr", decodeStringField(val, 1)
+		}
+	}
+	return "", ""
 }
 
 func decodeCursorToolCall(data []byte) (string, map[string][]byte, bool) {

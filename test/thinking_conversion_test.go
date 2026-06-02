@@ -3068,10 +3068,10 @@ func getTestModels() []*registry.ModelInfo {
 			UserDefined: true,
 			Thinking:    nil,
 		},
-			{
-				ID:          "glm-test",
-				Object:      "model",
-				Created:     1700000000,
+		{
+			ID:          "glm-test",
+			Object:      "model",
+			Created:     1700000000,
 			OwnedBy:     "test",
 			Type:        "iflow",
 			DisplayName: "GLM Test Model",
@@ -3128,11 +3128,11 @@ func getTestModels() []*registry.ModelInfo {
 			Created:     1700000000,
 			OwnedBy:     "github-copilot",
 			Type:        "github-copilot",
-				DisplayName: "GPT-5.2 Codex",
-				Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
-			},
-		}
+			DisplayName: "GPT-5.2 Codex",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
 	}
+}
 
 // runThinkingTests runs thinking test cases using the real data flow path.
 func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
@@ -3143,23 +3143,23 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			suffixResult := thinking.ParseSuffix(tc.model)
 			baseModel := suffixResult.ModelName
 
-				translateTo := tc.to
-				applyTo := tc.to
-				if tc.to == "iflow" {
-					translateTo = "openai"
-					applyTo = "iflow"
-				}
+			translateTo := tc.to
+			applyTo := tc.to
+			if tc.to == "iflow" {
+				translateTo = "openai"
+				applyTo = "iflow"
+			}
 			if tc.to == "github-copilot" {
 				if tc.from == "openai-response" {
 					translateTo = "codex"
 					applyTo = "codex"
 				} else {
 					translateTo = "openai"
-						applyTo = "openai"
-					}
+					applyTo = "openai"
 				}
+			}
 
-				body := sdktranslator.TranslateRequest(
+			body := sdktranslator.TranslateRequest(
 				sdktranslator.FromString(tc.from),
 				sdktranslator.FromString(translateTo),
 				baseModel,
