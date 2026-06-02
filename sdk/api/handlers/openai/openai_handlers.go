@@ -113,6 +113,12 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -185,6 +191,12 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")

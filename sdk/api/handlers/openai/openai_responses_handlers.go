@@ -394,8 +394,13 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
-
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -432,8 +437,13 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		})
 		return
 	}
-
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {

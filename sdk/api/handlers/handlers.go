@@ -282,7 +282,9 @@ func headersFromContext(ctx context.Context) http.Header {
 		return nil
 	}
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.Request.Header.Clone()
+		headers := ginCtx.Request.Header.Clone()
+		headers.Del(ForceModelPrefixHeader)
+		return headers
 	}
 	return nil
 }

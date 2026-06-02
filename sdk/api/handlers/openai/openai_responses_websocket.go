@@ -429,6 +429,33 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		updatedJSON, prefixErrMsg := handlers.ApplyForceModelPrefixHeader(c, requestJSON)
+		if prefixErrMsg != nil {
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), prefixErrMsg)
+			markAPIResponseTimestamp(c)
+			errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, prefixErrMsg)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				passthroughSessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				log.Warnf(
+					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					passthroughSessionID,
+					websocketPayloadEventType(errorPayload),
+					errWrite,
+				)
+				return
+			}
+			continue
+		}
+		if !bytes.Equal(updatedJSON, requestJSON) {
+			requestJSON = updatedJSON
+			updatedLastRequest = bytes.Clone(updatedJSON)
+		}
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated

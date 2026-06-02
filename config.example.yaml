@@ -81,6 +81,9 @@ redis-usage-queue-retention-seconds: 60
 proxy-url: ""
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
+# Clients that hardcode model names can target a prefixed credential per request with:
+#   X-Force-Model-Prefix: test
+# Values may include a trailing slash ("test/") and are normalized to one prefix segment.
 force-model-prefix: false
 
 # When true, forward filtered upstream response headers to downstream clients.
