@@ -1191,6 +1191,75 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 	}
 }
 
+func TestParseResponsesWebsocketTraceparent(t *testing.T) {
+	ctx := parseResponsesWebsocketTraceparent("00-1234567890abcdef1234567890abcdef-abcdef1234567890-00")
+	if ctx.Traceparent != "00-1234567890abcdef1234567890abcdef-abcdef1234567890-00" {
+		t.Fatalf("traceparent = %q", ctx.Traceparent)
+	}
+	if ctx.TraceID != "1234567890abcdef1234567890abcdef" {
+		t.Fatalf("trace id = %q", ctx.TraceID)
+	}
+	if ctx.SpanID != "abcdef1234567890" {
+		t.Fatalf("span id = %q", ctx.SpanID)
+	}
+
+	invalid := parseResponsesWebsocketTraceparent("00-00000000000000000000000000000000-abcdef1234567890-01")
+	if invalid.Traceparent != "00-00000000000000000000000000000000-abcdef1234567890-01" {
+		t.Fatalf("invalid raw traceparent not preserved: %q", invalid.Traceparent)
+	}
+	if invalid.TraceID != "" || invalid.SpanID != "" {
+		t.Fatalf("invalid trace ids should not be parsed: %+v", invalid)
+	}
+}
+
+func TestLogResponsesWebsocketClientDisconnectedIncludesTraceContext(t *testing.T) {
+	entry := logResponsesWebsocketClientDisconnected(websocketTraceContext{
+		Traceparent: "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+		TraceID:     "1234567890abcdef1234567890abcdef",
+		SpanID:      "abcdef1234567890",
+		SessionID:   "proxy-session-1",
+	}, "proxy-session-1", nil)
+
+	for key, want := range map[string]string{
+		"trace_id":                   "1234567890abcdef1234567890abcdef",
+		"span_id":                    "abcdef1234567890",
+		"proxy_websocket_session_id": "proxy-session-1",
+	} {
+		if got := entry.Data[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestWebsocketTimelineIncludesTraceContext(t *testing.T) {
+	timelineLog := newInMemoryWebsocketTimelineLog()
+	timelineLog.SetTraceContext(websocketTraceContext{
+		Traceparent: "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+		TraceID:     "1234567890abcdef1234567890abcdef",
+		SpanID:      "abcdef1234567890",
+		SessionID:   "proxy-session-1",
+	})
+	timelineLog.Append("response", []byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`), time.Unix(0, 0).UTC())
+	timelineLog.Append("response", []byte(`{"type":"response.completed","response":{"id":"msg_1","status":"completed"}}`), time.Unix(0, 1).UTC())
+
+	timeline := timelineLog.String()
+	for _, want := range []string{
+		"traceparent: 00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+		"trace_id: 1234567890abcdef1234567890abcdef",
+		"span_id: abcdef1234567890",
+		"proxy_websocket_session_id: proxy-session-1",
+		"upstream_response_id: resp_1",
+		"terminal_event: response.completed",
+	} {
+		if !strings.Contains(timeline, want) {
+			t.Fatalf("timeline missing %q:\n%s", want, timeline)
+		}
+	}
+	if strings.Contains(timeline, "upstream_response_id: msg_1") {
+		t.Fatalf("timeline mislabeled non-response id as upstream response id:\n%s", timeline)
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

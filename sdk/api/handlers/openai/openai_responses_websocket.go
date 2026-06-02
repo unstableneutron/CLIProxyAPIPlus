@@ -50,10 +50,18 @@ type websocketTimelineAppender interface {
 	Append(eventType string, payload []byte, timestamp time.Time)
 }
 
+type websocketTraceContext struct {
+	Traceparent string
+	TraceID     string
+	SpanID      string
+	SessionID   string
+}
+
 type websocketTimelineLog struct {
 	enabled bool
 	source  *requestlogging.FileBodySource
 	builder *strings.Builder
+	trace   websocketTraceContext
 
 	currentPart       io.WriteCloser
 	currentPartHasLog bool
@@ -77,6 +85,13 @@ func newInMemoryWebsocketTimelineLog() *websocketTimelineLog {
 		enabled: true,
 		builder: &strings.Builder{},
 	}
+}
+
+func (l *websocketTimelineLog) SetTraceContext(trace websocketTraceContext) {
+	if l == nil {
+		return
+	}
+	l.trace = trace
 }
 
 func websocketTimelineSourceFromContext(c *gin.Context) *requestlogging.FileBodySource {
@@ -112,7 +127,7 @@ func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestam
 	if l == nil || !l.enabled {
 		return
 	}
-	data := formatWebsocketTimelineEvent(eventType, payload, timestamp)
+	data := formatWebsocketTimelineEventWithContext(eventType, payload, timestamp, l.trace)
 	if len(data) == 0 {
 		return
 	}
@@ -215,13 +230,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	passthroughSessionID := uuid.NewString()
+	traceContext := parseResponsesWebsocketTraceparent(c.Request.Header.Get("traceparent"))
+	traceContext.SessionID = passthroughSessionID
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
-	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+	if len(traceContext.logFields()) > 0 {
+		log.WithFields(traceContext.logFields()).Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+	} else {
+		log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+	}
 
 	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	wsTimelineLog.SetTraceContext(traceContext)
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
@@ -291,12 +313,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if wsTerminateErr != nil {
 			appendWebsocketTimelineDisconnect(wsTimelineLog, wsTerminateErr, time.Now())
 			// log.Infof("responses websocket: session closing id=%s reason=%v", passthroughSessionID, wsTerminateErr)
+		} else if len(traceContext.logFields()) > 0 {
+			log.WithFields(traceContext.logFields()).Infof("responses websocket: session closing id=%s", passthroughSessionID)
 		} else {
 			log.Infof("responses websocket: session closing id=%s", passthroughSessionID)
 		}
 		if h != nil && h.AuthManager != nil {
 			h.AuthManager.CloseExecutionSession(passthroughSessionID)
-			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
+			if len(traceContext.logFields()) > 0 {
+				log.WithFields(traceContext.logFields()).Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
+			} else {
+				log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
+			}
 		}
 		wsTimelineLog.SetContext(c)
 		closeDownstream()
@@ -321,7 +349,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
+				logResponsesWebsocketClientDisconnected(traceContext, passthroughSessionID, errReadMessage)
 			} else {
 				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
 			}
@@ -1515,6 +1543,10 @@ func appendWebsocketTimelineEvent(builder *strings.Builder, eventType string, pa
 }
 
 func formatWebsocketTimelineEvent(eventType string, payload []byte, timestamp time.Time) []byte {
+	return formatWebsocketTimelineEventWithContext(eventType, payload, timestamp, websocketTraceContext{})
+}
+
+func formatWebsocketTimelineEventWithContext(eventType string, payload []byte, timestamp time.Time, trace websocketTraceContext) []byte {
 	trimmedPayload := bytes.TrimSpace(payload)
 	if len(trimmedPayload) == 0 {
 		return nil
@@ -1526,9 +1558,123 @@ func formatWebsocketTimelineEvent(eventType string, payload []byte, timestamp ti
 	builder.WriteString("Event: websocket.")
 	builder.WriteString(eventType)
 	builder.WriteString("\n")
+	writeWebsocketTraceContext(&builder, trace)
+	if responseID := websocketPayloadResponseID(trimmedPayload); responseID != "" {
+		builder.WriteString("upstream_response_id: ")
+		builder.WriteString(responseID)
+		builder.WriteString("\n")
+	}
+	if terminalEvent := websocketTerminalEvent(trimmedPayload); terminalEvent != "" {
+		builder.WriteString("terminal_event: ")
+		builder.WriteString(terminalEvent)
+		builder.WriteString("\n")
+	}
 	builder.Write(trimmedPayload)
 	builder.WriteString("\n")
 	return []byte(builder.String())
+}
+
+func parseResponsesWebsocketTraceparent(raw string) websocketTraceContext {
+	traceparent := strings.TrimSpace(raw)
+	trace := websocketTraceContext{Traceparent: traceparent}
+	parts := strings.Split(traceparent, "-")
+	if len(parts) != 4 || parts[0] != "00" {
+		return trace
+	}
+	if !isLowerHex(parts[1], 32) || !isLowerHex(parts[2], 16) || !isLowerHex(parts[3], 2) {
+		return trace
+	}
+	if parts[1] == "00000000000000000000000000000000" || parts[2] == "0000000000000000" {
+		return trace
+	}
+	trace.TraceID = parts[1]
+	trace.SpanID = parts[2]
+	return trace
+}
+
+func isLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func logResponsesWebsocketClientDisconnected(trace websocketTraceContext, sessionID string, err error) *log.Entry {
+	entry := log.WithFields(trace.logFields())
+	if err != nil {
+		entry.Infof("responses websocket: client disconnected id=%s error=%v", sessionID, err)
+	} else {
+		entry.Infof("responses websocket: client disconnected id=%s", sessionID)
+	}
+	return entry
+}
+
+func (trace websocketTraceContext) logFields() log.Fields {
+	fields := log.Fields{}
+	if trace.Traceparent != "" {
+		fields["traceparent"] = trace.Traceparent
+	}
+	if trace.TraceID != "" {
+		fields["trace_id"] = trace.TraceID
+	}
+	if trace.SpanID != "" {
+		fields["span_id"] = trace.SpanID
+	}
+	if trace.SessionID != "" {
+		fields["proxy_websocket_session_id"] = trace.SessionID
+	}
+	return fields
+}
+
+func writeWebsocketTraceContext(builder *strings.Builder, trace websocketTraceContext) {
+	if builder == nil {
+		return
+	}
+	if trace.Traceparent != "" {
+		builder.WriteString("traceparent: ")
+		builder.WriteString(trace.Traceparent)
+		builder.WriteString("\n")
+	}
+	if trace.TraceID != "" {
+		builder.WriteString("trace_id: ")
+		builder.WriteString(trace.TraceID)
+		builder.WriteString("\n")
+	}
+	if trace.SpanID != "" {
+		builder.WriteString("span_id: ")
+		builder.WriteString(trace.SpanID)
+		builder.WriteString("\n")
+	}
+	if trace.SessionID != "" {
+		builder.WriteString("proxy_websocket_session_id: ")
+		builder.WriteString(trace.SessionID)
+		builder.WriteString("\n")
+	}
+}
+
+func websocketPayloadResponseID(payload []byte) string {
+	for _, path := range []string{"response.id", "response_id", "id"} {
+		value := strings.TrimSpace(gjson.GetBytes(payload, path).String())
+		if strings.HasPrefix(value, "resp_") {
+			return value
+		}
+	}
+	return ""
+}
+
+func websocketTerminalEvent(payload []byte) string {
+	eventType := websocketPayloadEventType(payload)
+	switch eventType {
+	case wsEventTypeCompleted, "response.done", "response.failed", "response.incomplete", "response.cancelled", wsEventTypeError:
+		return eventType
+	default:
+		return ""
+	}
 }
 
 func markAPIResponseTimestamp(c *gin.Context) {
