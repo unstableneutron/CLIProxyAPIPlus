@@ -1274,12 +1274,16 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetCodeBuddyModels()
 		models = applyExcludedModels(models, excluded)
 	case "commandcode":
-		models = registry.GetCommandCodeModels()
-		if entry := s.resolveConfigCommandCodeKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildCommandCodeConfigModels(entry)
-			}
+		if entry := s.resolveConfigCommandCodeKey(a); entry != nil && len(entry.Models) > 0 {
+			models = buildCommandCodeConfigModels(entry)
 			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			models = executor.FetchCommandCodeModels(ctx, a, s.cfg)
+			cancel()
+			if entry := s.resolveConfigCommandCodeKey(a); entry != nil && authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
 		}

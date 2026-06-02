@@ -30,7 +30,7 @@ import (
 const (
 	commandCodeProviderKey      = "commandcode"
 	defaultCommandCodeAPIBase   = "https://api.commandcode.ai"
-	commandCodeVersionHeader    = "0.24.1"
+	commandCodeVersionHeader    = "0.29.0"
 	commandCodeMaxTokensCap     = 200000
 	commandCodeDefaultUserAgent = "cli-proxy-commandcode"
 )
@@ -52,6 +52,9 @@ type commandCodeOpenAIRequest struct {
 	Tools               []commandCodeOpenAITool    `json:"tools"`
 	MaxTokens           int                        `json:"max_tokens"`
 	MaxCompletionTokens int                        `json:"max_completion_tokens"`
+	Temperature         *float64                   `json:"temperature"`
+	TopP                *float64                   `json:"top_p"`
+	Stop                json.RawMessage            `json:"stop"`
 }
 
 type commandCodeOpenAIMessage struct {
@@ -107,12 +110,15 @@ type commandCodeConfig struct {
 }
 
 type commandCodeParams struct {
-	Model     string `json:"model"`
-	Messages  []any  `json:"messages"`
-	Tools     []any  `json:"tools"`
-	System    string `json:"system"`
-	MaxTokens int    `json:"max_tokens"`
-	Stream    bool   `json:"stream"`
+	Model       string          `json:"model"`
+	Messages    []any           `json:"messages"`
+	Tools       []any           `json:"tools"`
+	System      string          `json:"system"`
+	MaxTokens   int             `json:"max_tokens"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
+	Stop        json.RawMessage `json:"stop,omitempty"`
+	Stream      bool            `json:"stream"`
 }
 
 type commandCodeToolCall struct {
@@ -124,19 +130,22 @@ type commandCodeToolCall struct {
 type commandCodeUsage struct {
 	InputTokens      int64
 	OutputTokens     int64
+	ReasoningTokens  int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
+	TotalTokens      int64
 }
 
 type commandCodeStreamState struct {
-	ID        string
-	Created   int64
-	Model     string
-	Text      strings.Builder
-	Reasoning strings.Builder
-	ToolCalls []commandCodeToolCall
-	Usage     commandCodeUsage
-	Finish    string
+	ID                string
+	Created           int64
+	Model             string
+	Text              strings.Builder
+	Reasoning         strings.Builder
+	ToolCalls         []commandCodeToolCall
+	toolCallIndexByID map[string]int
+	Usage             commandCodeUsage
+	Finish            string
 }
 
 func NewCommandCodeExecutor(cfg *config.Config) *CommandCodeExecutor {
@@ -220,6 +229,17 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		state := newCommandCodeStreamState(prepared.baseModel)
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		sendTranslated := func(chunk []byte) bool {
+			translated := sdktranslator.TranslateStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.canonicalPayload, chunk, &param)
+			for i := range translated {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: translated[i]}:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
 		for scanner.Scan() {
 			line := bytes.Clone(scanner.Bytes())
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -236,13 +256,8 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				reporter.Publish(ctx, usageDetail)
 			}
 			for _, chunk := range chunks {
-				translated := sdktranslator.TranslateStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.canonicalPayload, chunk, &param)
-				for i := range translated {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: translated[i]}:
-					case <-ctx.Done():
-						return
-					}
+				if !sendTranslated(chunk) {
+					return
 				}
 			}
 		}
@@ -255,10 +270,153 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			return
 		}
+		if !sendTranslated([]byte("[DONE]")) {
+			return
+		}
 		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// FetchCommandCodeModels fetches the live Command Code model catalog from the
+// official Provider API. Generation still uses the CLI-style /alpha/generate
+// endpoint because Go-plan CLI keys can call it while /provider/v1 generation is
+// Pro-gated, but /provider/v1/models is public and is the authoritative model
+// list documented at https://commandcode.ai/docs/provider-api. Community
+// reference implementations that informed this split include
+// github.com/patlux/pi-commandcode-provider and yelixir-dev/commandcode-bridge.
+func FetchCommandCodeModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	baseURL, apiKey := resolveCommandCodeCredentials(auth)
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = defaultCommandCodeAPIBase
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	url := strings.TrimRight(baseURL, "/") + "/provider/v1/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Warnf("commandcode: failed to create model fetch request: %v", err)
+		return registry.GetCommandCodeModels()
+	}
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	applyCommandCodeHeaders(req, auth)
+
+	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Warnf("commandcode: using static models (live fetch failed: %v)", err)
+		return registry.GetCommandCodeModels()
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("commandcode: close models response body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Warnf("commandcode: failed to read models response: %v", err)
+		return registry.GetCommandCodeModels()
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warnf("commandcode: fetch models failed: status %d, body: %s", resp.StatusCode, string(body))
+		return registry.GetCommandCodeModels()
+	}
+	models := commandCodeModelsFromProviderResponse(body)
+	if len(models) == 0 {
+		log.Warn("commandcode: live models response was empty or invalid, using static models")
+		return registry.GetCommandCodeModels()
+	}
+	log.Infof("commandcode: fetched %d models from Provider API", len(models))
+	return models
+}
+
+func commandCodeModelsFromProviderResponse(body []byte) []*registry.ModelInfo {
+	root := gjson.ParseBytes(body)
+	data := root.Get("data")
+	if !data.IsArray() {
+		return nil
+	}
+	staticByID := make(map[string]*registry.ModelInfo)
+	for _, model := range registry.GetCommandCodeModels() {
+		if model != nil && strings.TrimSpace(model.ID) != "" {
+			staticByID[model.ID] = model
+		}
+	}
+
+	now := time.Now().Unix()
+	seen := make(map[string]struct{})
+	models := make([]*registry.ModelInfo, 0, len(data.Array()))
+	data.ForEach(func(_, item gjson.Result) bool {
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" {
+			return true
+		}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+
+		created := item.Get("created").Int()
+		if created <= 0 {
+			created = now
+		}
+		contextLength := int(item.Get("context_length").Int())
+		displayName := strings.TrimSpace(item.Get("name").String())
+		if displayName == "" {
+			displayName = id
+		}
+		if !strings.HasSuffix(displayName, " (CC)") {
+			displayName += " (CC)"
+		}
+		ownedBy := strings.TrimSpace(item.Get("owned_by").String())
+		if ownedBy == "" {
+			ownedBy = "command-code"
+		}
+
+		model := &registry.ModelInfo{
+			ID:                        id,
+			Object:                    "model",
+			Created:                   created,
+			OwnedBy:                   ownedBy,
+			Type:                      commandCodeProviderKey,
+			DisplayName:               displayName,
+			Version:                   id,
+			ContextLength:             contextLength,
+			MaxCompletionTokens:       commandCodeProviderMaxCompletionTokens(contextLength),
+			SupportedParameters:       []string{"tools"},
+			SupportedEndpoints:        []string{"/v1/chat/completions", "/v1/responses"},
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		}
+		if staticModel, ok := staticByID[id]; ok && staticModel != nil {
+			if model.ContextLength == 0 {
+				model.ContextLength = staticModel.ContextLength
+			}
+			if staticModel.MaxCompletionTokens > 0 && staticModel.MaxCompletionTokens < model.MaxCompletionTokens {
+				model.MaxCompletionTokens = staticModel.MaxCompletionTokens
+			}
+			if staticModel.Description != "" {
+				model.Description = staticModel.Description
+			}
+		}
+		models = append(models, model)
+		return true
+	})
+	return models
+}
+
+func commandCodeProviderMaxCompletionTokens(contextLength int) int {
+	if contextLength > 0 && contextLength < commandCodeMaxTokensCap {
+		return contextLength
+	}
+	return commandCodeMaxTokensCap
 }
 
 func (e *CommandCodeExecutor) CountTokens(ctx context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -502,12 +660,15 @@ func buildCommandCodePayload(opts commandCodePayloadOptions) ([]byte, error) {
 		Skills:         nil,
 		PermissionMode: "standard",
 		Params: commandCodeParams{
-			Model:     opts.Model,
-			Messages:  messages,
-			Tools:     commandCodeToolsFromOpenAI(req.Tools),
-			System:    system,
-			MaxTokens: maxTokens,
-			Stream:    true,
+			Model:       opts.Model,
+			Messages:    messages,
+			Tools:       commandCodeToolsFromOpenAI(req.Tools),
+			System:      system,
+			MaxTokens:   maxTokens,
+			Temperature: req.Temperature,
+			TopP:        req.TopP,
+			Stop:        commandCodeOptionalRaw(req.Stop),
+			Stream:      true,
 		},
 	}
 	return json.Marshal(body)
@@ -515,6 +676,14 @@ func buildCommandCodePayload(opts commandCodePayloadOptions) ([]byte, error) {
 
 func defaultCommandCodeEnvironment() string {
 	return fmt.Sprintf("%s-%s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
+}
+
+func commandCodeOptionalRaw(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return bytes.Clone(trimmed)
 }
 
 func commandCodeMaxTokens(req commandCodeOpenAIRequest, model string) int {
@@ -731,13 +900,47 @@ func stringValueFromMap(m map[string]any, key string) string {
 
 func newCommandCodeStreamState(model string) *commandCodeStreamState {
 	return &commandCodeStreamState{
-		ID:      "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Created: time.Now().Unix(),
-		Model:   model,
+		ID:                "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Created:           time.Now().Unix(),
+		Model:             model,
+		toolCallIndexByID: make(map[string]int),
 	}
 }
 
+func (s *commandCodeStreamState) ensureToolCall(id, name string) int {
+	if s.toolCallIndexByID == nil {
+		s.toolCallIndexByID = make(map[string]int)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = fmt.Sprintf("call_%d", len(s.ToolCalls))
+	}
+	if idx, ok := s.toolCallIndexByID[id]; ok {
+		if name != "" && s.ToolCalls[idx].Name == "" {
+			s.ToolCalls[idx].Name = name
+		}
+		return idx
+	}
+	idx := len(s.ToolCalls)
+	s.ToolCalls = append(s.ToolCalls, commandCodeToolCall{ID: id, Name: name, Arguments: ""})
+	s.toolCallIndexByID[id] = idx
+	return idx
+}
+
+func (s *commandCodeStreamState) lookupToolCall(id string) (int, bool) {
+	if s == nil || s.toolCallIndexByID == nil {
+		return 0, false
+	}
+	idx, ok := s.toolCallIndexByID[strings.TrimSpace(id)]
+	return idx, ok
+}
+
 func commandCodeLineToOpenAIChunks(line []byte, state *commandCodeStreamState) ([][]byte, usage.Detail, error) {
+	// /alpha/generate currently emits AI SDK v5-style JSON lines rather than
+	// OpenAI SSE chunks. Live probes and community bridges show both consolidated
+	// tool-call events and incremental tool-input-* events; keep this parser
+	// tolerant so the Responses WS/SSE translators can still synthesize stable
+	// OpenAI-compatible events if Command Code adjusts framing again.
 	payload := commandCodeJSONPayload(line)
 	if len(payload) == 0 {
 		return nil, usage.Detail{}, nil
@@ -757,14 +960,48 @@ func commandCodeLineToOpenAIChunks(line []byte, state *commandCodeStreamState) (
 		return [][]byte{state.streamChunk(map[string]any{"reasoning_content": delta}, nil, nil)}, usage.Detail{}, nil
 	case "reasoning-end":
 		return nil, usage.Detail{}, nil
+	case "tool-input-start":
+		idx := state.ensureToolCall(commandCodeToolEventID(root), commandCodeToolEventName(root))
+		call := state.ToolCalls[idx]
+		delta := map[string]any{"tool_calls": []any{map[string]any{
+			"index": idx,
+			"id":    call.ID,
+			"type":  "function",
+			"function": map[string]any{
+				"name":      call.Name,
+				"arguments": "",
+			},
+		}}}
+		return [][]byte{state.streamChunk(delta, nil, nil)}, usage.Detail{}, nil
+	case "tool-input-delta":
+		idx := state.ensureToolCall(commandCodeToolEventID(root), commandCodeToolEventName(root))
+		deltaText := commandCodeToolInputDelta(root)
+		state.ToolCalls[idx].Arguments += deltaText
+		delta := map[string]any{"tool_calls": []any{map[string]any{
+			"index": idx,
+			"function": map[string]any{
+				"arguments": deltaText,
+			},
+		}}}
+		return [][]byte{state.streamChunk(delta, nil, nil)}, usage.Detail{}, nil
+	case "tool-input-end":
+		return nil, usage.Detail{}, nil
 	case "tool-call":
-		call := commandCodeToolCall{
-			ID:        root.Get("toolCallId").String(),
-			Name:      root.Get("toolName").String(),
-			Arguments: commandCodeToolArguments(root),
+		id := commandCodeToolEventID(root)
+		name := commandCodeToolEventName(root)
+		arguments := commandCodeToolArguments(root)
+		if idx, ok := state.lookupToolCall(id); ok {
+			if name != "" && state.ToolCalls[idx].Name == "" {
+				state.ToolCalls[idx].Name = name
+			}
+			if arguments != "{}" {
+				state.ToolCalls[idx].Arguments = arguments
+			}
+			return nil, usage.Detail{}, nil
 		}
-		idx := len(state.ToolCalls)
-		state.ToolCalls = append(state.ToolCalls, call)
+		idx := state.ensureToolCall(id, name)
+		state.ToolCalls[idx].Arguments = arguments
+		call := state.ToolCalls[idx]
 		delta := map[string]any{"tool_calls": []any{map[string]any{
 			"index": idx,
 			"id":    call.ID,
@@ -775,9 +1012,19 @@ func commandCodeLineToOpenAIChunks(line []byte, state *commandCodeStreamState) (
 			},
 		}}}
 		return [][]byte{state.streamChunk(delta, nil, nil)}, usage.Detail{}, nil
+	case "finish-step":
+		if parsedUsage := commandCodeUsageFromEvent(root); parsedUsage.hasUsage() {
+			state.Usage = parsedUsage
+		}
+		return nil, usage.Detail{}, nil
 	case "finish":
 		state.Finish = mapCommandCodeFinishReason(root.Get("finishReason").String())
-		state.Usage = commandCodeUsageFromEvent(root)
+		if state.Finish == "stop" && len(state.ToolCalls) > 0 {
+			state.Finish = "tool_calls"
+		}
+		if parsedUsage := commandCodeUsageFromEvent(root); parsedUsage.hasUsage() {
+			state.Usage = parsedUsage
+		}
 		usageDetail := state.Usage.detail()
 		return [][]byte{state.streamChunk(map[string]any{}, state.Finish, state.Usage.openAIUsage())}, usageDetail, nil
 	case "error":
@@ -799,6 +1046,34 @@ func commandCodeJSONPayload(line []byte) []byte {
 		return nil
 	}
 	return trimmed
+}
+
+func commandCodeToolEventID(root gjson.Result) string {
+	for _, path := range []string{"toolCallId", "tool_call_id", "id"} {
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func commandCodeToolEventName(root gjson.Result) string {
+	for _, path := range []string{"toolName", "tool_name", "name"} {
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func commandCodeToolInputDelta(root gjson.Result) string {
+	for _, path := range []string{"delta", "inputTextDelta", "text"} {
+		value := root.Get(path)
+		if value.Exists() {
+			return value.String()
+		}
+	}
+	return ""
 }
 
 func commandCodeToolArguments(root gjson.Result) string {
@@ -823,38 +1098,82 @@ func commandCodeToolArguments(root gjson.Result) string {
 
 func commandCodeUsageFromEvent(root gjson.Result) commandCodeUsage {
 	usageNode := root.Get("totalUsage")
+	if !usageNode.IsObject() {
+		usageNode = root.Get("usage")
+	}
+	if !usageNode.IsObject() {
+		return commandCodeUsage{}
+	}
 	details := usageNode.Get("inputTokenDetails")
+	outputDetails := usageNode.Get("outputTokenDetails")
+	cacheReadTokens := details.Get("cacheReadTokens").Int()
+	if cacheReadTokens == 0 {
+		cacheReadTokens = usageNode.Get("cachedInputTokens").Int()
+	}
+	reasoningTokens := usageNode.Get("reasoningTokens").Int()
+	if reasoningTokens == 0 {
+		reasoningTokens = outputDetails.Get("reasoningTokens").Int()
+	}
 	return commandCodeUsage{
 		InputTokens:      usageNode.Get("inputTokens").Int(),
 		OutputTokens:     usageNode.Get("outputTokens").Int(),
-		CacheReadTokens:  details.Get("cacheReadTokens").Int(),
+		ReasoningTokens:  reasoningTokens,
+		CacheReadTokens:  cacheReadTokens,
 		CacheWriteTokens: details.Get("cacheWriteTokens").Int(),
+		TotalTokens:      usageNode.Get("totalTokens").Int(),
 	}
+}
+
+func (u commandCodeUsage) hasUsage() bool {
+	return u.InputTokens != 0 ||
+		u.OutputTokens != 0 ||
+		u.ReasoningTokens != 0 ||
+		u.CacheReadTokens != 0 ||
+		u.CacheWriteTokens != 0 ||
+		u.TotalTokens != 0
 }
 
 func (u commandCodeUsage) openAIUsage() map[string]any {
-	total := u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	promptTokens := u.InputTokens
+	total := u.TotalTokens
+	if total == 0 {
+		promptTokens = u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+		total = promptTokens + u.OutputTokens
+	}
 	if total == 0 {
 		return nil
 	}
-	return map[string]any{
-		"prompt_tokens":     u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens,
+	out := map[string]any{
+		"prompt_tokens":     promptTokens,
 		"completion_tokens": u.OutputTokens,
 		"total_tokens":      total,
-		"prompt_tokens_details": map[string]any{
-			"cached_tokens": u.CacheReadTokens,
-		},
 	}
+	if u.CacheReadTokens != 0 {
+		out["prompt_tokens_details"] = map[string]any{
+			"cached_tokens": u.CacheReadTokens,
+		}
+	}
+	if u.ReasoningTokens != 0 {
+		out["completion_tokens_details"] = map[string]any{
+			"reasoning_tokens": u.ReasoningTokens,
+		}
+	}
+	return out
 }
 
 func (u commandCodeUsage) detail() usage.Detail {
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	}
 	return usage.Detail{
 		InputTokens:         u.InputTokens,
 		OutputTokens:        u.OutputTokens,
+		ReasoningTokens:     u.ReasoningTokens,
 		CachedTokens:        u.CacheReadTokens,
 		CacheReadTokens:     u.CacheReadTokens,
 		CacheCreationTokens: u.CacheWriteTokens,
-		TotalTokens:         u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens,
+		TotalTokens:         total,
 	}
 }
 
@@ -946,6 +1265,8 @@ func mapCommandCodeFinishReason(reason string) string {
 		return "tool_calls"
 	case "length", "max_tokens", "max-tokens", "max_output_tokens":
 		return "length"
+	case "content-filter", "content_filter":
+		return "content_filter"
 	default:
 		return "stop"
 	}
