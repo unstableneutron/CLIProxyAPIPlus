@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"gopkg.in/yaml.v3"
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {
@@ -241,6 +242,92 @@ func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 	if auths[0].Attributes["header:X-Custom"] != "value" {
 		t.Errorf("expected header:X-Custom=value, got %s", auths[0].Attributes["header:X-Custom"])
+	}
+}
+
+func TestConfigSynthesizer_ConfigAPIKeyLabelsFromYAML(t *testing.T) {
+	var cfg config.Config
+	if err := yaml.Unmarshal([]byte(`
+gemini-api-key:
+  - api-key: gemini-key
+    label: Gemini facade key
+claude-api-key:
+  - api-key: claude-key
+    label: Claude facade key
+codex-api-key:
+  - api-key: codex-key
+    base-url: https://codex.example.test/v1
+    label: Codex facade key
+commandcode-api-key:
+  - api-key: commandcode-key
+    label: CommandCode facade key
+vertex-api-key:
+  - api-key: vertex-key
+    label: Vertex facade key
+`), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+
+	synth := NewConfigSynthesizer()
+	auths, err := synth.Synthesize(&SynthesisContext{
+		Config:      &cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	labelsByProvider := make(map[string]string, len(auths))
+	for _, auth := range auths {
+		labelsByProvider[auth.Provider] = auth.Label
+	}
+
+	want := map[string]string{
+		"gemini":      "Gemini facade key",
+		"claude":      "Claude facade key",
+		"codex":       "Codex facade key",
+		"commandcode": "CommandCode facade key",
+		"vertex":      "Vertex facade key",
+	}
+	for provider, wantLabel := range want {
+		if got := labelsByProvider[provider]; got != wantLabel {
+			t.Fatalf("%s label = %q, want %q", provider, got, wantLabel)
+		}
+	}
+}
+
+func TestConfigSynthesizer_OpenAICompatAPIKeyEntryLabelFromYAML(t *testing.T) {
+	var cfg config.Config
+	if err := yaml.Unmarshal([]byte(`
+openai-compatibility:
+  - name: FacadeProvider
+    base-url: https://compat.example.test/v1
+    api-key-entries:
+      - api-key: compat-key-a
+        label: First facade key
+      - api-key: compat-key-b
+`), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+
+	synth := NewConfigSynthesizer()
+	auths, err := synth.Synthesize(&SynthesisContext{
+		Config:      &cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	if got := auths[0].Label; got != "First facade key" {
+		t.Fatalf("first label = %q, want First facade key", got)
+	}
+	if got := auths[1].Label; got != "FacadeProvider" {
+		t.Fatalf("second label = %q, want provider fallback", got)
 	}
 }
 

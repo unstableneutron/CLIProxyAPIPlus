@@ -167,6 +167,7 @@ nonstream-keepalive-interval: 0
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
+#     label: "gemini-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
@@ -187,6 +188,7 @@ nonstream-keepalive-interval: 0
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
+#     label: "codex-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
@@ -206,6 +208,7 @@ nonstream-keepalive-interval: 0
 # Command Code API keys
 # commandcode-api-key:
 #   - api-key: "user_..." # Command Code API key from commandcode.ai
+#     label: "commandcode-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/deepseek/deepseek-v4-flash" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://api.commandcode.ai" # optional: override Command Code API endpoint
@@ -226,6 +229,7 @@ nonstream-keepalive-interval: 0
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
+#     label: "claude-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -352,6 +356,7 @@ nonstream-keepalive-interval: 0
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         label: "openrouter-key-a" # optional: display name in management views
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
@@ -376,6 +381,7 @@ nonstream-keepalive-interval: 0
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
+#     label: "vertex-team-a"                      # optional: display name in management views
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override

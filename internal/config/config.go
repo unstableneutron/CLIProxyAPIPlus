@@ -440,6 +440,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -496,6 +499,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -549,6 +555,9 @@ type CommandCodeKey struct {
 	// APIKey is the Command Code API key. It typically starts with "user_".
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -596,6 +605,9 @@ func (m CommandCodeModel) GetAlias() string { return m.Alias }
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -748,6 +760,9 @@ type OpenAICompatibility struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`

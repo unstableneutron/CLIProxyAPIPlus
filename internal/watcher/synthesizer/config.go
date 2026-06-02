@@ -15,6 +15,14 @@ import (
 // It handles Gemini, Claude, Codex, CommandCode, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
+func configLabel(label, fallback string) string {
+	trimmed := strings.TrimSpace(label)
+	if trimmed != "" {
+		return trimmed
+	}
+	return fallback
+}
+
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
 func NewConfigSynthesizer() *ConfigSynthesizer {
 	return &ConfigSynthesizer{}
@@ -83,7 +91,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
-			Label:      "gemini-apikey",
+			Label:      configLabel(entry.Label, "gemini-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -139,7 +147,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
-			Label:      "claude-apikey",
+			Label:      configLabel(ck.Label, "claude-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -198,7 +206,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
-			Label:      "codex-apikey",
+			Label:      configLabel(ck.Label, "codex-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -254,7 +262,7 @@ func (s *ConfigSynthesizer) synthesizeCommandCodeKeys(ctx *SynthesisContext) []*
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "commandcode",
-			Label:      "commandcode-apikey",
+			Label:      configLabel(entry.Label, "commandcode-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -324,7 +332,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
-				Label:      compat.Name,
+				Label:      configLabel(entry.Label, compat.Name),
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
@@ -416,7 +424,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
-			Label:      "vertex-apikey",
+			Label:      configLabel(compat.Label, "vertex-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
