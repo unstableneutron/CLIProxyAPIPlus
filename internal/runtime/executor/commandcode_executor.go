@@ -552,7 +552,7 @@ func (e *CommandCodeExecutor) doRequest(ctx context.Context, auth *cliproxyauth.
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 	return httpResp, nil
 }
 

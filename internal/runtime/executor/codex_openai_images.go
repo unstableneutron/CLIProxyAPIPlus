@@ -121,7 +121,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		}
 	}()
 
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -208,7 +208,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return nil, errDo
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

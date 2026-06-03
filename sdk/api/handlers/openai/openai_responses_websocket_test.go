@@ -1191,8 +1191,8 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 	}
 }
 
-func TestParseResponsesWebsocketTraceparent(t *testing.T) {
-	ctx := parseResponsesWebsocketTraceparent("00-1234567890abcdef1234567890abcdef-abcdef1234567890-00")
+func TestResponsesWebsocketTraceContextUsesSharedTraceParser(t *testing.T) {
+	ctx := websocketTraceContext(requestlogging.NewTraceContext("00-1234567890abcdef1234567890abcdef-abcdef1234567890-00"))
 	if ctx.Traceparent != "00-1234567890abcdef1234567890abcdef-abcdef1234567890-00" {
 		t.Fatalf("traceparent = %q", ctx.Traceparent)
 	}
@@ -1203,21 +1203,21 @@ func TestParseResponsesWebsocketTraceparent(t *testing.T) {
 		t.Fatalf("span id = %q", ctx.SpanID)
 	}
 
-	invalid := parseResponsesWebsocketTraceparent("00-00000000000000000000000000000000-abcdef1234567890-01")
-	if invalid.Traceparent != "00-00000000000000000000000000000000-abcdef1234567890-01" {
-		t.Fatalf("invalid raw traceparent not preserved: %q", invalid.Traceparent)
+	invalid := websocketTraceContext(requestlogging.NewTraceContext("00-00000000000000000000000000000000-abcdef1234567890-01"))
+	if invalid.Traceparent == "00-00000000000000000000000000000000-abcdef1234567890-01" {
+		t.Fatalf("invalid raw traceparent should not be preserved: %q", invalid.Traceparent)
 	}
-	if invalid.TraceID != "" || invalid.SpanID != "" {
-		t.Fatalf("invalid trace ids should not be parsed: %+v", invalid)
+	if invalid.TraceID == "" || invalid.SpanID == "" || !invalid.Generated {
+		t.Fatalf("invalid traceparent should generate replacement trace context: %+v", invalid)
 	}
 }
 
 func TestLogResponsesWebsocketClientDisconnectedIncludesTraceContext(t *testing.T) {
 	entry := logResponsesWebsocketClientDisconnected(websocketTraceContext{
-		Traceparent: "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
-		TraceID:     "1234567890abcdef1234567890abcdef",
-		SpanID:      "abcdef1234567890",
-		SessionID:   "proxy-session-1",
+		Traceparent:             "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+		TraceID:                 "1234567890abcdef1234567890abcdef",
+		SpanID:                  "abcdef1234567890",
+		ProxyWebsocketSessionID: "proxy-session-1",
 	}, "proxy-session-1", nil)
 
 	for key, want := range map[string]string{
@@ -1234,10 +1234,10 @@ func TestLogResponsesWebsocketClientDisconnectedIncludesTraceContext(t *testing.
 func TestWebsocketTimelineIncludesTraceContext(t *testing.T) {
 	timelineLog := newInMemoryWebsocketTimelineLog()
 	timelineLog.SetTraceContext(websocketTraceContext{
-		Traceparent: "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
-		TraceID:     "1234567890abcdef1234567890abcdef",
-		SpanID:      "abcdef1234567890",
-		SessionID:   "proxy-session-1",
+		Traceparent:             "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01",
+		TraceID:                 "1234567890abcdef1234567890abcdef",
+		SpanID:                  "abcdef1234567890",
+		ProxyWebsocketSessionID: "proxy-session-1",
 	})
 	timelineLog.Append("response", []byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`), time.Unix(0, 0).UTC())
 	timelineLog.Append("response", []byte(`{"type":"response.completed","response":{"id":"msg_1","status":"completed"}}`), time.Unix(0, 1).UTC())

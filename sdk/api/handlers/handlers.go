@@ -284,6 +284,10 @@ func headersFromContext(ctx context.Context) http.Header {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		headers := ginCtx.Request.Header.Clone()
 		headers.Del(ForceModelPrefixHeader)
+		// Trace context is proxy-local diagnostic state. Do not expose inbound
+		// W3C trace headers to executor payload configuration or upstream builders.
+		headers.Del("Traceparent")
+		headers.Del("Tracestate")
 		return headers
 	}
 	return nil
@@ -447,6 +451,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
+	if requestCtx != nil {
+		if trace := logging.GetTraceContext(requestCtx); trace.Traceparent != "" {
+			newCtx = logging.WithTraceContext(newCtx, trace)
+		}
+		newCtx = logging.WithProxyStatusHolderFrom(newCtx, requestCtx)
+	}
 
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
@@ -460,6 +470,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	if h != nil && h.AuthManager != nil {
+		previousCallback := selectedAuthIDCallbackFromContext(newCtx)
+		callbackCtx := newCtx
+		newCtx = WithSelectedAuthIDCallback(newCtx, func(authID string) {
+			if previousCallback != nil {
+				previousCallback(authID)
+			}
+			h.recordSelectedUpstream(callbackCtx, authID)
+		})
+	}
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
@@ -584,12 +604,24 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
 }
 
+func (h *BaseAPIHandler) recordSelectedUpstream(ctx context.Context, authID string) {
+	if h == nil || h.AuthManager == nil {
+		return
+	}
+	auth, ok := h.AuthManager.GetByID(strings.TrimSpace(authID))
+	if !ok || auth == nil {
+		return
+	}
+	logging.SetSlot(ctx, auth.EnsureIndex())
+}
+
 // ExecuteImageWithAuthManager executes an OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
 }
 
 func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	logging.SetUpstreamTransport(ctx, "http")
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -640,6 +672,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	logging.SetUpstreamTransport(ctx, "http")
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -700,6 +733,10 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if !coreexecutor.DownstreamWebsocket(ctx) {
+		logging.SetDownstreamTransport(ctx, "sse")
+	}
+	logging.SetUpstreamTransport(ctx, "sse")
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1075,11 +1112,37 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	}
 }
 
+func recordProxyErrorHeader(ctx context.Context, status int, msg *interfaces.ErrorMessage) {
+	if status <= 0 {
+		status = http.StatusInternalServerError
+	}
+	details := strings.ToLower(strings.ReplaceAll(http.StatusText(status), " ", "_"))
+	if details == "" {
+		details = "upstream_error"
+	}
+	if msg != nil && msg.Error != nil {
+		var authErr *coreauth.Error
+		if errors.As(msg.Error, &authErr) && authErr != nil {
+			if code := strings.TrimSpace(authErr.Code); code != "" {
+				details = code
+			}
+			switch authErr.Code {
+			case "auth_not_found", "auth_unavailable":
+				logging.SetAuthState(ctx, "unavailable")
+			}
+		}
+	}
+	logging.SetProxyError(ctx, details, "")
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
+	}
+	if c != nil && c.Request != nil {
+		recordProxyErrorHeader(c.Request.Context(), status, msg)
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {

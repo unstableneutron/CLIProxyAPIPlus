@@ -230,6 +230,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine.Use(mw)
 	}
 
+	// Add proxy observability middleware before request logging so request logs
+	// include the response diagnostics injected before the first write.
+	engine.Use(middleware.ProxyObservabilityMiddleware())
+
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
 	var requestLogger logging.RequestLogger

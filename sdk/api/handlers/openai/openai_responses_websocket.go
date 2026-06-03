@@ -50,12 +50,7 @@ type websocketTimelineAppender interface {
 	Append(eventType string, payload []byte, timestamp time.Time)
 }
 
-type websocketTraceContext struct {
-	Traceparent string
-	TraceID     string
-	SpanID      string
-	SessionID   string
-}
+type websocketTraceContext requestlogging.TraceContext
 
 type websocketTimelineLog struct {
 	enabled bool
@@ -225,13 +220,18 @@ func writeWebsocketTimelineBuilder(builder *strings.Builder, data []byte) {
 // It accepts `response.create` and `response.append` requests and streams
 // response events back as JSON websocket text messages.
 func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+	traceContext := websocketTraceContext(requestlogging.GetTraceContext(c.Request.Context()))
+	if traceContext.Traceparent == "" {
+		traceContext = websocketTraceContext(requestlogging.NewTraceContext(c.Request.Header.Get("traceparent")))
+	}
+	passthroughSessionID := uuid.NewString()
+	traceContext.ProxyWebsocketSessionID = passthroughSessionID
+	c.Request = c.Request.WithContext(requestlogging.WithTraceContext(c.Request.Context(), requestlogging.TraceContext(traceContext)))
+	requestlogging.SetDownstreamTransport(c.Request.Context(), "websocket")
 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
 	if err != nil {
 		return
 	}
-	passthroughSessionID := uuid.NewString()
-	traceContext := parseResponsesWebsocketTraceparent(c.Request.Header.Get("traceparent"))
-	traceContext.SessionID = passthroughSessionID
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
@@ -545,6 +545,7 @@ func websocketUpgradeHeaders(req *http.Request) http.Header {
 	if req == nil {
 		return headers
 	}
+	requestlogging.ApplyProxyObservabilityHeaders(req.Context(), headers)
 
 	// Keep the same sticky turn-state across reconnects when provided by the client.
 	turnState := strings.TrimSpace(req.Header.Get(wsTurnStateHeader))
@@ -1601,36 +1602,6 @@ func formatWebsocketTimelineEventWithContext(eventType string, payload []byte, t
 	return []byte(builder.String())
 }
 
-func parseResponsesWebsocketTraceparent(raw string) websocketTraceContext {
-	traceparent := strings.TrimSpace(raw)
-	trace := websocketTraceContext{Traceparent: traceparent}
-	parts := strings.Split(traceparent, "-")
-	if len(parts) != 4 || parts[0] != "00" {
-		return trace
-	}
-	if !isLowerHex(parts[1], 32) || !isLowerHex(parts[2], 16) || !isLowerHex(parts[3], 2) {
-		return trace
-	}
-	if parts[1] == "00000000000000000000000000000000" || parts[2] == "0000000000000000" {
-		return trace
-	}
-	trace.TraceID = parts[1]
-	trace.SpanID = parts[2]
-	return trace
-}
-
-func isLowerHex(value string, length int) bool {
-	if len(value) != length {
-		return false
-	}
-	for _, r := range value {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
 func logResponsesWebsocketClientDisconnected(trace websocketTraceContext, sessionID string, err error) *log.Entry {
 	entry := log.WithFields(trace.logFields())
 	if err != nil {
@@ -1643,45 +1614,14 @@ func logResponsesWebsocketClientDisconnected(trace websocketTraceContext, sessio
 
 func (trace websocketTraceContext) logFields() log.Fields {
 	fields := log.Fields{}
-	if trace.Traceparent != "" {
-		fields["traceparent"] = trace.Traceparent
-	}
-	if trace.TraceID != "" {
-		fields["trace_id"] = trace.TraceID
-	}
-	if trace.SpanID != "" {
-		fields["span_id"] = trace.SpanID
-	}
-	if trace.SessionID != "" {
-		fields["proxy_websocket_session_id"] = trace.SessionID
+	for key, value := range requestlogging.TraceContext(trace).LogFields() {
+		fields[key] = value
 	}
 	return fields
 }
 
 func writeWebsocketTraceContext(builder *strings.Builder, trace websocketTraceContext) {
-	if builder == nil {
-		return
-	}
-	if trace.Traceparent != "" {
-		builder.WriteString("traceparent: ")
-		builder.WriteString(trace.Traceparent)
-		builder.WriteString("\n")
-	}
-	if trace.TraceID != "" {
-		builder.WriteString("trace_id: ")
-		builder.WriteString(trace.TraceID)
-		builder.WriteString("\n")
-	}
-	if trace.SpanID != "" {
-		builder.WriteString("span_id: ")
-		builder.WriteString(trace.SpanID)
-		builder.WriteString("\n")
-	}
-	if trace.SessionID != "" {
-		builder.WriteString("proxy_websocket_session_id: ")
-		builder.WriteString(trace.SessionID)
-		builder.WriteString("\n")
-	}
+	requestlogging.WriteTraceContext(builder, requestlogging.TraceContext(trace))
 }
 
 func websocketPayloadResponseID(payload []byte) string {

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -1243,7 +1244,7 @@ func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *
 	if resp == nil {
 		return
 	}
-	helps.RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIWebsocketHandshakeResponse(ctx, cfg, resp)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 }
 
@@ -1653,8 +1654,10 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+		logging.SetUpstreamTransport(ctx, "websocket")
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
+	logging.SetUpstreamTransport(ctx, "http")
 	return e.httpExec.Execute(ctx, auth, req, opts)
 }
 
@@ -1663,8 +1666,13 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+		logging.SetUpstreamTransport(ctx, "websocket")
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
+	if cliproxyexecutor.DownstreamWebsocket(ctx) {
+		logging.SetFallbackReason(ctx, "ws_disabled")
+	}
+	logging.SetUpstreamTransport(ctx, "sse")
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
 

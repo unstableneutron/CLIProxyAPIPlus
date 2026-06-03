@@ -138,7 +138,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			log.Errorf("xai executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errRead != nil {
@@ -209,7 +209,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 			log.Errorf("xai executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
@@ -274,7 +274,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 			log.Errorf("xai executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
@@ -321,7 +321,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

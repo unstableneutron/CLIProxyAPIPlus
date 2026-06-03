@@ -100,6 +100,15 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	updateAggregatedRequest(ginCtx, attempts)
 }
 
+// RecordAPIHTTPResponseMetadata captures upstream response status, headers, and protocol information.
+func RecordAPIHTTPResponseMetadata(ctx context.Context, cfg *config.Config, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	logging.SetUpstreamProtocol(ctx, logging.HTTPProtocolToken(resp.ProtoMajor))
+	RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+}
+
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
@@ -226,9 +235,19 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
 
+// RecordAPIWebsocketHandshakeResponse stores upstream websocket handshake response metadata.
+func RecordAPIWebsocketHandshakeResponse(ctx context.Context, cfg *config.Config, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	logging.SetUpstreamProtocol(ctx, logging.HTTPProtocolToken(resp.ProtoMajor))
+	RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+}
+
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	logging.SetUpstreamWebsocketStatus(ctx, status)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}

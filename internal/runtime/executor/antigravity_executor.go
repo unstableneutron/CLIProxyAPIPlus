@@ -613,7 +613,7 @@ attemptLoop:
 				return resp, err
 			}
 
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 			bodyBytes, errRead := io.ReadAll(httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
@@ -812,7 +812,7 @@ attemptLoop:
 				err = errDo
 				return resp, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
@@ -1274,7 +1274,7 @@ attemptLoop:
 				err = errDo
 				return nil, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
@@ -1611,7 +1611,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			return cliproxyexecutor.Response{}, errDo
 		}
 
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)

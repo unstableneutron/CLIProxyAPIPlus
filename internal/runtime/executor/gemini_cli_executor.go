@@ -225,7 +225,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("gemini cli executor: close response body error: %v", errClose)
 		}
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			err = errRead
@@ -370,7 +370,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			err = errDo
 			return nil, err
 		}
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, httpResp)
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 			data, errRead := io.ReadAll(httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -580,7 +580,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		if errClose := resp.Body.Close(); errClose != nil {
 			helps.LogWithRequestID(ctx).Errorf("response body close error: %v", errClose)
 		}
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+		helps.RecordAPIHTTPResponseMetadata(ctx, e.cfg, resp)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return cliproxyexecutor.Response{}, errRead
