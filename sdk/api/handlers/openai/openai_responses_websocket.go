@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1305,6 +1306,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, *interfaces.ErrorMessage, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	outputAccumulator := &responsesWebsocketOutputAccumulator{}
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -1385,10 +1387,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
+				outputAccumulator.Record(payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if eventType == wsEventTypeCompleted {
 					completed = true
-					completedOutput = responseCompletedOutputFromPayload(payloads[i])
+					completedOutput = outputAccumulator.CompletedOutput(payloads[i])
 				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
@@ -1429,6 +1432,80 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	default:
 		return false
 	}
+}
+
+type responsesWebsocketOutputAccumulator struct {
+	outputItems          map[int][]byte
+	outputOrder          []int
+	unindexedOutputItems [][]byte
+}
+
+func (a *responsesWebsocketOutputAccumulator) Record(payload []byte) {
+	if a == nil || gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+		return
+	}
+	item := gjson.GetBytes(payload, "item")
+	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
+		return
+	}
+
+	if outputIndex := gjson.GetBytes(payload, "output_index"); outputIndex.Exists() {
+		index := int(outputIndex.Int())
+		if a.outputItems == nil {
+			a.outputItems = make(map[int][]byte)
+		}
+		if _, exists := a.outputItems[index]; !exists {
+			a.outputOrder = append(a.outputOrder, index)
+		}
+		a.outputItems[index] = bytes.Clone([]byte(item.Raw))
+		return
+	}
+
+	a.unindexedOutputItems = append(a.unindexedOutputItems, bytes.Clone([]byte(item.Raw)))
+}
+
+func (a *responsesWebsocketOutputAccumulator) CompletedOutput(payload []byte) []byte {
+	output := responseCompletedOutputFromPayload(payload)
+	if len(gjson.ParseBytes(output).Array()) > 0 || a == nil || !a.hasOutput() {
+		return output
+	}
+	return a.output()
+}
+
+func (a *responsesWebsocketOutputAccumulator) hasOutput() bool {
+	return a != nil && (len(a.outputOrder) > 0 || len(a.unindexedOutputItems) > 0)
+}
+
+func (a *responsesWebsocketOutputAccumulator) output() []byte {
+	if a == nil || !a.hasOutput() {
+		return []byte("[]")
+	}
+
+	var outputJSON bytes.Buffer
+	outputJSON.WriteByte('[')
+	indexes := append([]int(nil), a.outputOrder...)
+	sort.Ints(indexes)
+	written := 0
+	for _, index := range indexes {
+		item, ok := a.outputItems[index]
+		if !ok {
+			continue
+		}
+		if written > 0 {
+			outputJSON.WriteByte(',')
+		}
+		outputJSON.Write(item)
+		written++
+	}
+	for _, item := range a.unindexedOutputItems {
+		if written > 0 {
+			outputJSON.WriteByte(',')
+		}
+		outputJSON.Write(item)
+		written++
+	}
+	outputJSON.WriteByte(']')
+	return outputJSON.Bytes()
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
