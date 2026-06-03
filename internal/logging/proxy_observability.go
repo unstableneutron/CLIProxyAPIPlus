@@ -39,6 +39,9 @@ type ProxyStatus struct {
 	UpstreamTransport   string
 	UpstreamProtocol    string
 	Slot                string
+	SlotPriority        string
+	RouteModel          string
+	UpstreamModel       string
 	Error               string
 	Details             string
 	AuthState           string
@@ -210,6 +213,19 @@ func SetSlot(ctx context.Context, slot string) {
 	})
 }
 
+func SetSlotPriority(ctx context.Context, priority int) {
+	updateProxyStatus(ctx, func(status *ProxyStatus) {
+		status.SlotPriority = fmt.Sprintf("%d", priority)
+	})
+}
+
+func SetRoute(ctx context.Context, routeModel string, upstreamModel string) {
+	updateProxyStatus(ctx, func(status *ProxyStatus) {
+		status.RouteModel = cleanHeaderDescValue(routeModel)
+		status.UpstreamModel = cleanHeaderDescValue(upstreamModel)
+	})
+}
+
 func SetProxyError(ctx context.Context, errCode string, details string) {
 	updateProxyStatus(ctx, func(status *ProxyStatus) {
 		status.Error = sanitizeTokenValue(errCode, status.Error)
@@ -277,6 +293,9 @@ func normalizeProxyStatus(status ProxyStatus) ProxyStatus {
 	status.UpstreamTransport = sanitizeTokenValue(status.UpstreamTransport, defaultUpstreamTransport)
 	status.UpstreamProtocol = sanitizeTokenValue(status.UpstreamProtocol, defaultProtocol)
 	status.Slot = ShortSlotIdentifier(status.Slot)
+	status.SlotPriority = sanitizeTokenValue(status.SlotPriority, "")
+	status.RouteModel = cleanHeaderDescValue(status.RouteModel)
+	status.UpstreamModel = cleanHeaderDescValue(status.UpstreamModel)
 	status.Error = sanitizeTokenValue(status.Error, "")
 	status.AuthState = sanitizeTokenValue(status.AuthState, "")
 	status.UpstreamWSStatus = sanitizeTokenValue(status.UpstreamWSStatus, "")
@@ -335,7 +354,10 @@ func FormatServerTiming(trace TraceContext, status ProxyStatus) string {
 	}
 	status = normalizeProxyStatus(status)
 	parts = append(parts, `cpa.path;desc="`+quoteHeaderValue(formatProxyPath(status))+`"`)
-	parts = append(parts, `cpa.slot;desc="`+quoteHeaderValue(status.Slot)+`"`)
+	parts = append(parts, `cpa.slot;desc="`+quoteHeaderValue(formatProxySlot(status))+`"`)
+	if route := formatProxyRoute(status); route != "" {
+		parts = append(parts, `cpa.route;desc="`+quoteHeaderValue(route)+`"`)
+	}
 	if trace.ProxyWebsocketSessionID != "" {
 		parts = append(parts, `cpa.session;desc="`+quoteHeaderValue(ShortSlotIdentifier(trace.ProxyWebsocketSessionID))+`"`)
 	}
@@ -359,6 +381,26 @@ func FormatServerTiming(trace TraceContext, status ProxyStatus) string {
 
 func formatProxyPath(status ProxyStatus) string {
 	return formatProxyEdge(status.DownstreamTransport, status.DownstreamProtocol) + ">" + formatProxyEdge(status.UpstreamTransport, status.UpstreamProtocol)
+}
+
+func formatProxySlot(status ProxyStatus) string {
+	slot := ShortSlotIdentifier(status.Slot)
+	if slot == defaultSlot || status.SlotPriority == "" {
+		return slot
+	}
+	return slot + ">p" + status.SlotPriority
+}
+
+func formatProxyRoute(status ProxyStatus) string {
+	routeModel := cleanHeaderDescValue(status.RouteModel)
+	upstreamModel := cleanHeaderDescValue(status.UpstreamModel)
+	if routeModel == "" {
+		return upstreamModel
+	}
+	if upstreamModel == "" || upstreamModel == routeModel {
+		return routeModel
+	}
+	return routeModel + ">" + upstreamModel
 }
 
 func formatProxyEdge(transport string, protocol string) string {
@@ -415,6 +457,13 @@ func sanitizeTokenValue(value string, fallback string) string {
 		return strings.TrimSpace(fallback)
 	}
 	return builder.String()
+}
+
+func cleanHeaderDescValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
 }
 
 func isTokenRune(r rune) bool {

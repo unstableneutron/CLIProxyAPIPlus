@@ -57,6 +57,8 @@ func TestApplyProxyObservabilityHeadersUsesServerTimingEnvelope(t *testing.T) {
 	SetUpstreamTransport(ctx, "sse")
 	SetUpstreamProtocol(ctx, "h1")
 	SetSlot(ctx, "6f2a9c0e1b3d4a55")
+	SetSlotPriority(ctx, 5)
+	SetRoute(ctx, "team/gpt-5.5", "gpt-5.5-nomoderation")
 	SetFallbackReason(ctx, "ws_disabled")
 
 	headers := http.Header{}
@@ -72,7 +74,8 @@ func TestApplyProxyObservabilityHeadersUsesServerTimingEnvelope(t *testing.T) {
 	for _, want := range []string{
 		`cpa.trace;desc="` + validTraceparentForTest + `"`,
 		`cpa.path;desc="http.h2>sse.h1"`,
-		`cpa.slot;desc="6f2a9c0"`,
+		`cpa.slot;desc="6f2a9c0>p5"`,
+		`cpa.route;desc="team/gpt-5.5>gpt-5.5-nomoderation"`,
 		`cpa.fallback;desc="ws_disabled"`,
 	} {
 		if !strings.Contains(serverTiming, want) {

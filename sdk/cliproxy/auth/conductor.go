@@ -644,6 +644,15 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 	return models
 }
 
+func recordProxySelection(ctx context.Context, auth *Auth, routeModel string, upstreamModel string) {
+	if auth == nil {
+		return
+	}
+	logging.SetSlot(ctx, auth.EnsureIndex())
+	logging.SetSlotPriority(ctx, authPriority(auth))
+	logging.SetRoute(ctx, routeModel, upstreamModel)
+}
+
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -882,6 +891,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
+		recordProxySelection(ctx, auth, routeModel, execModel)
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
@@ -1464,6 +1474,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
@@ -1563,6 +1574,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)

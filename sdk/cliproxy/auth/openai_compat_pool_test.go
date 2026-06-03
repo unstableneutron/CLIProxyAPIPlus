@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -208,6 +209,66 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 		payload = append(payload, chunk.Payload...)
 	}
 	return string(payload)
+}
+
+func TestManagerExecuteRecordsProxyRouteAndPriority(t *testing.T) {
+	executor := &openAICompatPoolExecutor{id: "codex"}
+	cfg := &internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{{
+			APIKey:   "test-key",
+			BaseURL:  "https://facade.example/v1/",
+			Prefix:   "team",
+			Priority: 5,
+			Models: []internalconfig.CodexModel{{
+				Name:  "gpt-5.5-nomoderation",
+				Alias: "gpt-5.5",
+			}},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "codex-route-priority-auth",
+		Provider: "codex",
+		Prefix:   "team",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": "https://facade.example/v1/",
+			"priority": "5",
+		},
+	}
+	registered, err := m.Register(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(registered.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}})
+	t.Cleanup(func() { reg.UnregisterClient(registered.ID) })
+
+	ctx := logging.WithProxyStatusHolder(context.Background())
+	resp, err := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: "team/gpt-5.5"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := string(resp.Payload); got != "gpt-5.5-nomoderation" {
+		t.Fatalf("payload model = %q", got)
+	}
+
+	headers := http.Header{}
+	logging.ApplyProxyObservabilityHeaders(ctx, headers)
+	serverTiming := headers.Get("Server-Timing")
+	for _, want := range []string{
+		`cpa.slot;desc="` + logging.ShortSlotIdentifier(registered.Index) + `>p5"`,
+		`cpa.route;desc="team/gpt-5.5>gpt-5.5-nomoderation"`,
+	} {
+		if !strings.Contains(serverTiming, want) {
+			t.Fatalf("Server-Timing missing %q: %q", want, serverTiming)
+		}
+	}
 }
 
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
