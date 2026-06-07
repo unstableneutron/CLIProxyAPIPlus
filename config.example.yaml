@@ -41,6 +41,11 @@ api-keys:
   - 'your-api-key-2'
   - 'your-api-key-3'
 
+# Additional request header names accepted as client API keys.
+# Built-in sources already include Authorization, X-Goog-Api-Key, X-Api-Key, key, and auth_token.
+extra-api-key-auth-headers:
+  - 'X-Proxy-API-Key'
+
 # Enable debug logging
 debug: false
 

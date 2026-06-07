@@ -24,16 +24,17 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.ExtraAuthHeaders),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name             string
+	keys             map[string]struct{}
+	extraAuthHeaders []string
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, extraAuthHeaders []string) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +43,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, extraAuthHeaders: extraAuthHeaders}
 }
 
 func (p *provider) Identifier() string {
@@ -68,10 +69,6 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		queryKey = r.URL.Query().Get("key")
 		queryAuthToken = r.URL.Query().Get("auth_token")
 	}
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
-		return nil, sdkaccess.NewNoCredentialsError()
-	}
-
 	apiKey := extractBearerToken(authHeader)
 
 	candidates := []struct {
@@ -84,11 +81,30 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		{queryKey, "query-key"},
 		{queryAuthToken, "query-auth-token"},
 	}
+	for _, headerName := range p.extraAuthHeaders {
+		headerName = strings.TrimSpace(headerName)
+		if headerName == "" {
+			continue
+		}
+		headerValue := r.Header.Get(headerName)
+		if headerValue == "" {
+			continue
+		}
+		candidates = append(candidates, struct {
+			value  string
+			source string
+		}{
+			value:  headerValue,
+			source: "header:" + strings.ToLower(headerName),
+		})
+	}
 
+	hasCredential := false
 	for _, candidate := range candidates {
 		if candidate.value == "" {
 			continue
 		}
+		hasCredential = true
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
@@ -98,6 +114,10 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 				},
 			}, nil
 		}
+	}
+
+	if !hasCredential {
+		return nil, sdkaccess.NewNoCredentialsError()
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
