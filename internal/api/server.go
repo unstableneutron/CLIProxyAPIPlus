@@ -167,6 +167,14 @@ type Server struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+	// chatGPTBackendPassthroughBaseURL is the upstream base for gated ChatGPT
+	// backend passthrough. Empty means https://chatgpt.com.
+	chatGPTBackendPassthroughBaseURL string
+
+	// chatGPTBackendPassthroughClient optionally overrides the upstream HTTP
+	// client for tests. Production requests use the existing uTLS client path.
+	chatGPTBackendPassthroughClient *http.Client
+
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
@@ -574,6 +582,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+	s.engine.NoRoute(s.handleChatGPTBackendPassthroughNoRoute)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
