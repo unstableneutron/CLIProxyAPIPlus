@@ -77,6 +77,7 @@ type Capture struct {
 	RequestLine   string           `json:"request_line,omitempty"`
 	ConnectTarget string           `json:"connect_target,omitempty"`
 	Headers       []HeaderLine     `json:"headers,omitempty"`
+	TLSRecordHex  string           `json:"tls_record_hex,omitempty"`
 	HTTP          *HTTPFingerprint `json:"http,omitempty"`
 	TLS           *TLSFingerprint  `json:"tls,omitempty"`
 	Error         string           `json:"error,omitempty"`
@@ -115,6 +116,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runCompare(args[1:], stdout, stderr)
 	case "suggest":
 		return runSuggest(args[1:], stdout, stderr)
+	case "sweep":
+		return runSweep(args[1:], stdout, stderr)
+	case "generate-profile":
+		return runGenerateProfile(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -131,6 +136,8 @@ func printUsage(w io.Writer) {
   request-fingerprint-probe serve [--out DIR] [--listen ADDR]
   request-fingerprint-probe compare --left FILE --right FILE
   request-fingerprint-probe suggest --reference FILE --candidate FILE
+  request-fingerprint-probe sweep --reference FILE [--out DIR] [--host HOST] [--path PATH]
+  request-fingerprint-probe generate-profile --reference FILE --name NAME --out FILE
 
 The probe command captures local Go stdlib and CLIProxy uTLS ClientHello
 fingerprints through a temporary CONNECT proxy. Generated captures are redacted
@@ -166,6 +173,7 @@ func runProbe(args []string, stdout io.Writer, stderr io.Writer) int {
 	}{
 		{name: "go-stdlib", run: runStdlibHandshakeProbe},
 		{name: "cliproxy-utls", run: runCLIProxyUTLSHandshakeProbe},
+		{name: "cliproxy-utls-websocket", run: runCLIProxyUTLSWebsocketHandshakeProbe},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		errRun := probe.run(ctx, targetURL, "http://"+server.Addr())
@@ -395,6 +403,7 @@ func (s *captureServer) handleConn(conn net.Conn) {
 		} else if fp, errParse := parseClientHelloRecord(record); errParse != nil {
 			capture.Error = errParse.Error()
 		} else {
+			capture.TLSRecordHex = hex.EncodeToString(record)
 			capture.TLS = fp
 		}
 		s.emit(capture)
@@ -729,6 +738,32 @@ func runCLIProxyUTLSHandshakeProbe(ctx context.Context, targetURL string, proxyR
 	auth := &cliproxyauth.Auth{Provider: "codex"}
 	client := helps.NewUtlsHTTPClient(ctx, cfg, auth, 0)
 	return doProbeRequest(ctx, client, targetURL)
+}
+
+func runCLIProxyUTLSWebsocketHandshakeProbe(ctx context.Context, targetURL string, proxyRawURL string) error {
+	parsedTarget, err := url.Parse(targetURL)
+	if err != nil {
+		return err
+	}
+	if parsedTarget.Scheme != "https" {
+		return fmt.Errorf("websocket profile probe target must be https, got %q", parsedTarget.Scheme)
+	}
+	host := parsedTarget.Hostname()
+	port := parsedTarget.Port()
+	if port == "" {
+		port = "443"
+	}
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxyRawURL}}
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	dialTLS, ok := helps.NewUtlsWebsocketDialTLSContext(cfg, auth)
+	if !ok {
+		return fmt.Errorf("websocket uTLS dialer unavailable")
+	}
+	conn, err := dialTLS(ctx, "tcp", net.JoinHostPort(host, port))
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return err
 }
 
 func doProbeRequest(ctx context.Context, client *http.Client, targetURL string) error {

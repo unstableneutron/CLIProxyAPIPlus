@@ -146,6 +146,11 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # TLS fingerprint profile for Codex-auth HTTPS and WSS upstream requests.
+  # Supported values: auto (default), chrome-auto,
+  # codex-rustls-macos-arm64-0.137-https,
+  # codex-rustls-macos-arm64-0.137-ws, or file:/path/to/generated-profile.json.
+  tls-profile: auto
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

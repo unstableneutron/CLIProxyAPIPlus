@@ -791,6 +791,12 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		}).DialContext,
 	}
 
+	if netDialTLSContext, ok := helps.NewUtlsWebsocketDialTLSContext(cfg, auth); ok {
+		dialer.Proxy = nil
+		dialer.NetDialTLSContext = netDialTLSContext
+		return dialer
+	}
+
 	proxyURL := ""
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)

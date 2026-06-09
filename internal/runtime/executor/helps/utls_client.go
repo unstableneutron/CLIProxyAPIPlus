@@ -17,16 +17,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
-// to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
+// utlsRoundTripper implements http.RoundTripper using the selected uTLS profile.
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
+	profile     utlsProfile
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, profile utlsProfile) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -40,6 +40,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		connections: make(map[string]*http2.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
+		profile:     profile,
 	}
 }
 
@@ -85,8 +86,11 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, err
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	tlsConn, err := newProfiledUTLSConn(conn, host, t.profile)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
@@ -129,8 +133,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// utlsProtectedHosts contains the hosts that should use utls Chrome TLS fingerprint
-// to bypass Cloudflare's TLS fingerprinting.
+// utlsProtectedHosts contains the hosts that should use the selected uTLS profile.
 var utlsProtectedHosts = map[string]struct{}{
 	"api.anthropic.com": {},
 	"chatgpt.com":       {},
@@ -152,8 +155,8 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return f.fallback.RoundTrip(req)
 }
 
-// NewUtlsHTTPClient creates an HTTP client using utls Chrome TLS fingerprint.
-// Use this for provider requests that need a Chrome-like TLS fingerprint.
+// NewUtlsHTTPClient creates an HTTP client using uTLS for protected hosts.
+// Use this for provider requests that need a specific TLS fingerprint.
 // Falls back to standard transport for non-HTTPS requests.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
@@ -169,7 +172,13 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	profile, errProfile := selectUtlsProfile(cfg, auth, utlsTransportHTTPS)
+	if errProfile != nil {
+		log.WithError(errProfile).Warn("utls: falling back to Chrome profile")
+		profile = utlsProfile{Name: utlsProfileChromeAuto, HelloID: tls.HelloChrome_Auto}
+	}
+
+	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL, profile)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {

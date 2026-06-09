@@ -866,3 +866,51 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
 }
+
+func TestNewProxyAwareWebsocketDialerUsesCodexUTLSForDirectWSS(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{},
+		&cliproxyauth.Auth{Provider: "codex"},
+	)
+
+	if dialer.NetDialTLSContext == nil {
+		t.Fatal("expected codex websocket dialer to install uTLS NetDialTLSContext")
+	}
+	if dialer.Proxy != nil {
+		t.Fatal("expected codex websocket uTLS dialer to bypass gorilla proxy wrapping")
+	}
+}
+
+func TestNewProxyAwareWebsocketDialerUsesCodexUTLSWithConfiguredProxy(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:8080"}},
+		&cliproxyauth.Auth{Provider: "codex"},
+	)
+
+	if dialer.NetDialTLSContext == nil {
+		t.Fatal("expected codex websocket dialer to install uTLS NetDialTLSContext with configured proxy")
+	}
+	if dialer.Proxy != nil {
+		t.Fatal("expected codex websocket uTLS dialer to own proxy tunneling")
+	}
+}
+
+func TestNewProxyAwareWebsocketDialerLeavesNonCodexTLSStandard(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{},
+		&cliproxyauth.Auth{Provider: "openai"},
+	)
+
+	if dialer.NetDialTLSContext != nil {
+		t.Fatal("expected non-codex websocket dialer to keep standard TLS path")
+	}
+	if dialer.Proxy == nil {
+		t.Fatal("expected non-codex websocket dialer to keep environment proxy behavior")
+	}
+}

@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactHeaderLinesRedactsSensitiveValues(t *testing.T) {
@@ -172,6 +176,9 @@ func TestConnectCaptureParsesClientHello(t *testing.T) {
 	if capture.TLS == nil {
 		t.Fatal("TLS fingerprint was nil")
 	}
+	if capture.TLSRecordHex == "" {
+		t.Fatalf("TLS record hex was empty; capture=%+v", *capture)
+	}
 	if capture.TLS.ServerName != "example.com" {
 		t.Fatalf("server name = %q, want example.com", capture.TLS.ServerName)
 	}
@@ -186,6 +193,178 @@ func TestConnectCaptureParsesClientHello(t *testing.T) {
 	}
 	if !containsString(capture.TLS.ALPNProtocols, "h2") {
 		t.Fatalf("ALPN protocols = %v, want h2", capture.TLS.ALPNProtocols)
+	}
+}
+
+func TestProfileCandidatesIncludeCodexRelevantProfiles(t *testing.T) {
+	candidates := profileCandidates(false)
+
+	names := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		names[candidate.Name] = true
+	}
+	for _, want := range []string{
+		"hello-golang",
+		"hello-chrome-auto",
+		"hello-chrome-133",
+		"hello-firefox-auto",
+		"hello-safari-auto",
+		"hello-ios-auto",
+	} {
+		if !names[want] {
+			t.Fatalf("profile candidates missing %q: %#v", want, names)
+		}
+	}
+}
+
+func TestRankProfileCapturesRewardsTLSParity(t *testing.T) {
+	reference := Capture{
+		Name: "codex",
+		TLS: &TLSFingerprint{
+			JA3NHash:        "same",
+			ALPNProtocols:   []string{"h2", "http/1.1"},
+			CipherSuites:    []uint16{4866, 4865},
+			SupportedGroups: []uint16{29, 23},
+			Extensions:      []uint16{0, 10, 11},
+		},
+	}
+	captures := []Capture{
+		{
+			Name: "far",
+			TLS: &TLSFingerprint{
+				JA3NHash:        "different",
+				ALPNProtocols:   []string{"http/1.1"},
+				CipherSuites:    []uint16{49195},
+				SupportedGroups: []uint16{23},
+				Extensions:      []uint16{0, 13},
+			},
+		},
+		{
+			Name: "near",
+			TLS: &TLSFingerprint{
+				JA3NHash:        "same",
+				ALPNProtocols:   []string{"h2", "http/1.1"},
+				CipherSuites:    []uint16{4866, 4865},
+				SupportedGroups: []uint16{29, 23},
+				Extensions:      []uint16{0, 10, 11},
+			},
+		},
+	}
+
+	ranked := rankProfileCaptures(reference, captures)
+
+	if len(ranked) != 2 {
+		t.Fatalf("ranked count = %d, want 2", len(ranked))
+	}
+	if ranked[0].Name != "near" || ranked[0].Score <= ranked[1].Score {
+		t.Fatalf("ranked = %#v, want near first with better score", ranked)
+	}
+	if !ranked[0].JA3NMatch || !ranked[0].ALPNMatch || !ranked[0].CipherSuitesMatch || !ranked[0].SupportedGroupsMatch {
+		t.Fatalf("near profile match flags = %#v", ranked[0])
+	}
+}
+
+func TestGenerateCustomProfileFromRawClientHello(t *testing.T) {
+	server, err := newCaptureServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("new capture server: %v", err)
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errRun := runNamedUTLSHandshakeProbe(ctx, "https://example.com/v1/models", "http://"+server.Addr(), profileCandidateByName("hello-golang"))
+	capture := server.WaitForCapture(ctx)
+	if capture == nil {
+		t.Fatal("capture was nil")
+	}
+	if capture.TLSRecordHex == "" {
+		t.Fatalf("TLS record hex was empty; capture=%+v errRun=%v", *capture, errRun)
+	}
+	if errRun == nil {
+		t.Fatal("probe unexpectedly succeeded; capture server should close after ClientHello")
+	}
+
+	profile, err := generateCustomProfile(capture, "codex-test")
+	if err != nil {
+		t.Fatalf("generate custom profile: %v", err)
+	}
+	if profile.Name != "codex-test" {
+		t.Fatalf("profile name = %q, want codex-test", profile.Name)
+	}
+	if profile.SourceJA3NHash != capture.TLS.JA3NHash {
+		t.Fatalf("profile source ja3n = %q, want %q", profile.SourceJA3NHash, capture.TLS.JA3NHash)
+	}
+	if len(profile.SpecJSON) == 0 {
+		t.Fatal("profile spec JSON was empty")
+	}
+}
+
+func TestRunGenerateProfileWritesArtifact(t *testing.T) {
+	capture := captureUTLSProfileForTest(t, "hello-golang")
+	tmp := t.TempDir()
+	referencePath := filepath.Join(tmp, "reference.json")
+	outPath := filepath.Join(tmp, "profile.json")
+	if err := writeJSONFile(referencePath, capture); err != nil {
+		t.Fatalf("write reference: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"generate-profile", "--reference", referencePath, "--name", "codex-test", "--out", outPath}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	if !strings.Contains(string(data), "codex-test") || !strings.Contains(string(data), "utls-fingerprinter-raw-client-hello") {
+		t.Fatalf("profile artifact missing expected content:\n%s", string(data))
+	}
+}
+
+func TestRunSweepWritesRankedProfiles(t *testing.T) {
+	reference := captureUTLSProfileForTest(t, "hello-golang")
+	tmp := t.TempDir()
+	referencePath := filepath.Join(tmp, "reference.json")
+	if err := writeJSONFile(referencePath, reference); err != nil {
+		t.Fatalf("write reference: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"sweep", "--reference", referencePath, "--out", tmp, "--host", "example.com", "--path", "/v1/models", "--profiles", "hello-chrome-auto,hello-golang"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, "profile-ranks.json"))
+	if err != nil {
+		t.Fatalf("read ranks: %v", err)
+	}
+	if !strings.Contains(string(data), `"name": "hello-golang"`) {
+		t.Fatalf("ranks missing hello-golang:\n%s", string(data))
+	}
+}
+
+func TestRunProbeWritesWebsocketProfileCapture(t *testing.T) {
+	tmp := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{"probe", "--out", tmp, "--host", "chatgpt.com", "--path", "/backend-api/codex/responses"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run code = %d, stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, "summary.json"))
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if !strings.Contains(string(data), `"name": "cliproxy-utls-websocket"`) {
+		t.Fatalf("summary missing websocket capture:\n%s", string(data))
 	}
 }
 
@@ -214,6 +393,28 @@ func TestCompareCapturesReportsTLSDrift(t *testing.T) {
 	if !strings.Contains(joined, "tls.alpn_protocols") {
 		t.Fatalf("diffs missing tls.alpn_protocols: %v", diffs)
 	}
+}
+
+func captureUTLSProfileForTest(t *testing.T, profileName string) Capture {
+	t.Helper()
+	server, err := newCaptureServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("new capture server: %v", err)
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = runNamedUTLSHandshakeProbe(ctx, "https://example.com/v1/models", "http://"+server.Addr(), profileCandidateByName(profileName))
+	capture := server.WaitForCapture(ctx)
+	if capture == nil {
+		t.Fatal("capture was nil")
+	}
+	capture.Name = profileName
+	if capture.TLS == nil || capture.TLSRecordHex == "" {
+		t.Fatalf("incomplete profile capture: %+v", capture)
+	}
+	return *capture
 }
 
 func TestSuggestCapturesReportsActionableKnobs(t *testing.T) {

@@ -222,7 +222,8 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse bool   `yaml:"identity-confuse" json:"identity-confuse"`
+	TLSProfile      string `yaml:"tls-profile" json:"tls-profile"`
 }
 
 // TLSConfig holds HTTPS server settings.
