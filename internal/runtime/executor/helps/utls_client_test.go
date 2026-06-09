@@ -55,7 +55,9 @@ func TestSelectUtlsProfileDefaultsCodexByTransport(t *testing.T) {
 func TestSelectUtlsProfileHonorsExplicitChromeAuto(t *testing.T) {
 	t.Parallel()
 
-	cfg := &config.Config{Codex: config.CodexConfig{TLSProfile: "chrome-auto"}}
+	cfg := &config.Config{Codex: config.CodexConfig{
+		TLSProfile: config.CodexTLSProfileConfig{HTTPS: "chrome-auto"},
+	}}
 	auth := &cliproxyauth.Auth{Provider: "codex"}
 
 	profile, err := selectUtlsProfile(cfg, auth, utlsTransportHTTPS)
@@ -67,6 +69,62 @@ func TestSelectUtlsProfileHonorsExplicitChromeAuto(t *testing.T) {
 	}
 	if profile.RawClientHelloHex != "" {
 		t.Fatalf("chrome profile raw ClientHello hex = %q, want empty", profile.RawClientHelloHex)
+	}
+}
+
+func TestSelectUtlsProfileHonorsTransportSpecificOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Codex: config.CodexConfig{
+		TLSProfile: config.CodexTLSProfileConfig{
+			HTTPS:     "codex-rustls-macos-arm64-0.137-https",
+			Websocket: "codex-rustls-macos-arm64-0.137-ws",
+		},
+	}}
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+
+	httpsProfile, err := selectUtlsProfile(cfg, auth, utlsTransportHTTPS)
+	if err != nil {
+		t.Fatalf("select HTTPS profile: %v", err)
+	}
+	if httpsProfile.Name != "codex-rustls-macos-arm64-0.137-https" {
+		t.Fatalf("HTTPS profile = %q", httpsProfile.Name)
+	}
+
+	wsProfile, err := selectUtlsProfile(cfg, auth, utlsTransportWebsocket)
+	if err != nil {
+		t.Fatalf("select websocket profile: %v", err)
+	}
+	if wsProfile.Name != "codex-rustls-macos-arm64-0.137-ws" {
+		t.Fatalf("websocket profile = %q", wsProfile.Name)
+	}
+}
+
+func TestSelectUtlsProfileUsesTransportDefaultWhenNestedValueEmpty(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Codex: config.CodexConfig{
+		TLSProfile: config.CodexTLSProfileConfig{
+			HTTPS:     "chrome-auto",
+			Websocket: "auto",
+		},
+	}}
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+
+	httpsProfile, err := selectUtlsProfile(cfg, auth, utlsTransportHTTPS)
+	if err != nil {
+		t.Fatalf("select HTTPS profile: %v", err)
+	}
+	if httpsProfile.Name != "chrome-auto" {
+		t.Fatalf("HTTPS profile = %q, want chrome-auto", httpsProfile.Name)
+	}
+
+	wsProfile, err := selectUtlsProfile(cfg, auth, utlsTransportWebsocket)
+	if err != nil {
+		t.Fatalf("select websocket profile: %v", err)
+	}
+	if wsProfile.Name != "codex-rustls-macos-arm64-0.137-ws" {
+		t.Fatalf("websocket profile = %q, want websocket auto default", wsProfile.Name)
 	}
 }
 
@@ -101,7 +159,9 @@ func TestSelectUtlsProfileLoadsGeneratedProfileFile(t *testing.T) {
 		t.Fatalf("write profile file: %v", err)
 	}
 
-	cfg := &config.Config{Codex: config.CodexConfig{TLSProfile: "file:" + profilePath}}
+	cfg := &config.Config{Codex: config.CodexConfig{
+		TLSProfile: config.CodexTLSProfileConfig{Websocket: "file:" + profilePath},
+	}}
 	profile, err := selectUtlsProfile(cfg, &cliproxyauth.Auth{Provider: "codex"}, utlsTransportWebsocket)
 	if err != nil {
 		t.Fatalf("select profile: %v", err)

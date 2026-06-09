@@ -160,7 +160,7 @@ func serverNameFromAddr(addr string) string {
 func selectUtlsProfile(cfg *config.Config, auth *cliproxyauth.Auth, transport utlsTransport) (utlsProfile, error) {
 	name := ""
 	if cfg != nil {
-		name = strings.TrimSpace(cfg.Codex.TLSProfile)
+		name = codexTransportTLSProfileName(cfg, transport)
 	}
 	if name == "" || strings.EqualFold(name, "auto") {
 		if codexAuthProfileEligible(auth) {
@@ -175,6 +175,18 @@ func selectUtlsProfile(cfg *config.Config, auth *cliproxyauth.Auth, transport ut
 		}
 	}
 	return utlsProfileByName(name)
+}
+
+func codexTransportTLSProfileName(cfg *config.Config, transport utlsTransport) string {
+	if cfg == nil {
+		return ""
+	}
+	switch transport {
+	case utlsTransportWebsocket:
+		return strings.TrimSpace(cfg.Codex.TLSProfile.Websocket)
+	default:
+		return strings.TrimSpace(cfg.Codex.TLSProfile.HTTPS)
+	}
 }
 
 func codexAuthProfileEligible(auth *cliproxyauth.Auth) bool {

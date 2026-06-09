@@ -1,0 +1,4 @@
+interface:
+  display_name: "CLIProxy Codex Fingerprint"
+  short_description: "Codex fingerprint capture for CLIProxy."
+  default_prompt: "Use this skill to capture Codex TLS/header fingerprints, update CLIProxyAPIPlus uTLS profiles, and run local smoke validation."

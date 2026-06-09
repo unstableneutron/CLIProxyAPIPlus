@@ -150,7 +150,9 @@ codex:
   # Supported values: auto (default), chrome-auto,
   # codex-rustls-macos-arm64-0.137-https,
   # codex-rustls-macos-arm64-0.137-ws, or file:/path/to/generated-profile.json.
-  tls-profile: auto
+  tls-profile:
+    https: auto
+    websocket: auto
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
