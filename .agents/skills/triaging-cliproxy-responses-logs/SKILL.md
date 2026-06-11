@@ -14,7 +14,7 @@ Treat `/v1/responses` triage as request-id forensics. Map usage rows, access log
 Use the helper first when possible:
 
 ```bash
-uv run --script .pi/skills/triaging-cliproxy-responses-logs/triage_responses_log.py \
+uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses_log.py \
   final --ssh-host vn3 --root ~/CLIProxyAPI \
   --model gpt-5.5-nomoderation --around '2026-06-07 17:47:25' --timezone Asia/Bangkok
 ```
@@ -22,7 +22,7 @@ uv run --script .pi/skills/triaging-cliproxy-responses-logs/triage_responses_log
 For repeated bursts:
 
 ```bash
-uv run --script .pi/skills/triaging-cliproxy-responses-logs/triage_responses_log.py \
+uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses_log.py \
   burst --ssh-host vn3 --root ~/CLIProxyAPI \
   --account-prefix 87 --around '2026-06-07 17:48:23' --timezone Asia/Bangkok
 ```
@@ -63,5 +63,5 @@ uv run --script .pi/skills/triaging-cliproxy-responses-logs/triage_responses_log
 Run the embedded tests after editing the helper:
 
 ```bash
-uv run --script .pi/skills/triaging-cliproxy-responses-logs/triage_responses_log.py --self-test
+uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses_log.py --self-test
 ```

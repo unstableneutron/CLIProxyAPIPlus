@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "proxyman-download-setup": {
+      "source": "ProxymanApp/proxyman-SKILL.md",
+      "sourceType": "github",
+      "skillPath": "skills/proxyman-download-setup/SKILL.md",
+      "computedHash": "0f092ac0048e0f5160951028732322e7e83653508d6c5916903890a8068f8d42"
+    },
+    "proxyman-mcp-setup": {
+      "source": "ProxymanApp/proxyman-SKILL.md",
+      "sourceType": "github",
+      "skillPath": "skills/proxyman-mcp-setup/SKILL.md",
+      "computedHash": "52f4b6bd4d5a5fd9557b410e09118da0b9cff041278de38a99b1567ed84b4124"
+    },
+    "proxyman-traffic-debugging": {
+      "source": "ProxymanApp/proxyman-SKILL.md",
+      "sourceType": "github",
+      "skillPath": "skills/proxyman-traffic-debugging/SKILL.md",
+      "computedHash": "d3705399be01a9f76e5d92fb4f8aba85d7b62aca82930889e4fbfb238727e7ba"
+    }
+  }
+}

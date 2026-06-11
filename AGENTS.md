@@ -22,6 +22,11 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Auth material defaults under `auths/`
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
 
+## Agent Skills
+- Keep project-local skills under `.agents/skills/` so Codex, Claude, Pi, and other agents can share them.
+- Do not add new project skills under agent-specific directories like `.pi/skills/` or `.codex/skills/`; move or copy them into `.agents/skills/` instead.
+- When moving a skill, update helper commands and internal references so they point at `.agents/skills/<skill-name>/...`.
+
 ## Architecture
 - `cmd/server/` — Server entrypoint
 - `internal/api/` — Gin HTTP API (routes, middleware, modules)
