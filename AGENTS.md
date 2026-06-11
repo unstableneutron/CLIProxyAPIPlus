@@ -56,3 +56,13 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Use logrus structured logging; avoid leaking secrets/tokens in logs
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+
+## Fork Sync Conflict Policy
+- Naming: `original` is `router-for-me/CLIProxyAPI`, `plus` is `kaitranntt/CLIProxyAPIPlus`, and `fork` is this repository.
+- The upstream sync order is `fork/main -> original latest release -> plus latest release -> safe plus head delta`.
+- Do not resolve upstream-sync conflicts with blanket `ours` or `theirs` once a conflict is reported.
+- For `original-owned` paths, preserve the newer original base behavior and reapply only necessary plus/fork compatibility.
+- For `plus-owned` paths, preserve compatible plus behavior while updating APIs to match the newer original base.
+- For `fork-owned` paths, preserve this fork's explicit changes unless deliberately adopting an upstream replacement.
+- For shared hotspots, manually compose the result; no side wins by default.
+- Untagged plus head commits may auto-land only when they touch plus-owned paths. Shared-path plus head changes require a PR or the `upstream-sync-blocked` tracking issue.

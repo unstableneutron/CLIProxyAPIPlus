@@ -1,11 +1,6 @@
-# Plus-only provider dirs — never merge from upstream (original CLIProxyAPI has no equivalent)
-internal/auth/codebuddy/** merge=ours
-internal/auth/copilot/** merge=ours
-internal/auth/cursor/** merge=ours
-internal/auth/gitlab/** merge=ours
-internal/auth/iflow/** merge=ours
-internal/auth/kilo/** merge=ours
-internal/auth/kiro/** merge=ours
+# Source-specific merge policy lives in .github/scripts/upstream-sync.sh.
+# Plus-owned provider dirs are protected only while merging original-upstream;
+# they must remain mergeable from plus-upstream for Plus hotfixes and releases.
 
 # Plus-specific registration and deps — resolve as PR, not auto
 cmd/server/main.go merge=union
