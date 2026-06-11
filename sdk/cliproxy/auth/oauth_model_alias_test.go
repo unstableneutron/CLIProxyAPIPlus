@@ -44,15 +44,6 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 			want:    "gemini-2.5-pro-exp-03-25",
 		},
 		{
-			name: "kiro alias resolves",
-			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"kiro": {{Name: "kiro-claude-sonnet-4-5", Alias: "sonnet"}},
-			},
-			channel: "kiro",
-			input:   "sonnet",
-			want:    "kiro-claude-sonnet-4-5",
-		},
-		{
 			name: "config suffix takes priority",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
 				"claude": {{Name: "claude-sonnet-4-5-20250514(low)", Alias: "claude-sonnet-4-5"}},
@@ -78,24 +69,6 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 			channel: "gemini-cli",
 			input:   "gemini-2.5-pro(none)",
 			want:    "gemini-2.5-pro-exp-03-25(none)",
-		},
-		{
-			name: "github-copilot suffix preserved",
-			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"github-copilot": {{Name: "claude-opus-4.6", Alias: "opus"}},
-			},
-			channel: "github-copilot",
-			input:   "opus(medium)",
-			want:    "claude-opus-4.6(medium)",
-		},
-		{
-			name: "github-copilot no suffix",
-			aliases: map[string][]internalconfig.OAuthModelAlias{
-				"github-copilot": {{Name: "claude-opus-4.6", Alias: "opus"}},
-			},
-			channel: "github-copilot",
-			input:   "opus",
-			want:    "claude-opus-4.6",
 		},
 		{
 			name: "kimi suffix preserved",
@@ -186,10 +159,6 @@ func createAuthForChannel(channel string) *Auth {
 		return &Auth{Provider: "antigravity"}
 	case "kimi":
 		return &Auth{Provider: "kimi"}
-	case "kiro":
-		return &Auth{Provider: "kiro"}
-	case "github-copilot":
-		return &Auth{Provider: "github-copilot"}
 	default:
 		return &Auth{Provider: channel}
 	}
@@ -203,19 +172,14 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 	}
 }
 
-func TestOAuthModelAliasChannel_GitHubCopilot(t *testing.T) {
+func TestOAuthModelAliasChannel_PluginProvider(t *testing.T) {
 	t.Parallel()
 
-	if got := OAuthModelAliasChannel("github-copilot", ""); got != "github-copilot" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "github-copilot")
+	if got := OAuthModelAliasChannel(" Qoder ", "oauth"); got != "qoder" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "qoder")
 	}
-}
-
-func TestOAuthModelAliasChannel_Kiro(t *testing.T) {
-	t.Parallel()
-
-	if got := OAuthModelAliasChannel("kiro", ""); got != "kiro" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "kiro")
+	if got := OAuthModelAliasChannel("qoder", "api_key"); got != "" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want empty channel for API key", got)
 	}
 }
 
@@ -235,5 +199,43 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 	resolvedModel := mgr.applyOAuthModelAlias(auth, "gemini-2.5-pro(8192)")
 	if resolvedModel != "gemini-2.5-pro-exp-03-25(8192)" {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
+	}
+}
+
+func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"qoder": {{Name: "qmodel_latest", Alias: "qlatest"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "qoder-auth", Provider: "qoder", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "qlatest")
+	if resolvedModel != "qmodel_latest" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "qmodel_latest")
+	}
+}
+
+func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"qoder": {{Name: "qmodel_latest", Alias: "qlatest"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "qoder-auth", Provider: "qoder", Attributes: map[string]string{"auth_kind": "api_key"}}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "qlatest")
+	if resolvedModel != "qlatest" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "qlatest")
 	}
 }

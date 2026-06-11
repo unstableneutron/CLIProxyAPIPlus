@@ -1,6 +1,6 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ''
+host: ""
 
 # Server port
 port: 8317
@@ -8,8 +8,8 @@ port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ''
-  key: ''
+  cert: ""
+  key: ""
 
 # Management API settings
 remote-management:
@@ -20,7 +20,7 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ''
+  secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
@@ -30,21 +30,16 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: 'https://github.com/kaitranntt/Cli-Proxy-API-Management-Center'
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: '~/.cli-proxy-api'
+auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - 'your-api-key-1'
-  - 'your-api-key-2'
-  - 'your-api-key-3'
-
-# Additional request header names accepted as client API keys.
-# Built-in sources already include Authorization, X-Goog-Api-Key, X-Api-Key, key, and auth_token.
-extra-api-key-auth-headers:
-  - 'X-Proxy-API-Key'
+  - "your-api-key-1"
+  - "your-api-key-2"
+  - "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -52,15 +47,31 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: '127.0.0.1:8316'
+  addr: "127.0.0.1:8316"
+
+# Standard dynamic library plugins are trusted in-process code. They are disabled by default.
+# Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
+# Other languages can implement the same C ABI and JSON method protocol.
+# Plugin executors require a matching auth record with the same provider key.
+# If the same provider is configured as OpenAI-compatible, the native executor wins.
+# Plugin command-line flags and Management API routes are optional capabilities.
+# Existing native flags/routes and higher-priority plugin flags/routes cannot be replaced.
+# 插件列表 Management API 会读取插件 Metadata 中的 Logo 和 ConfigFields，用于管理端展示。
+# 单插件 enabled 只控制 plugins.configs.<pluginID>.enabled，不会隐式修改全局 plugins.enabled。
+plugins:
+  enabled: false
+  dir: "plugins"
+  configs:
+    example:
+      enabled: true
+      priority: 1
+      config1: true
+      config2: "string"
+      config3: 3
+      mode: "safe" # enum example: safe, fast
 
 # When true, disable high-overhead request logging and HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
-
-# Open OAuth URLs in incognito/private browser mode.
-# Useful when you want to login with a different account without logging out from your current session.
-# Default: false (but Kiro auth defaults to true for multi-account support)
-incognito-browser: true
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -86,9 +97,6 @@ redis-usage-queue-retention-seconds: 60
 proxy-url: ""
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
-# Clients that hardcode model names can target a prefixed credential per request with:
-#   X-Force-Model-Prefix: test
-# Values may include a trailing slash ("test/") and are normalized to one prefix segment.
 force-model-prefix: false
 
 # When true, forward filtered upstream response headers to downstream clients.
@@ -146,13 +154,6 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # TLS fingerprint profile for Codex-auth HTTPS and WSS upstream requests.
-  # Supported values: auto (default), chrome-auto,
-  # codex-rustls-macos-arm64-0.137-https,
-  # codex-rustls-macos-arm64-0.137-ws, or file:/path/to/generated-profile.json.
-  tls-profile:
-    https: auto
-    websocket: auto
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
@@ -165,9 +166,8 @@ enable-gemini-cli-endpoint: false
 nonstream-keepalive-interval: 0
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
-#   keepalive-seconds: 15         # Default: 0 (disabled after upstream starts). <= 0 disables keep-alives.
-#   bootstrap-retries: 1          # Default: 0 (disabled). Retries before first byte is sent.
-#   bootstrap-timeout-seconds: 30  # Default: 30. Set -1 to disable pre-first-byte timeout.
+#   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
+#   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.
@@ -182,7 +182,6 @@ nonstream-keepalive-interval: 0
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
-#     label: "gemini-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://generativelanguage.googleapis.com"
@@ -203,7 +202,6 @@ nonstream-keepalive-interval: 0
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
-#     label: "codex-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
@@ -220,31 +218,10 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
-# Command Code API keys
-# commandcode-api-key:
-#   - api-key: "user_..." # Command Code API key from commandcode.ai
-#     label: "commandcode-team-a" # optional: display name in management views
-#     prefix: "test" # optional: require calls like "test/deepseek/deepseek-v4-flash" to target this credential
-#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
-#     base-url: "https://api.commandcode.ai" # optional: override Command Code API endpoint
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#     # proxy-url: "direct" # optional: explicit direct connect for this credential
-#     models:
-#       - name: "deepseek/deepseek-v4-flash" # upstream model name
-#         alias: "cc-deepseek-flash"         # client alias mapped to the upstream model
-#     excluded-models:
-#       - "gpt-5.5"       # exclude specific models (exact match)
-#       - "claude-*"      # wildcard matching prefix
-#       - "*-mini"        # wildcard matching suffix
-#       - "*deepseek*"    # wildcard matching substring
-
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
-#     label: "claude-team-a" # optional: display name in management views
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -296,70 +273,6 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
-# Kiro (AWS CodeWhisperer) configuration
-# Note: Kiro API currently only operates in us-east-1 region
-#kiro:
-#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
-#    agent-task-type: "" # optional: "vibe" or empty (API default)
-#    start-url: "https://your-company.awsapps.com/start" # optional: IDC start URL (preset for login)
-#    region: "us-east-1" # optional: OIDC region for IDC login and token refresh
-#  - access-token: "aoaAAAAA..." # or provide tokens directly
-#    refresh-token: "aorAAAAA..."
-#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
-#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
-
-# Kiro rate limiter configuration
-# Controls request throttling and backoff behavior for Kiro tokens.
-# All fields are optional; omitted fields fall back to defaults shown below.
-#kiro-rate-limit:
-#  enabled: true                # set to true to enable rate limiting (default: false)
-#  min-token-interval: "1s"     # minimum interval between requests per token (default: 1s)
-#  max-token-interval: "2s"     # maximum interval between requests per token (default: 2s)
-#  daily-max-requests: 500      # maximum requests per token per day (default: 500)
-#  jitter-percent: 0.3          # random jitter ratio applied to intervals (default: 0.3)
-#  backoff-base: "30s"          # base duration for exponential backoff on failure (default: 30s)
-#  backoff-max: "5m"            # maximum backoff duration cap (default: 5m)
-#  backoff-multiplier: 1.5      # exponential backoff multiplier (default: 1.5)
-#  suspend-cooldown: "1h"       # cooldown after suspension keywords detected (default: 1h)
-
-# Controls whether system prompts are wrapped with --- SYSTEM PROMPT --- markers
-# and injected into Kiro user messages. Kiro/Amazon Q API has no native system
-# field, so when enabled the proxy prepends the wrapped system prompt to the
-# user message. By default the proxy drops system prompts entirely.
-# Default: false.
-#kiro-system-prompt-inject-enable: true
-
-# Controls whether the heuristic truncation detector is applied to Kiro tool
-# use responses. When enabled, tool calls that appear truncated (invalid JSON,
-# missing required fields, suspiciously short content for write tools) are
-# silently skipped. The detector uses heuristic matching that can produce false
-# positives (e.g. code fence counting), so it is off by default.
-# Default: false.
-#kiro-truncation-detector-enable: true
-
-# Controls whether inline <thinking>...</thinking> tags in Kiro
-# assistantResponseEvent content are parsed into Claude thinking content
-# blocks. Kiro's official reasoning channel is reasoningContentEvent; the
-# tag-based path is unofficial and can false-positive when content literally
-# contains the tag string (code samples, discussion, XML fixtures), silently
-# truncating responses. Default: false.
-#kiro-extract-thinking-tag-enable: true
-
-# Kilocode (OAuth-based code assistant)
-# Note: Kilocode uses OAuth device flow authentication.
-# Use the CLI command: ./server --kilo-login
-# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
-# oauth-model-alias:
-#   kilo:
-#     - name: "minimax/minimax-m2.5:free"
-#       alias: "minimax-m2.5"
-#     - name: "z-ai/glm-5:free"
-#       alias: "glm-5"
-# oauth-excluded-models:
-#   kilo:
-#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
-#     - "*:free"                # wildcard matching suffix (e.g. all free models)
-
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
@@ -371,7 +284,6 @@ nonstream-keepalive-interval: 0
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
-#         label: "openrouter-key-a" # optional: display name in management views
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
@@ -396,7 +308,6 @@ nonstream-keepalive-interval: 0
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
-#     label: "vertex-team-a"                      # optional: display name in management views
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
@@ -448,29 +359,14 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai, cursor, qoder.
-# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, commandcode-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
 # you select the protocol surface, but inference backend selection can still follow the resolved
 # model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
-#  antigravity:
-#    - name: "rev19-uic3-1p"
-#      alias: "gemini-2.5-computer-use-preview-10-2025"
-#    - name: "gemini-3-pro-image"
-#      alias: "gemini-3-pro-image-preview"
-#    - name: "gemini-3-pro-high"
-#      alias: "gemini-3-pro-preview"
-#    - name: "gemini-3-flash"
-#      alias: "gemini-3-flash-preview"
-#    - name: "claude-sonnet-4-5"
-#      alias: "gemini-claude-sonnet-4-5"
-#    - name: "claude-sonnet-4-5-thinking"
-#      alias: "gemini-claude-sonnet-4-5-thinking"
-#    - name: "claude-opus-4-5-thinking"
-#      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
@@ -481,6 +377,9 @@ nonstream-keepalive-interval: 0
 #   aistudio:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
+#   antigravity:
+#     - name: "gemini-3-pro-high"
+#       alias: "gemini-3-pro-preview"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -493,12 +392,11 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
-#   qoder:
-#     - name: "auto"
-#       alias: "qoder-auto"
+#   qoder:                            # plugin provider keys are supported for OAuth plugins
+#     - name: "qmodel_latest"
+#       alias: "qlatest"
 
 # OAuth provider excluded models
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, qoder.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)
@@ -519,8 +417,6 @@ nonstream-keepalive-interval: 0
 #     - "kimi-k2-thinking"
 #   xai:
 #     - "grok-3-mini"
-#   qoder:
-#     - "auto"
 
 # Optional payload configuration
 # payload:

@@ -30,7 +30,7 @@ var (
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
-var logFieldOrder = []string{"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "trace_id", "span_id", "proxy_websocket_session_id", "traceparent", "error"}
+var logFieldOrder = []string{"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error"}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
@@ -85,7 +85,6 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 func SetupBaseLogger() {
 	setupOnce.Do(func() {
 		log.SetOutput(os.Stdout)
-		log.SetLevel(log.InfoLevel)
 		log.SetReportCaller(true)
 		log.SetFormatter(&LogFormatter{})
 

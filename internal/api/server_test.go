@@ -13,6 +13,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -21,6 +22,11 @@ import (
 )
 
 func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerWithOptions(t)
+}
+
+func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -46,7 +52,7 @@ func newTestServer(t *testing.T) *Server {
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath)
+	return NewServer(cfg, authManager, accessManager, configPath, opts...)
 }
 
 func TestHealthz(t *testing.T) {
@@ -86,7 +92,31 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
-func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *testing.T) {
+func TestNewServerWithPluginHostInjectsHandlerInterceptors(t *testing.T) {
+	host := pluginhost.New()
+	server := newTestServerWithOptions(t, WithPluginHost(host))
+
+	if server.handlers == nil {
+		t.Fatal("server handlers = nil")
+	}
+	got, ok := server.handlers.PluginHost.(*pluginhost.Host)
+	if !ok || got != host {
+		t.Fatalf("handler plugin host = %#v, want configured host", server.handlers.PluginHost)
+	}
+}
+
+func TestNewServerWithoutPluginHostLeavesHandlerInterceptorsDisabled(t *testing.T) {
+	server := newTestServer(t)
+
+	if server.handlers == nil {
+		t.Fatal("server handlers = nil")
+	}
+	if server.handlers.PluginHost != nil {
+		t.Fatalf("handler plugin host = %#v, want nil", server.handlers.PluginHost)
+	}
+}
+
+func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	prevQueueEnabled := redisqueue.Enabled()
@@ -112,21 +142,8 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
 	legacyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusOK {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
-	}
-
-	var usagePayload struct {
-		Usage struct {
-			TotalRequests int64 `json:"total_requests"`
-		} `json:"usage"`
-		FailedRequests int64 `json:"failed_requests"`
-	}
-	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &usagePayload); errUnmarshal != nil {
-		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
-	}
-	if usagePayload.Usage.TotalRequests != 0 || usagePayload.FailedRequests != 0 {
-		t.Fatalf("legacy usage payload = %+v, want zeroed statistics", usagePayload)
+	if legacyRR.Code != http.StatusNotFound {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -161,35 +178,29 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 	}
 }
 
-func TestCorsMiddlewareSkipsManagementRoutes(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	router.Use(corsMiddleware())
-	router.OPTIONS("/v0/management/config", func(c *gin.Context) {
-		c.Status(http.StatusUnauthorized)
-	})
-	router.OPTIONS("/v1/models", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
+func TestManagementPluginsRouteRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
-	managementReq := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
-	managementRR := httptest.NewRecorder()
-	router.ServeHTTP(managementRR, managementReq)
-	if managementRR.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatalf("management CORS origin = %q, want empty", managementRR.Header().Get("Access-Control-Allow-Origin"))
-	}
-	if managementRR.Code != http.StatusUnauthorized {
-		t.Fatalf("management status = %d, want %d", managementRR.Code, http.StatusUnauthorized)
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 
-	apiReq := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
-	apiRR := httptest.NewRecorder()
-	router.ServeHTTP(apiRR, apiReq)
-	if apiRR.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Fatalf("api CORS origin = %q, want *", apiRR.Header().Get("Access-Control-Allow-Origin"))
+	var payload struct {
+		PluginsEnabled bool  `json:"plugins_enabled"`
+		Plugins        []any `json:"plugins"`
 	}
-	if apiRR.Code != http.StatusNoContent {
-		t.Fatalf("api status = %d, want %d", apiRR.Code, http.StatusNoContent)
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, rr.Body.String())
+	}
+	if payload.Plugins == nil {
+		t.Fatalf("plugins field = nil, want array; body=%s", rr.Body.String())
 	}
 }
 
