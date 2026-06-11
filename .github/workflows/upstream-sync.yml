@@ -15,8 +15,9 @@ name: Upstream Sync
 #   1. Clean merge + build + test pass -> fast-forward main, create fork tag,
 #      and dispatch release/docker workflows.
 #   2. Conflicts, unsafe Plus head deltas, or gate failures -> push a sync
-#      branch and open/update a SINGLE tracking issue.
-#   3. workflow_dispatch with force_pr=true -> open a PR for manual review.
+#      branch and open/update a SINGLE tracking issue or manual sync PR.
+#   3. workflow_dispatch by unstableneutron with force_pr=true -> open a PR
+#      for manual review.
 
 on:
   schedule:
@@ -53,6 +54,9 @@ env:
 
 jobs:
   sync:
+    if: |
+      github.repository == 'unstableneutron/CLIProxyAPIPlus' &&
+      (github.event_name == 'schedule' || github.actor == 'unstableneutron')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork
@@ -67,7 +71,19 @@ jobs:
           git config user.email "ccs-upstream-sync@users.noreply.github.com"
           git config merge.ours.driver true
 
+      - name: Authorize PR creation
+        id: auth
+        run: |
+          if [ "${GITHUB_REPOSITORY}" = "unstableneutron/CLIProxyAPIPlus" ] &&
+             [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] &&
+             [ "${GITHUB_ACTOR}" = "unstableneutron" ]; then
+            echo "can_create_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_create_pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Supersede prior sync PRs and stale branches
+        if: steps.auth.outputs.can_create_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -296,7 +312,9 @@ jobs:
       - name: Open PR (force_pr only — manual escape hatch)
         if: |
           steps.plan.outputs.has_changes == 'true' &&
-          github.event.inputs.force_pr == 'true'
+          github.event.inputs.force_pr == 'true' &&
+          steps.auth.outputs.can_create_pr == 'true' &&
+          startsWith(steps.branch.outputs.name, 'upstream-sync/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -347,6 +365,7 @@ jobs:
            steps.test.outputs.passed == 'false')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAN_CREATE_PR: ${{ steps.auth.outputs.can_create_pr }}
         run: |
           set +e
           STATUS=""
@@ -403,6 +422,20 @@ jobs:
           }
 
           create_or_update_pr() {
+            if [ "${CAN_CREATE_PR}" != "true" ]; then
+              echo "[i] PR creation is disabled for this run; writing summary only."
+              write_step_summary
+              return 0
+            fi
+            case "${BRANCH}" in
+              upstream-sync/*) ;;
+              *)
+                echo "::warning::Refusing to create PR for non-sync branch: ${BRANCH}"
+                write_step_summary
+                return 0
+                ;;
+            esac
+
             PR_NUM=$(gh pr list \
               --repo "${{ github.repository }}" \
               --state open \
