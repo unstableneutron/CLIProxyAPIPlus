@@ -122,7 +122,7 @@ jobs:
             --state open \
             --label "${TRACKING_ISSUE_LABEL}" \
             --json number \
-            --jq '.[].number' || true)
+            --jq '.[].number' 2>/dev/null || true)
           for n in ${OPEN_ISSUES}; do
             echo "[i] Closing stale tracking issue #${n}."
             gh issue close "${n}" --repo "${{ github.repository }}" \
@@ -286,7 +286,7 @@ jobs:
             --state open \
             --label "${TRACKING_ISSUE_LABEL}" \
             --json number \
-            --jq '.[].number' || true)
+            --jq '.[].number' 2>/dev/null || true)
           for n in ${OPEN_ISSUES}; do
             gh issue close "${n}" --repo "${{ github.repository }}" \
               --comment "Resolved by automated sync to original ${{ steps.plan.outputs.original_tag }} and Plus ${{ steps.plan.outputs.plus_tag }} as ${{ steps.ffwd.outputs.fork_tag }}." || true
@@ -366,13 +366,6 @@ jobs:
             --description "Automated upstream sync is blocked; needs maintainer attention." \
             --repo "${{ github.repository }}" 2>/dev/null || true
 
-          ISSUE_NUM=$(gh issue list \
-            --repo "${{ github.repository }}" \
-            --state open \
-            --label "${TRACKING_ISSUE_LABEL}" \
-            --json number \
-            --jq '.[0].number' || true)
-
           NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
           COMMENT_BODY=$(printf '**New blocked sync attempt** (%s)\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Plus head delta paths: `%s`\n- Unsafe Plus head paths: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n### Conflict files\n\n#### Original merge\n%s\n\n#### Plus release overlay\n%s\n\n#### Plus head delta\n%s\n\n### Resolution guidance\n\nDo not resolve conflicts by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Treat Plus untagged head deltas as safe only when they touch Plus-owned paths.\n\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
             "${NOW}" \
@@ -396,21 +389,64 @@ jobs:
             "${BUILD_TAIL:-<no build log captured>}" \
             "${TEST_TAIL:-<no test log captured>}")
 
-          if [ -n "${ISSUE_NUM}" ]; then
+          ISSUE_TITLE="upstream-sync blocked: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }} needs maintainer attention"
+          INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This issue or PR tracks the blocked state. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\nEach subsequent failed run will append a comment with the latest refs and gate output.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this tracker.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
+          ISSUE_BODY="${INTRO}${COMMENT_BODY}"
+
+          create_or_update_pr() {
+            PR_NUM=$(gh pr list \
+              --repo "${{ github.repository }}" \
+              --state open \
+              --head "${BRANCH}" \
+              --json number \
+              --jq '.[0].number' 2>/dev/null || true)
+            if [ -n "${PR_NUM}" ]; then
+              echo "[i] Updating existing sync PR #${PR_NUM}"
+              gh pr comment "${PR_NUM}" \
+                --repo "${{ github.repository }}" \
+                --body "${COMMENT_BODY}" || exit 1
+            else
+              echo "[i] Creating sync PR because issues are unavailable"
+              PR_URL=$(gh pr create \
+                --repo "${{ github.repository }}" \
+                --base main \
+                --head "${BRANCH}" \
+                --title "${ISSUE_TITLE}" \
+                --body "${ISSUE_BODY}" 2>&1)
+              PR_EXIT=$?
+              echo "${PR_URL}"
+              if [ ${PR_EXIT} -ne 0 ]; then exit ${PR_EXIT}; fi
+              PR_NUM=$(echo "${PR_URL}" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+$' || true)
+              if [ -n "${PR_NUM}" ]; then
+                gh pr edit "${PR_NUM}" --repo "${{ github.repository }}" --add-label "${PR_LABEL}" 2>&1 || true
+              fi
+            fi
+          }
+
+          ISSUE_NUM=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --state open \
+            --label "${TRACKING_ISSUE_LABEL}" \
+            --json number \
+            --jq '.[0].number' 2>/tmp/upstream-sync-issues.err)
+          ISSUE_LIST_EXIT=$?
+
+          if [ ${ISSUE_LIST_EXIT} -ne 0 ]; then
+            echo "[i] Issues unavailable; falling back to PR tracker."
+            cat /tmp/upstream-sync-issues.err || true
+            create_or_update_pr
+          elif [ -n "${ISSUE_NUM}" ]; then
             echo "[i] Updating existing tracking issue #${ISSUE_NUM}"
             gh issue comment "${ISSUE_NUM}" \
               --repo "${{ github.repository }}" \
-              --body "${COMMENT_BODY}" || exit 1
+              --body "${COMMENT_BODY}" || create_or_update_pr
           else
             echo "[i] Creating new tracking issue"
-            ISSUE_TITLE="upstream-sync blocked: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }} needs maintainer attention"
-            INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This issue tracks the blocked state. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\nEach subsequent failed run will append a comment with the latest refs and gate output. **No new PRs or issues are spawned** — this is the single source of truth.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this issue.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
-            ISSUE_BODY="${INTRO}${COMMENT_BODY}"
             gh issue create \
               --repo "${{ github.repository }}" \
               --title "${ISSUE_TITLE}" \
               --label "${TRACKING_ISSUE_LABEL}" \
               --assignee "${{ github.repository_owner }}" \
-              --body "${ISSUE_BODY}" || exit 1
+              --body "${ISSUE_BODY}" || create_or_update_pr
           fi
           set -e
