@@ -19,10 +19,13 @@ PLUS_OWNED_PREFIXES=(
 )
 
 FORK_OWNED_PATHS=(
-  .github/workflows/upstream-sync.yml
   .gitattributes
   README-ccs-fork.md
   docker-compose.yml
+)
+
+FORK_OWNED_PREFIXES=(
+  .github/workflows/
 )
 
 die() {
@@ -141,6 +144,9 @@ is_fork_owned_path() {
   local owned
   for owned in "${FORK_OWNED_PATHS[@]}"; do
     [[ "${path}" == "${owned}" ]] && return 0
+  done
+  for owned in "${FORK_OWNED_PREFIXES[@]}"; do
+    [[ "${path}" == "${owned}"* ]] && return 0
   done
   return 1
 }
@@ -267,6 +273,37 @@ checkout_conflict_side() {
   fi
 }
 
+restore_fork_owned_paths() {
+  local source_ref=$1
+  local path prefix
+
+  for path in "${FORK_OWNED_PATHS[@]}"; do
+    if git cat-file -e "${source_ref}:${path}" 2>/dev/null; then
+      git checkout "${source_ref}" -- "${path}" 2>/dev/null || true
+    else
+      git rm -f --ignore-unmatch "${path}" 2>/dev/null || true
+    fi
+  done
+
+  for prefix in "${FORK_OWNED_PREFIXES[@]}"; do
+    git ls-tree -r --name-only "${source_ref}" -- "${prefix}" \
+      | while IFS= read -r path; do
+          [ -n "${path}" ] || continue
+          git checkout "${source_ref}" -- "${path}" 2>/dev/null || true
+        done
+
+    git ls-files -- "${prefix}" \
+      | while IFS= read -r path; do
+          [ -n "${path}" ] || continue
+          if ! git cat-file -e "${source_ref}:${path}" 2>/dev/null; then
+            git rm -f --ignore-unmatch "${path}" 2>/dev/null || true
+          fi
+        done
+  done
+
+  git add -A -- "${FORK_OWNED_PATHS[@]}" "${FORK_OWNED_PREFIXES[@]}" 2>/dev/null || true
+}
+
 cmd_plan() {
   local force_rebuild=${FORCE_REBUILD:-false}
 
@@ -381,13 +418,15 @@ cmd_merge_ref() {
   [ -n "${ref}" ] || die "merge-ref requires ref"
 
   git config merge.ours.driver true
+  local pre_merge_head
+  pre_merge_head=$(git rev-parse HEAD)
 
   if [ "${phase}" = original ]; then
     install_original_merge_attributes
   fi
 
   set +e
-  git merge --no-edit "${ref}"
+  git merge --no-ff --no-commit "${ref}"
   local merge_exit=$?
   set -e
 
@@ -401,6 +440,12 @@ cmd_merge_ref() {
   key=$(phase_key "${phase}")
 
   if [ -z "${unmerged}" ] && [ ${merge_exit} -eq 0 ]; then
+    restore_fork_owned_paths "${pre_merge_head}"
+    if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+      git commit \
+        -m "chore(upstream-sync): merge ${phase} ref" \
+        -m "Automated upstream-sync merge for ${phase}: ${ref}. Fork-owned files are restored from the fork side before committing."
+    fi
     write_kv conflicts false
     write_env "${key}_CONFLICT_FILES" ""
     write_env "${key}_CONFLICT_TABLE" ""
@@ -428,6 +473,7 @@ cmd_merge_ref() {
     checkout_conflict_side "${side}" "${ref}" "${path}"
   done <<< "${unmerged}"
 
+  restore_fork_owned_paths "${pre_merge_head}"
   git add -A
   if ! git commit \
     -m "chore(upstream-sync): preview ${phase} merge" \

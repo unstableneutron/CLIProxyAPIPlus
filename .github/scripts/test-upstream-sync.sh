@@ -172,7 +172,9 @@ test_original_merge_protects_plus_owned_paths() {
   local original=${root}/original
   local out=${root}/merge.out
 
+  commit_file "${fork}" .github/workflows/release.yaml fork-workflow "fork workflow"
   commit_file "${original}" internal/auth/copilot/provider.go original-clobber "original clobber"
+  commit_file "${original}" .github/workflows/release.yaml original-workflow "original workflow"
   run_git -C "${original}" tag v7.1.67
 
   (
@@ -181,9 +183,13 @@ test_original_merge_protects_plus_owned_paths() {
     GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
   )
 
-  assert_contains "${out}" "conflicts=false"
+  assert_contains "${out}" "conflicts=true"
+  assert_contains "${out}" '| `.github/workflows/release.yaml` | `fork-owned` |'
   if ! grep -Fq plus-provider "${fork}/internal/auth/copilot/provider.go"; then
     fail "original merge overwrote Plus-owned provider file"
+  fi
+  if ! grep -Fq fork-workflow "${fork}/.github/workflows/release.yaml"; then
+    fail "original merge overwrote fork-owned workflow file"
   fi
 }
 

@@ -63,6 +63,6 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Do not resolve upstream-sync conflicts with blanket `ours` or `theirs` once a conflict is reported.
 - For `original-owned` paths, preserve the newer original base behavior and reapply only necessary plus/fork compatibility.
 - For `plus-owned` paths, preserve compatible plus behavior while updating APIs to match the newer original base.
-- For `fork-owned` paths, preserve this fork's explicit changes unless deliberately adopting an upstream replacement.
+- For `fork-owned` paths, preserve this fork's explicit changes unless deliberately adopting an upstream replacement. GitHub workflow files under `.github/workflows/` are fork-owned.
 - For shared hotspots, manually compose the result; no side wins by default.
 - Untagged plus head commits may auto-land only when they touch plus-owned paths. Shared-path plus head changes require a PR or the `upstream-sync-blocked` tracking issue.
