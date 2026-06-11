@@ -52,8 +52,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds     = 0
+	defaultStreamingBootstrapRetries     = 0
+	defaultStreamingBootstrapTimeoutSecs = 30
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -218,6 +219,20 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
+// StreamingBootstrapTimeout returns the maximum duration a streaming handler
+// waits for upstream stream bootstrap before sending a downstream stream error.
+// A negative configured value disables the timeout. Zero means use the default.
+func StreamingBootstrapTimeout(cfg *config.SDKConfig) time.Duration {
+	seconds := defaultStreamingBootstrapTimeoutSecs
+	if cfg != nil && cfg.Streaming.BootstrapTimeoutSeconds != 0 {
+		seconds = cfg.Streaming.BootstrapTimeoutSeconds
+	}
+	if seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
@@ -295,7 +310,11 @@ func headersFromContext(ctx context.Context) http.Header {
 		return nil
 	}
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.Request.Header.Clone()
+		headers := ginCtx.Request.Header.Clone()
+		headers.Del(ForceModelPrefixHeader)
+		headers.Del("Traceparent")
+		headers.Del("Tracestate")
+		return headers
 	}
 	return nil
 }
@@ -486,6 +505,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
+	if requestCtx != nil {
+		if trace := logging.GetTraceContext(requestCtx); trace.Traceparent != "" {
+			newCtx = logging.WithTraceContext(newCtx, trace)
+		}
+		newCtx = logging.WithProxyStatusHolderFrom(newCtx, requestCtx)
+	}
 
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
@@ -499,6 +524,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	if h != nil && h.AuthManager != nil {
+		previousCallback := selectedAuthIDCallbackFromContext(newCtx)
+		callbackCtx := newCtx
+		newCtx = WithSelectedAuthIDCallback(newCtx, func(authID string) {
+			if previousCallback != nil {
+				previousCallback(authID)
+			}
+			h.recordSelectedUpstream(callbackCtx, authID)
+		})
+	}
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
@@ -621,6 +656,17 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	}
 
 	c.Set("API_RESPONSE", bytes.Clone(data))
+}
+
+func (h *BaseAPIHandler) recordSelectedUpstream(ctx context.Context, authID string) {
+	if h == nil || h.AuthManager == nil {
+		return
+	}
+	auth, ok := h.AuthManager.GetByID(strings.TrimSpace(authID))
+	if !ok || auth == nil {
+		return
+	}
+	logging.SetSlot(ctx, auth.EnsureIndex())
 }
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
@@ -908,7 +954,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		if streamCanceledBeforeRead {
 			return
 		}
-		sentPayload := false
+		streamStarted := false
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
@@ -965,11 +1011,15 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					applyStreamHeaderInit()
 					return
 				}
+				if chunk.Bootstrap {
+					streamStarted = true
+					continue
+				}
 				if chunk.Err != nil {
 					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
+					// Safe bootstrap recovery: if the upstream fails before any protocol activity or payload bytes are sent,
 					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
+					if !streamStarted {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
@@ -1038,7 +1088,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 							return
 						}
 					}
-					sentPayload = true
+					streamStarted = true
 					streamHeadersCommitted = true
 					if okSendData := sendData(payload); !okSendData {
 						return

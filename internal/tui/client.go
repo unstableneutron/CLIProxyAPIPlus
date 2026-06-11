@@ -142,7 +142,7 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 
 // GetUsage fetches usage statistics.
 func (c *Client) GetUsage() (map[string]any, error) {
-	return c.getJSON("/v0/management/usage")
+	return c.getJSON("/v0/management/usage/export")
 }
 
 // GetAuthFiles lists auth credential files.

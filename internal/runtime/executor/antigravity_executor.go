@@ -17,12 +17,14 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -48,8 +50,8 @@ const (
 	antigravityCountTokensPath             = "/v1internal:countTokens"
 	antigravityStreamPath                  = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath                = "/v1internal:generateContent"
-	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret                = "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"
+	antigravityClientIDEnv                 = antigravityauth.ClientIDEnv
+	antigravityClientSecretEnv             = antigravityauth.ClientSecretEnv
 	defaultAntigravityAgent                = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
@@ -91,8 +93,8 @@ var (
 	randSourceMutex                   sync.Mutex
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
-	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
-	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
+	antigravityCreditsBalanceByAuth   sync.Map // auth.ID -> antigravityCreditsBalance
+	antigravityCreditsHintRefreshByID sync.Map // auth.ID -> *antigravityCreditsHintRefreshState
 	antigravityRefreshGroup           singleflight.Group
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
@@ -1808,8 +1810,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", antigravityOAuthClientValue(auth, "client_id", antigravityClientIDEnv))
+	form.Set("client_secret", antigravityOAuthClientValue(auth, "client_secret", antigravityClientSecretEnv))
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -1854,6 +1856,25 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	}
 
 	return &tokenResp, nil
+}
+
+func antigravityOAuthClientValue(auth *cliproxyauth.Auth, key string, envName string) string {
+	if auth != nil {
+		if value := metaStringValue(auth.Metadata, key); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
@@ -2241,7 +2262,7 @@ func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return base
 	}
-	return antigravityBaseURLProd
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {

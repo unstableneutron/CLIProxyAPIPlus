@@ -1,10 +1,13 @@
 # Binaries
 cli-proxy-api
+/cliproxy
+/server
 *.exe
 
 # Configuration
 config.yaml
 .env
+.mcp.json
 
 # Generated content
 bin/*
@@ -42,12 +45,15 @@ GEMINI.md
 .serena/*
 .agent/*
 .agents/*
+!.agents/skills/
+!.agents/skills/**
 .opencode/*
 .idea/*
 .beads/*
 .bmad/*
 _bmad/*
 _bmad-output/*
+.mcp/cache/
 
 # macOS
 .DS_Store

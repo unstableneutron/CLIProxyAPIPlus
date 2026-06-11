@@ -66,6 +66,8 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	} else {
 		cfg.IncognitoBrowser = true // Kiro default
 	}
+}
+
 func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
 	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
 		return false
