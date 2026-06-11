@@ -393,6 +393,15 @@ jobs:
           INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This issue or PR tracks the blocked state. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\nEach subsequent failed run will append a comment with the latest refs and gate output.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this tracker.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
           ISSUE_BODY="${INTRO}${COMMENT_BODY}"
 
+          write_step_summary() {
+            echo "[i] Writing blocked sync report to workflow summary."
+            {
+              echo "## Upstream sync blocked"
+              echo
+              printf '%s\n' "${ISSUE_BODY}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+
           create_or_update_pr() {
             PR_NUM=$(gh pr list \
               --repo "${{ github.repository }}" \
@@ -404,7 +413,7 @@ jobs:
               echo "[i] Updating existing sync PR #${PR_NUM}"
               gh pr comment "${PR_NUM}" \
                 --repo "${{ github.repository }}" \
-                --body "${COMMENT_BODY}" || exit 1
+                --body "${COMMENT_BODY}" || write_step_summary
             else
               echo "[i] Creating sync PR because issues are unavailable"
               PR_URL=$(gh pr create \
@@ -415,7 +424,11 @@ jobs:
                 --body "${ISSUE_BODY}" 2>&1)
               PR_EXIT=$?
               echo "${PR_URL}"
-              if [ ${PR_EXIT} -ne 0 ]; then exit ${PR_EXIT}; fi
+              if [ ${PR_EXIT} -ne 0 ]; then
+                echo "::warning::Could not create PR tracker; see workflow summary for blocked sync report."
+                write_step_summary
+                return 0
+              fi
               PR_NUM=$(echo "${PR_URL}" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+$' || true)
               if [ -n "${PR_NUM}" ]; then
                 gh pr edit "${PR_NUM}" --repo "${{ github.repository }}" --add-label "${PR_LABEL}" 2>&1 || true
