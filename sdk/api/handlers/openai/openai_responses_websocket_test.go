@@ -89,6 +89,13 @@ type websocketPreviousResponseRetryExecutor struct {
 	errorAt  int
 }
 
+type websocketInvalidEncryptedContentRetryExecutor struct {
+	mu                 sync.Mutex
+	payloads           [][]byte
+	previousNotFoundAt int
+	invalidEncryptedAt int
+}
+
 type websocketPinnedFailoverStatusError struct {
 	status int
 	msg    string
@@ -485,6 +492,68 @@ func (e *websocketPreviousResponseRetryExecutor) HttpRequest(context.Context, *c
 }
 
 func (e *websocketPreviousResponseRetryExecutor) Payloads() [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([][]byte, len(e.payloads))
+	for i := range e.payloads {
+		out[i] = bytes.Clone(e.payloads[i])
+	}
+	return out
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	callIndex := len(e.payloads)
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	e.mu.Unlock()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	if e.previousNotFoundAt > 0 && callIndex == e.previousNotFoundAt {
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusBadRequest,
+			msg:    fmt.Sprintf(`{"status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp-%d' not found.","param":"previous_response_id"}}`, callIndex),
+		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+	invalidEncryptedAt := e.invalidEncryptedAt
+	if invalidEncryptedAt == 0 {
+		invalidEncryptedAt = 1
+	}
+	switch callIndex {
+	case 0:
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"reasoning","id":"rs-1","summary":[],"content":null,"encrypted_content":"ciphertext"}]}}`)}
+	case invalidEncryptedAt:
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: http.StatusBadRequest,
+			msg:    `{"status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"The encrypted content for item rs_123 could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}`,
+		}}
+	default:
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[{"type":"message","id":"assistant-2"}]}}`)}
+	}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketInvalidEncryptedContentRetryExecutor) Payloads() [][]byte {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([][]byte, len(e.payloads))
@@ -1357,6 +1426,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			timelineLog,
 			"session-1",
 			false,
+			false,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -1441,6 +1511,7 @@ func TestForwardResponsesWebsocketTreatsResponseFailedAsTerminal(t *testing.T) {
 			newInMemoryWebsocketTimelineLog(),
 			"session-1",
 			false,
+			false,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -1514,6 +1585,7 @@ func TestForwardResponsesWebsocketUsesOutputItemDoneWhenCompletedOutputIsEmpty(t
 			errCh,
 			newInMemoryWebsocketTimelineLog(),
 			"session-1",
+			false,
 			false,
 		)
 		if err != nil {
@@ -1590,6 +1662,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			errCh,
 			timelineLog,
 			"session-1",
+			false,
 			false,
 		)
 		if err == nil {
@@ -1888,6 +1961,182 @@ func TestResponsesWebsocketRetriesPreviousResponseNotFoundWithFullReplay(t *test
 		if got := input[i].Get("id").String(); got != wantID {
 			t.Fatalf("fallback input[%d].id = %q, want %q; payload=%s", i, got, wantID, fallback)
 		}
+	}
+}
+
+func TestResponsesWebsocketRetriesInvalidEncryptedContentWithSanitizedFullReplay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketInvalidEncryptedContentRetryExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-invalid-encrypted-content",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`)); errWrite != nil {
+		t.Fatalf("write initial websocket request: %v", errWrite)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, initialPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read initial websocket response: %v", errRead)
+	}
+	if got := gjson.GetBytes(initialPayload, "response.id").String(); got != "resp-1" {
+		t.Fatalf("initial response id = %q, want resp-1; payload=%s", got, initialPayload)
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`)); errWrite != nil {
+		t.Fatalf("write follow-up websocket request: %v", errWrite)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, retryPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read retry websocket response: %v", errRead)
+	}
+	if got := gjson.GetBytes(retryPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("retry payload type = %q, want %q; payload=%s", got, wsEventTypeCompleted, retryPayload)
+	}
+	if got := gjson.GetBytes(retryPayload, "response.id").String(); got != "resp-2" {
+		t.Fatalf("retry response id = %q, want resp-2; payload=%s", got, retryPayload)
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 3 {
+		t.Fatalf("upstream payload count = %d, want 3", len(payloads))
+	}
+	if got := gjson.GetBytes(payloads[1], "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("incremental previous_response_id = %q, want resp-1; payload=%s", got, payloads[1])
+	}
+	retry := payloads[2]
+	if gjson.GetBytes(retry, "previous_response_id").Exists() {
+		t.Fatalf("retry must strip previous_response_id: %s", retry)
+	}
+	input := gjson.GetBytes(retry, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("retry input len = %d, want 3; payload=%s", len(input), retry)
+	}
+	if got := input[1].Get("type").String(); got != "reasoning" {
+		t.Fatalf("retry input[1].type = %q, want reasoning; payload=%s", got, retry)
+	}
+	if input[1].Get("encrypted_content").Exists() {
+		t.Fatalf("retry reasoning item still has encrypted_content: %s", retry)
+	}
+	if got := input[2].Get("id").String(); got != "msg-2" {
+		t.Fatalf("retry input[2].id = %q, want msg-2; payload=%s", got, retry)
+	}
+}
+
+func TestResponsesWebsocketRetriesInvalidEncryptedContentAfterPreviousResponseNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketInvalidEncryptedContentRetryExecutor{previousNotFoundAt: 1, invalidEncryptedAt: 2}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-invalid-encrypted-content-after-previous",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`)); errWrite != nil {
+		t.Fatalf("write initial websocket request: %v", errWrite)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, initialPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read initial websocket response: %v", errRead)
+	}
+	if got := gjson.GetBytes(initialPayload, "response.id").String(); got != "resp-1" {
+		t.Fatalf("initial response id = %q, want resp-1; payload=%s", got, initialPayload)
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`)); errWrite != nil {
+		t.Fatalf("write follow-up websocket request: %v", errWrite)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, retryPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read retry websocket response: %v", errRead)
+	}
+	if got := gjson.GetBytes(retryPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("retry payload type = %q, want %q; payload=%s", got, wsEventTypeCompleted, retryPayload)
+	}
+	if got := gjson.GetBytes(retryPayload, "response.id").String(); got != "resp-2" {
+		t.Fatalf("retry response id = %q, want resp-2; payload=%s", got, retryPayload)
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 4 {
+		t.Fatalf("upstream payload count = %d, want 4", len(payloads))
+	}
+	if got := gjson.GetBytes(payloads[1], "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("incremental previous_response_id = %q, want resp-1; payload=%s", got, payloads[1])
+	}
+	fallback := payloads[2]
+	if gjson.GetBytes(fallback, "previous_response_id").Exists() {
+		t.Fatalf("fallback must strip previous_response_id: %s", fallback)
+	}
+	if !gjson.GetBytes(fallback, "input.1.encrypted_content").Exists() {
+		t.Fatalf("fallback should preserve encrypted_content before sanitized retry: %s", fallback)
+	}
+	retry := payloads[3]
+	if gjson.GetBytes(retry, "previous_response_id").Exists() {
+		t.Fatalf("retry must strip previous_response_id: %s", retry)
+	}
+	if gjson.GetBytes(retry, "input.1.encrypted_content").Exists() {
+		t.Fatalf("retry reasoning item still has encrypted_content: %s", retry)
+	}
+	if got := gjson.GetBytes(retry, "input.2.id").String(); got != "msg-2" {
+		t.Fatalf("retry input[2].id = %q, want msg-2; payload=%s", got, retry)
 	}
 }
 
