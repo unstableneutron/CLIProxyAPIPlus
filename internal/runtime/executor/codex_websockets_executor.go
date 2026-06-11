@@ -391,6 +391,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
+		if isCodexWebsocketFailureTerminalEvent(eventType) {
+			terminalErr := codexWebsocketTerminalResponseErr(payload)
+			helps.RecordAPIWebsocketError(ctx, e.cfg, eventType, terminalErr)
+			return resp, terminalErr
+		}
 	}
 }
 
@@ -658,6 +663,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
+			} else if isCodexWebsocketFailureTerminalEvent(eventType) {
+				reporter.PublishFailure(ctx, codexWebsocketTerminalResponseErr(payload))
 			}
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
@@ -670,7 +677,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if isCodexWebsocketTerminalEvent(eventType) {
 				return
 			}
 		}
@@ -777,6 +784,63 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			}
 			return ev.msgType, ev.payload, nil
 		}
+	}
+}
+
+func isCodexWebsocketTerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCodexWebsocketFailureTerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.failed", "response.incomplete", "response.cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexWebsocketTerminalResponseErr(payload []byte) error {
+	if streamErr, _, ok := codexTerminalStreamErr(payload); ok {
+		return streamErr
+	}
+
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	errorBody := codexTerminalErrorBody(payload, "response.error")
+	if len(errorBody) == 0 {
+		errorBody = codexTerminalErrorBody(payload, "error")
+	}
+	if len(errorBody) == 0 {
+		errorBody = []byte(`{"error":{}}`)
+		message := eventType
+		if message == "" {
+			message = "upstream websocket response terminated unsuccessfully"
+		}
+		errorBody, _ = sjson.SetBytes(errorBody, "error.message", message)
+		errorBody, _ = sjson.SetBytes(errorBody, "error.type", "server_error")
+		errorBody, _ = sjson.SetBytes(errorBody, "error.code", eventType)
+	}
+
+	return newCodexStatusErr(codexWebsocketTerminalStatusCode(errorBody), errorBody)
+}
+
+func codexWebsocketTerminalStatusCode(errorBody []byte) int {
+	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(errorBody, "error.code").String()))
+	switch {
+	case errorType == "authentication_error" || errorCode == "invalid_api_key":
+		return http.StatusUnauthorized
+	case errorType == "rate_limit_error" || strings.Contains(errorCode, "rate_limit"):
+		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error" || errorCode == "previous_response_not_found" || errorCode == "context_length_exceeded" || errorCode == "context_too_large":
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
 	}
 }
 

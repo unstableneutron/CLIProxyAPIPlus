@@ -211,6 +211,111 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsExecuteReturnsOnResponseFailed(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		failed := []byte(`{"type":"response.failed","response":{"id":"resp-1","status":"failed","error":{"code":"server_error","message":"upstream failed"}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, failed); errWrite != nil {
+			t.Errorf("write failed websocket message: %v", errWrite)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err == nil {
+		t.Fatal("expected response.failed error")
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusInternalServerError, err)
+	}
+	if !strings.Contains(err.Error(), "upstream failed") {
+		t.Fatalf("error missing upstream message: %v", err)
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		failed := []byte(`{"type":"response.failed","response":{"id":"resp-1","status":"failed","error":{"code":"server_error","message":"upstream failed"}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, failed); errWrite != nil {
+			t.Errorf("write failed websocket message: %v", errWrite)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-1", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true}
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var gotFailed bool
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case chunk, ok := <-streamResult.Chunks:
+			if !ok {
+				if !gotFailed {
+					t.Fatal("stream closed without forwarding response.failed")
+				}
+				return
+			}
+			if chunk.Err != nil {
+				t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+			}
+			if strings.Contains(string(chunk.Payload), "response.failed") {
+				gotFailed = true
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for stream to close after response.failed")
+		}
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

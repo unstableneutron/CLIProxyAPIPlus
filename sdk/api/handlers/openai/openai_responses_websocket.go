@@ -1473,10 +1473,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				outputAccumulator.Record(payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
+				terminalEvent := websocketTerminalEvent(payloads[i])
 				if eventType == wsEventTypeCompleted {
 					completed = true
 					completedOutput = outputAccumulator.CompletedOutput(payloads[i])
 					completedResponseID = strings.TrimSpace(gjson.GetBytes(payloads[i], "response.id").String())
+				} else if terminalEvent != "" {
+					completed = true
 				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
