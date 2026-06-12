@@ -376,9 +376,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
-	engine.NoRoute(s.pluginManagementNoRoute)
+	engine.NoRoute(s.noRoute)
 
-	// === CLIProxyAPIPlus 扩展: 注册 Kiro OAuth Web 路由 ===
+	// Register CLIProxyAPIPlus Kiro OAuth web routes.
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
 	kiroOAuthHandler.RegisterRoutes(engine)
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
@@ -613,7 +613,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
-	s.engine.NoRoute(s.handleChatGPTBackendPassthroughNoRoute)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
@@ -924,6 +923,21 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) noRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") || strings.HasPrefix(path, "/v0/resource/plugins/") {
+		s.pluginManagementNoRoute(c)
+		return
+	}
+	s.handleChatGPTBackendPassthroughNoRoute(c)
 }
 
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {

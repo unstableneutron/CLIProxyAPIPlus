@@ -310,7 +310,11 @@ func headersFromContext(ctx context.Context) http.Header {
 		return nil
 	}
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.Request.Header.Clone()
+		headers := ginCtx.Request.Header.Clone()
+		headers.Del("Traceparent")
+		headers.Del("Tracestate")
+		headers.Del(ForceModelPrefixHeader)
+		return headers
 	}
 	return nil
 }
@@ -501,6 +505,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
+	if requestCtx != nil {
+		if trace := logging.GetTraceContext(requestCtx); trace.Traceparent != "" {
+			newCtx = logging.WithTraceContext(newCtx, trace)
+		}
+		newCtx = logging.WithProxyStatusHolderFrom(newCtx, requestCtx)
+	}
 
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
@@ -514,6 +524,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	if h != nil && h.AuthManager != nil {
+		previousCallback := selectedAuthIDCallbackFromContext(newCtx)
+		callbackCtx := newCtx
+		newCtx = WithSelectedAuthIDCallback(newCtx, func(authID string) {
+			if previousCallback != nil {
+				previousCallback(authID)
+			}
+			h.recordSelectedUpstream(callbackCtx, authID)
+		})
+	}
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
@@ -642,6 +662,17 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+func (h *BaseAPIHandler) recordSelectedUpstream(ctx context.Context, authID string) {
+	if h == nil || h.AuthManager == nil {
+		return
+	}
+	auth, ok := h.AuthManager.GetByID(strings.TrimSpace(authID))
+	if !ok || auth == nil {
+		return
+	}
+	logging.SetSlot(ctx, auth.EnsureIndex())
 }
 
 // ExecuteImageWithAuthManager executes an OpenAI-compatible image endpoint request.
