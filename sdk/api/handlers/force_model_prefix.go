@@ -45,6 +45,21 @@ func ApplyForceModelPrefixHeader(c *gin.Context, rawJSON []byte) ([]byte, *inter
 	return updated, nil
 }
 
+// ApplyForceModelPrefixToModel applies X-Force-Model-Prefix to a parsed model
+// value. Use this for entrypoints where the model comes from a path or multipart
+// form field rather than a JSON body.
+func ApplyForceModelPrefixToModel(c *gin.Context, model string) (string, *interfaces.ErrorMessage) {
+	prefix, err := forceModelPrefixFromContext(c)
+	if err != nil {
+		return model, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: err}
+	}
+	model = strings.TrimSpace(model)
+	if prefix == "" || model == "" {
+		return model, nil
+	}
+	return forceModelPrefixForModel(prefix, model), nil
+}
+
 func forceModelPrefixFromContext(c *gin.Context) (string, error) {
 	if c == nil {
 		return "", nil

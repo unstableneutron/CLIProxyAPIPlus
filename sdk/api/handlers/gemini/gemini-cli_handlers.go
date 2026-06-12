@@ -151,6 +151,13 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 // It sets up a server-sent event stream and forwards the request to the backend client.
 // The function continuously proxies response chunks from the backend to the client.
 func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJSON []byte) {
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
+
 	alt := h.GetAlt(c)
 
 	if alt == "" {
@@ -185,6 +192,13 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 // handleInternalGenerateContent handles non-streaming content generation requests.
 // It sends a request to the backend client and proxies the entire response back to the client at once.
 func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, rawJSON []byte) {
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
+
 	c.Header("Content-Type", "application/json")
 	modelResult := gjson.GetBytes(rawJSON, "model")
 	modelName := modelResult.String()

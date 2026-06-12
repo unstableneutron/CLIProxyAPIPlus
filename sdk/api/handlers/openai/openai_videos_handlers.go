@@ -429,6 +429,12 @@ func (h *OpenAIAPIHandler) VideosCreate(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	videoModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if videoModel == "" {
@@ -475,6 +481,12 @@ func (h *OpenAIAPIHandler) handleXAIVideosNativePost(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	videoModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if videoModel == "" {

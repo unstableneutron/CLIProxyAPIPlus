@@ -601,6 +601,12 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if imageModel == "" {
@@ -717,6 +723,14 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 
 	imageModel := strings.TrimSpace(c.PostForm("model"))
+	if imageModel != "" {
+		prefixedModel, errMsg := handlers.ApplyForceModelPrefixToModel(c, imageModel)
+		if errMsg != nil {
+			h.WriteErrorResponse(c, errMsg)
+			return
+		}
+		imageModel = prefixedModel
+	}
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
@@ -888,6 +902,12 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		})
 		return
 	}
+	updatedJSON, errMsg := handlers.ApplyForceModelPrefixHeader(c, rawJSON)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	rawJSON = updatedJSON
 
 	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if imageModel == "" {
