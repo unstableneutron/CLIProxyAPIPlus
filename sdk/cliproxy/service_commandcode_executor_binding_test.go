@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,7 +36,7 @@ func TestRegisterModelsForAuth_CommandCodeUsesLiveProviderCatalog(t *testing.T) 
 	}
 	defer GlobalModelRegistry().UnregisterClient(auth.ID)
 
-	service.registerModelsForAuth(auth)
+	service.registerModelsForAuth(context.Background(), auth)
 	models := GlobalModelRegistry().GetAvailableModelsByProvider("commandcode")
 	var found *ModelInfo
 	for _, model := range models {

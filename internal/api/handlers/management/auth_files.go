@@ -38,12 +38,15 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -273,6 +276,81 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func pluginAuthProviderFromPath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	const prefix = "/v0/management/"
+	const suffix = "-auth-url"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	provider := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return "", false
+	}
+	for _, r := range provider {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return "", false
+		}
+	}
+	return provider, true
+}
+
+func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
+	if h == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	if host == nil {
+		return false
+	}
+	provider, ok := pluginAuthProviderFromPath(c.Request.URL.Path)
+	if !ok || !host.HasAuthProvider(provider) {
+		return false
+	}
+
+	ctx := PopulateAuthContext(context.Background(), c)
+	baseURL, errBaseURL := h.managementCallbackURL("/v0/management/oauth-callback")
+	if errBaseURL != nil {
+		log.WithError(errBaseURL).Error("failed to compute plugin auth callback URL")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return true
+	}
+	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
+	if !handled {
+		return false
+	}
+	if errStart != nil {
+		log.WithError(errStart).Error("failed to start plugin auth login")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return true
+	}
+	state := strings.TrimSpace(resp.State)
+	if state == "" {
+		log.WithField("provider", provider).Error("plugin auth provider returned empty state")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
+		return true
+	}
+	if errState := ValidateOAuthState(state); errState != nil {
+		log.WithError(errState).WithField("provider", provider).Error("plugin auth provider returned invalid state")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
+		return true
+	}
+	if errRegister := RegisterPluginOAuthSession(state, provider, resp.Metadata); errRegister != nil {
+		log.WithError(errRegister).WithField("provider", provider).Error("failed to register plugin oauth session")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
+		return true
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": resp.URL, "state": state})
+	return true
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -1243,8 +1321,13 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
@@ -1343,12 +1426,24 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	if errHook := h.notifyAuthFilePersisted(ctx, updatedAuth); errHook != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to refresh auth: %v", errHook)})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (h *Handler) notifyAuthFilePersisted(ctx context.Context, auth *coreauth.Auth) error {
+	if h == nil || h.postAuthPersistHook == nil || auth == nil {
+		return nil
+	}
+	return h.postAuthPersistHook(ctx, auth)
 }
 
 func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
@@ -1487,6 +1582,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
 	}
+	if _, ok := touchedRoots["excluded_models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	} else if _, ok := touchedRoots["excluded-models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	}
 }
 
 func syncAuthFileHeaderAttributes(auth *coreauth.Auth) {
@@ -1578,6 +1678,52 @@ func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
+}
+
+func syncAuthFileExcludedModelsAttribute(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	sourceKey := "excluded_models"
+	if _, okUnderscore := touchedRoots["excluded_models"]; !okUnderscore {
+		if _, okHyphen := touchedRoots["excluded-models"]; okHyphen {
+			sourceKey = "excluded-models"
+		}
+	}
+	excluded := authFileExcludedModelsValue(auth.Metadata[sourceKey])
+	excluded = internalconfig.NormalizeExcludedModels(excluded)
+	delete(auth.Metadata, "excluded-models")
+	if len(excluded) == 0 {
+		delete(auth.Metadata, "excluded_models")
+		delete(auth.Attributes, "excluded_models")
+		delete(auth.Attributes, "excluded_models_hash")
+		return
+	}
+	auth.Metadata["excluded_models"] = append([]string(nil), excluded...)
+	auth.Attributes["excluded_models"] = strings.Join(excluded, ",")
+	auth.Attributes["excluded_models_hash"] = diff.ComputeExcludedModelsHash(excluded)
+}
+
+func authFileExcludedModelsValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, ok := item.(string); ok {
+				out = append(out, value)
+			}
+		}
+		return out
+	case string:
+		return strings.Split(typed, ",")
+	default:
+		return nil
+	}
 }
 
 func authFileBoolValue(value any) (bool, bool) {
@@ -1673,7 +1819,16 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, errSave := store.Save(ctx, record)
+	if errSave != nil {
+		return "", errSave
+	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
+			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
+		}
+	}
+	return savedPath, nil
 }
 
 func gitLabBaseURLFromRequest(c *gin.Context) string {
@@ -3842,7 +3997,7 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	_, status, ok := GetOAuthSession(state)
+	provider, status, isPlugin, metadata, ok := GetOAuthSessionDetails(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		return
@@ -3869,6 +4024,56 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
 		return
+	}
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	if isPlugin && host != nil && host.HasAuthProvider(provider) {
+		ctx := PopulateAuthContext(context.Background(), c)
+		resp, handled, errPoll := host.PollLogin(ctx, provider, state, metadata)
+		if handled {
+			if errPoll != nil {
+				message := strings.TrimSpace(errPoll.Error())
+				if message == "" {
+					message = "Authentication failed"
+				}
+				SetOAuthSessionError(state, message)
+				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				return
+			}
+			switch resp.Status {
+			case "", pluginapi.AuthLoginStatusPending:
+				c.JSON(http.StatusOK, gin.H{"status": "wait"})
+				return
+			case pluginapi.AuthLoginStatusError:
+				message := strings.TrimSpace(resp.Message)
+				if message == "" {
+					message = "Authentication failed"
+				}
+				SetOAuthSessionError(state, message)
+				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				return
+			case pluginapi.AuthLoginStatusSuccess:
+				record := host.AuthDataToCoreAuth(resp.Auth, "", "")
+				if record == nil {
+					SetOAuthSessionError(state, "Authentication failed")
+					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authentication failed"})
+					return
+				}
+				if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
+					log.WithError(errSave).WithField("provider", provider).Error("failed to save plugin auth tokens")
+					SetOAuthSessionError(state, "Failed to save authentication tokens")
+					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
+					return
+				}
+				CompleteOAuthSession(state)
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+				return
+			default:
+				c.JSON(http.StatusOK, gin.H{"status": "wait"})
+				return
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }

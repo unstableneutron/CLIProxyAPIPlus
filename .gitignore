@@ -16,6 +16,8 @@ conv/*
 temp/*
 refs/*
 tmp/*
+plugins/*
+examples/plugin/bin/*
 
 # Storage backends
 pgstore/*
@@ -44,8 +46,6 @@ GEMINI.md
 .serena/*
 .agent/*
 .agents/*
-!.agents/skills/
-!.agents/skills/**
 .opencode/*
 .idea/*
 .beads/*

@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // TokenClientProvider loads clients backed by stored authentication tokens.
@@ -63,7 +64,7 @@ type APIKeyClientResult struct {
 	// CodexKeyCount is the number of Codex API keys loaded
 	CodexKeyCount int
 
-	// CommandCodeKeyCount is the number of Command Code API keys loaded
+	// CommandCodeKeyCount is the number of CommandCode API keys loaded
 	CommandCodeKeyCount int
 
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
@@ -83,6 +84,11 @@ type APIKeyClientResult struct {
 //   - error: An error if watcher creation fails
 type WatcherFactory func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error)
 
+// PluginAuthParser parses auth JSON owned by plugin providers.
+type PluginAuthParser interface {
+	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+}
+
 // WatcherWrapper exposes the subset of watcher methods required by the SDK.
 type WatcherWrapper struct {
 	start func(ctx context.Context) error
@@ -92,7 +98,9 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
-	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
+	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // Background refresh notification.
+	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
+	setPluginAuthParser   func(parser PluginAuthParser)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -119,6 +127,14 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	w.setConfig(cfg)
 }
 
+// SetPluginAuthParser updates the plugin auth parser used by the watcher.
+func (w *WatcherWrapper) SetPluginAuthParser(parser PluginAuthParser) {
+	if w == nil || w.setPluginAuthParser == nil {
+		return
+	}
+	w.setPluginAuthParser(parser)
+}
+
 // DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
 // into the watcher-managed auth update queue when available.
 // Returns true if the update was enqueued successfully.
@@ -127,6 +143,14 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 		return false
 	}
 	return w.dispatchRuntimeUpdate(update)
+}
+
+// DispatchPersistedAuthUpdate forwards already-persisted file auth updates.
+func (w *WatcherWrapper) DispatchPersistedAuthUpdate(update watcher.AuthUpdate) bool {
+	if w == nil || w.dispatchPersistedAuth == nil {
+		return false
+	}
+	return w.dispatchPersistedAuth(update)
 }
 
 // SetClients updates the watcher file-backed clients registry.
@@ -151,12 +175,10 @@ func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
 	w.setUpdateQueue(queue)
 }
 
-// NotifyTokenRefreshed 通知 Watcher 后台刷新器已更新 token
-// 这是方案 A 的核心方法，用于解决后台刷新与内存 Auth 对象的时间差问题
-// tokenID: token 文件名（如 kiro-xxx.json）
-// accessToken: 新的 access token
-// refreshToken: 新的 refresh token
-// expiresAt: 新的过期时间（RFC3339 格式）
+// NotifyTokenRefreshed notifies the watcher that a background refresh updated a token.
+// This keeps in-memory Auth objects aligned with token files refreshed in the
+// background. tokenID is the token filename, for example kiro-xxx.json.
+// expiresAt is formatted as RFC3339.
 func (w *WatcherWrapper) NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt string) {
 	if w == nil || w.notifyTokenRefreshed == nil {
 		return
