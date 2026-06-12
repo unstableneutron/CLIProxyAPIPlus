@@ -116,7 +116,7 @@ func TestNewServerWithoutPluginHostLeavesHandlerInterceptorsDisabled(t *testing.
 	}
 }
 
-func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
+func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	prevQueueEnabled := redisqueue.Enabled()
@@ -142,8 +142,21 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
 	legacyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusNotFound {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	if legacyRR.Code != http.StatusOK {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
+	}
+
+	var usagePayload struct {
+		Usage struct {
+			TotalRequests int64 `json:"total_requests"`
+		} `json:"usage"`
+		FailedRequests int64 `json:"failed_requests"`
+	}
+	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &usagePayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
+	}
+	if usagePayload.Usage.TotalRequests != 0 || usagePayload.FailedRequests != 0 {
+		t.Fatalf("legacy usage payload = %+v, want zeroed statistics", usagePayload)
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -175,6 +188,38 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
+	}
+}
+
+func TestCorsMiddlewareSkipsManagementRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(corsMiddleware())
+	router.OPTIONS("/v0/management/config", func(c *gin.Context) {
+		c.Status(http.StatusUnauthorized)
+	})
+	router.OPTIONS("/v1/models", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	managementReq := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
+	managementRR := httptest.NewRecorder()
+	router.ServeHTTP(managementRR, managementReq)
+	if managementRR.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("management CORS origin = %q, want empty", managementRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if managementRR.Code != http.StatusUnauthorized {
+		t.Fatalf("management status = %d, want %d", managementRR.Code, http.StatusUnauthorized)
+	}
+
+	apiReq := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	apiRR := httptest.NewRecorder()
+	router.ServeHTTP(apiRR, apiReq)
+	if apiRR.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("api CORS origin = %q, want *", apiRR.Header().Get("Access-Control-Allow-Origin"))
+	}
+	if apiRR.Code != http.StatusNoContent {
+		t.Fatalf("api status = %d, want %d", apiRR.Code, http.StatusNoContent)
 	}
 }
 

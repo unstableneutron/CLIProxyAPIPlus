@@ -52,8 +52,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds     = 0
+	defaultStreamingBootstrapRetries     = 0
+	defaultStreamingBootstrapTimeoutSecs = 30
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -216,6 +217,20 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 		retries = 0
 	}
 	return retries
+}
+
+// StreamingBootstrapTimeout returns the maximum duration a streaming handler
+// waits for upstream stream bootstrap before sending a downstream stream error.
+// A negative configured value disables the timeout. Zero means use the default.
+func StreamingBootstrapTimeout(cfg *config.SDKConfig) time.Duration {
+	seconds := defaultStreamingBootstrapTimeoutSecs
+	if cfg != nil && cfg.Streaming.BootstrapTimeoutSeconds != 0 {
+		seconds = cfg.Streaming.BootstrapTimeoutSeconds
+	}
+	if seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
@@ -909,6 +924,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return
 		}
 		sentPayload := false
+		streamStarted := false
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
@@ -969,7 +985,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					streamErr := chunk.Err
 					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
 					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
+					if !sentPayload && !streamStarted {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
@@ -1002,6 +1018,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					}
 					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
+				}
+				if chunk.Bootstrap {
+					streamStarted = true
+					continue
 				}
 				if len(chunk.Payload) > 0 {
 					applyStreamHeaderInit()

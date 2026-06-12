@@ -64,6 +64,9 @@ type APIKeyClientResult struct {
 	// CodexKeyCount is the number of Codex API keys loaded
 	CodexKeyCount int
 
+	// CommandCodeKeyCount is the number of CommandCode API keys loaded
+	CommandCodeKeyCount int
+
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }
@@ -95,6 +98,7 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // Background refresh notification.
 	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
 	setPluginAuthParser   func(parser PluginAuthParser)
 }
@@ -169,4 +173,15 @@ func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
 		return
 	}
 	w.setUpdateQueue(queue)
+}
+
+// NotifyTokenRefreshed notifies the watcher that a background refresh updated a token.
+// This keeps in-memory Auth objects aligned with token files refreshed in the
+// background. tokenID is the token filename, for example kiro-xxx.json.
+// expiresAt is formatted as RFC3339.
+func (w *WatcherWrapper) NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt string) {
+	if w == nil || w.notifyTokenRefreshed == nil {
+		return
+	}
+	w.notifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt)
 }

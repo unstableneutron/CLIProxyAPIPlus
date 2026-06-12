@@ -66,6 +66,8 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	} else {
 		cfg.IncognitoBrowser = true // Kiro default
 	}
+}
+
 func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
 	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
 		return false
@@ -74,6 +76,60 @@ func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiM
 		return false
 	}
 	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
+type commandModeOptions struct {
+	vertexImport       string
+	pluginCommandLine  bool
+	login              bool
+	antigravityLogin   bool
+	githubCopilotLogin bool
+	codeBuddyLogin     bool
+	codexLogin         bool
+	codexDeviceLogin   bool
+	claudeLogin        bool
+	kiloLogin          bool
+	iflowLogin         bool
+	iflowCookie        bool
+	gitlabLogin        bool
+	gitlabTokenLogin   bool
+	kimiLogin          bool
+	cursorLogin        bool
+	kiroLogin          bool
+	kiroGoogleLogin    bool
+	kiroAWSLogin       bool
+	kiroAWSAuthCode    bool
+	kiroImport         bool
+	kiroIDCLogin       bool
+	xaiLogin           bool
+	qoderLogin         bool
+}
+
+func isOneShotCommandMode(opts commandModeOptions) bool {
+	return strings.TrimSpace(opts.vertexImport) != "" ||
+		opts.pluginCommandLine ||
+		opts.login ||
+		opts.antigravityLogin ||
+		opts.githubCopilotLogin ||
+		opts.codeBuddyLogin ||
+		opts.codexLogin ||
+		opts.codexDeviceLogin ||
+		opts.claudeLogin ||
+		opts.kiloLogin ||
+		opts.iflowLogin ||
+		opts.iflowCookie ||
+		opts.gitlabLogin ||
+		opts.gitlabTokenLogin ||
+		opts.kimiLogin ||
+		opts.cursorLogin ||
+		opts.kiroLogin ||
+		opts.kiroGoogleLogin ||
+		opts.kiroAWSLogin ||
+		opts.kiroAWSAuthCode ||
+		opts.kiroImport ||
+		opts.kiroIDCLogin ||
+		opts.xaiLogin ||
+		opts.qoderLogin
 }
 
 // main is the entry point of the application.
@@ -584,7 +640,32 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	commandMode := isOneShotCommandMode(commandModeOptions{
+		vertexImport:       vertexImport,
+		pluginCommandLine:  pluginHost.HasTriggeredCommandLineFlags(),
+		login:              login,
+		antigravityLogin:   antigravityLogin,
+		githubCopilotLogin: githubCopilotLogin,
+		codeBuddyLogin:     codeBuddyLogin,
+		codexLogin:         codexLogin,
+		codexDeviceLogin:   codexDeviceLogin,
+		claudeLogin:        claudeLogin,
+		kiloLogin:          kiloLogin,
+		iflowLogin:         iflowLogin,
+		iflowCookie:        iflowCookie,
+		gitlabLogin:        gitlabLogin,
+		gitlabTokenLogin:   gitlabTokenLogin,
+		kimiLogin:          kimiLogin,
+		cursorLogin:        cursorLogin,
+		kiroLogin:          kiroLogin,
+		kiroGoogleLogin:    kiroGoogleLogin,
+		kiroAWSLogin:       kiroAWSLogin,
+		kiroAWSAuthCode:    kiroAWSAuthCode,
+		kiroImport:         kiroImport,
+		kiroIDCLogin:       kiroIDCLogin,
+		xaiLogin:           xaiLogin,
+		qoderLogin:         qoderLogin,
+	})
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
@@ -827,7 +908,6 @@ func main() {
 				defer kiro.StopGlobalRefreshManager()
 			}
 
-			cmd.StartService(cfg, configFilePath, password)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost)
 		}
 	}

@@ -393,6 +393,8 @@ nonstream-keepalive-interval: 0
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
 #   qoder:                            # plugin provider keys are supported for OAuth plugins
+#     - name: "auto"
+#       alias: "qoder-auto"
 #     - name: "qmodel_latest"
 #       alias: "qlatest"
 

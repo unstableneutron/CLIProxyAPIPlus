@@ -49,7 +49,7 @@ func TestRegisterLoadedAuthModelsRegistersCursorModelsAfterStoreLoad(t *testing.
 		t.Fatalf("models registered before startup registration = %+v, want none", got)
 	}
 
-	service.registerLoadedAuthModels(context.Background())
+	service.registerModelsForAuthBatch(context.Background(), manager.List())
 
 	models := reg.GetModelsForClient(auth.ID)
 	seenPrefixed := false
@@ -85,7 +85,7 @@ func TestRegisterLoadedAuthModelsAppliesConfiguredCursorPrefix(t *testing.T) {
 		t.Fatalf("manager.Load() error = %v", err)
 	}
 
-	service.registerLoadedAuthModels(context.Background())
+	service.registerModelsForAuthBatch(context.Background(), manager.List())
 
 	models := reg.GetModelsForClient(auth.ID)
 	ids := make(map[string]bool, len(models))
