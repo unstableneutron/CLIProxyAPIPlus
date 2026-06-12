@@ -26,6 +26,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Keep project-local skills under `.agents/skills/` so Codex, Claude, Pi, and other agents can share them.
 - Do not add new project skills under agent-specific directories like `.pi/skills/` or `.codex/skills/`; move or copy them into `.agents/skills/` instead.
 - When moving a skill, update helper commands and internal references so they point at `.agents/skills/<skill-name>/...`.
+- For upstream-sync PR resolution, normal-mode sync acceptance, release tags, GoReleaser, Docker publishes, or blocked-sync reports, use `.agents/skills/validating-upstream-sync/SKILL.md`.
 
 ## Architecture
 - `cmd/server/` — Server entrypoint
