@@ -14,8 +14,9 @@ name: Upstream Sync
 # Outcomes:
 #   1. Clean merge + build + test pass -> fast-forward main, create fork tag,
 #      and dispatch release/docker workflows.
-#   2. Conflicts, unsafe Plus head deltas, or gate failures -> push a sync
-#      branch and open/update a SINGLE tracking issue or manual sync PR.
+#   2. Conflicts, unsafe Plus head deltas, or gate failures -> push the
+#      stable pending overlay branch and open/update a SINGLE tracking issue
+#      or PR.
 #   3. workflow_dispatch by unstableneutron with force_pr=true -> open a PR
 #      for manual review.
 
@@ -75,31 +76,31 @@ jobs:
         id: auth
         run: |
           if [ "${GITHUB_REPOSITORY}" = "unstableneutron/CLIProxyAPIPlus" ] &&
-             [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] &&
-             [ "${GITHUB_ACTOR}" = "unstableneutron" ]; then
+             { [ "${GITHUB_EVENT_NAME}" = "schedule" ] || [ "${GITHUB_ACTOR}" = "unstableneutron" ]; }; then
             echo "can_create_pr=true" >> "$GITHUB_OUTPUT"
           else
             echo "can_create_pr=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Supersede prior sync PRs and stale branches
+      - name: Prune superseded sync PRs and stale branches
         if: steps.auth.outputs.can_create_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
+          PENDING_BRANCH=$(.github/scripts/upstream-sync.sh pending-overlay-branch)
           OPEN_PRS=$(gh pr list \
             --repo "${{ github.repository }}" \
             --state open \
-            --search 'in:title upstream-sync' \
             --json number,headRefName \
-            --jq '.[] | "\(.number) \(.headRefName)"' || true)
+            --jq '.[] | select(.headRefName | startswith("upstream-sync/")) | "\(.number) \(.headRefName)"' || true)
           if [ -n "${OPEN_PRS}" ]; then
             echo "${OPEN_PRS}" | while read -r NUM BRANCH; do
               [ -z "${NUM}" ] && continue
+              [ "${BRANCH}" != "${PENDING_BRANCH}" ] || continue
               echo "[i] Superseding PR #${NUM} (branch ${BRANCH})"
               gh pr close "${NUM}" --repo "${{ github.repository }}" \
-                --comment "Superseded by upcoming upstream-sync run." || true
+                --comment "Superseded by the stable pending overlay upstream-sync PR." || true
               if [ -n "${BRANCH}" ]; then
                 git push origin --delete "${BRANCH}" 2>/dev/null || true
               fi
@@ -111,6 +112,7 @@ jobs:
             | sed 's|refs/heads/||' \
             | while read -r BR; do
                 [ -z "${BR}" ] && continue
+                [ "${BR}" != "${PENDING_BRANCH}" ] || continue
                 echo "[i] Pruning orphan branch ${BR}"
                 git push origin --delete "${BR}" 2>/dev/null || true
               done
@@ -150,9 +152,9 @@ jobs:
         if: steps.plan.outputs.has_changes == 'true'
         id: branch
         run: |
-          BRANCH="upstream-sync/${{ steps.plan.outputs.safe_sync_id }}"
+          BRANCH=$(.github/scripts/upstream-sync.sh pending-overlay-branch)
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
-          git checkout -b "${BRANCH}"
+          git checkout -B "${BRANCH}"
 
       - name: Merge original release base
         if: steps.plan.outputs.has_changes == 'true'
@@ -318,9 +320,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TITLE="chore(upstream-sync): sync original ${{ steps.plan.outputs.original_tag }} and Plus ${{ steps.plan.outputs.plus_tag }}"
+          TITLE="chore(upstream-sync): pending overlay for original ${{ steps.plan.outputs.original_tag }} and Plus ${{ steps.plan.outputs.plus_tag }}"
           BODY=$(cat <<'EOF'
-          ## Upstream sync (force_pr)
+          ## Upstream sync pending overlay
 
           - Original repository: `${{ steps.plan.outputs.original_repository }}`
           - Original tag: `${{ steps.plan.outputs.original_tag }}`
@@ -339,19 +341,35 @@ jobs:
           EOF
           )
           set +e
-          PR_URL=$(gh pr create \
-            --base main \
+          PR_NUM=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state open \
             --head "${{ steps.branch.outputs.name }}" \
-            --title "${TITLE}" \
-            --body "${BODY}" 2>&1)
-          PR_EXIT=$?
-          set -e
-          echo "${PR_URL}"
-          if [ $PR_EXIT -ne 0 ]; then exit $PR_EXIT; fi
-          PR_NUM=$(echo "${PR_URL}" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+$' || true)
+            --json number \
+            --jq '.[0].number' 2>/dev/null || true)
           if [ -n "${PR_NUM}" ]; then
-            gh pr edit "${PR_NUM}" --add-label "${PR_LABEL}" 2>&1 || true
+            gh pr edit "${PR_NUM}" \
+              --repo "${{ github.repository }}" \
+              --title "${TITLE}" \
+              --body "${BODY}" \
+              --add-label "${PR_LABEL}" 2>&1
+            PR_EXIT=$?
+          else
+            PR_URL=$(gh pr create \
+              --repo "${{ github.repository }}" \
+              --base main \
+              --head "${{ steps.branch.outputs.name }}" \
+              --title "${TITLE}" \
+              --body "${BODY}" 2>&1)
+            PR_EXIT=$?
+            echo "${PR_URL}"
+            PR_NUM=$(echo "${PR_URL}" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+$' || true)
+            if [ -n "${PR_NUM}" ]; then
+              gh pr edit "${PR_NUM}" --repo "${{ github.repository }}" --add-label "${PR_LABEL}" 2>&1 || true
+            fi
           fi
+          set -e
+          if [ $PR_EXIT -ne 0 ]; then exit $PR_EXIT; fi
 
       - name: Update tracking issue on conflicts or gate failure
         if: |
@@ -386,7 +404,7 @@ jobs:
             --repo "${{ github.repository }}" 2>/dev/null || true
 
           NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
-          COMMENT_BODY=$(printf '**New blocked sync attempt** (%s)\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Plus head delta paths: `%s`\n- Unsafe Plus head paths: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n### Conflict files\n\n#### Original merge\n%s\n\n#### Plus release overlay\n%s\n\n#### Plus head delta\n%s\n\n### Resolution guidance\n\nDo not resolve conflicts by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Treat Plus untagged head deltas as safe only when they touch Plus-owned paths.\n\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
+          COMMENT_BODY=$(printf '**New pending overlay sync attempt** (%s)\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Plus head delta paths: `%s`\n- Unsafe Plus head paths: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n### Conflict files\n\n#### Original merge\n%s\n\n#### Plus release overlay\n%s\n\n#### Plus head delta\n%s\n\n### Resolution guidance\n\nDo not resolve conflicts by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Treat Plus untagged head deltas as safe only when they touch Plus-owned paths.\n\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
             "${NOW}" \
             "${{ steps.plan.outputs.original_repository }}" \
             "${{ steps.plan.outputs.original_tag }}" \
@@ -408,14 +426,14 @@ jobs:
             "${BUILD_TAIL:-<no build log captured>}" \
             "${TEST_TAIL:-<no test log captured>}")
 
-          ISSUE_TITLE="upstream-sync blocked: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }} needs maintainer attention"
-          INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This issue or PR tracks the blocked state. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\nEach subsequent failed run will append a comment with the latest refs and gate output.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this tracker.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
+          ISSUE_TITLE="upstream-sync pending overlay: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }}"
+          INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This pending overlay tracker is updated in place with the latest refs and gate output. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this tracker.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
           ISSUE_BODY="${INTRO}${COMMENT_BODY}"
 
           write_step_summary() {
             echo "[i] Writing blocked sync report to workflow summary."
             {
-              echo "## Upstream sync blocked"
+              echo "## Upstream sync pending overlay"
               echo
               printf '%s\n' "${ISSUE_BODY}"
             } >> "${GITHUB_STEP_SUMMARY}"
@@ -444,6 +462,11 @@ jobs:
               --jq '.[0].number' 2>/dev/null || true)
             if [ -n "${PR_NUM}" ]; then
               echo "[i] Updating existing sync PR #${PR_NUM}"
+              gh pr edit "${PR_NUM}" \
+                --repo "${{ github.repository }}" \
+                --title "${ISSUE_TITLE}" \
+                --body "${ISSUE_BODY}" \
+                --add-label "${PR_LABEL}" 2>&1 || true
               gh pr comment "${PR_NUM}" \
                 --repo "${{ github.repository }}" \
                 --body "${COMMENT_BODY}" || write_step_summary

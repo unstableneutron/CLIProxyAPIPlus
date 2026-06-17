@@ -215,6 +215,15 @@ test_plus_merge_can_update_plus_owned_paths() {
   fi
 }
 
+test_pending_overlay_branch_name_is_stable() {
+  local branch
+  branch=$("${HELPER}" pending-overlay-branch)
+
+  if [ "${branch}" != "upstream-sync/pending-overlay" ]; then
+    fail "expected stable pending overlay branch, got: ${branch}"
+  fi
+}
+
 main() {
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
@@ -222,6 +231,7 @@ main() {
   test_blocks_unsafe_plus_head_delta
   test_original_merge_protects_plus_owned_paths
   test_plus_merge_can_update_plus_owned_paths
+  test_pending_overlay_branch_name_is_stable
   echo "[OK] upstream-sync helper tests passed"
 }
 

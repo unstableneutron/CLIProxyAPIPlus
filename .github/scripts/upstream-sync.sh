@@ -7,6 +7,7 @@ PLUS_REMOTE=${PLUS_REMOTE:-plus-upstream}
 ORIGINAL_REPOSITORY=${ORIGINAL_REPOSITORY:-router-for-me/CLIProxyAPI}
 PLUS_REPOSITORY=${PLUS_REPOSITORY:-kaitranntt/CLIProxyAPIPlus}
 TRACKING_ISSUE_LABEL=${TRACKING_ISSUE_LABEL:-upstream-sync-blocked}
+PENDING_OVERLAY_BRANCH=${PENDING_OVERLAY_BRANCH:-upstream-sync/pending-overlay}
 
 PLUS_OWNED_PREFIXES=(
   internal/auth/codebuddy/
@@ -512,6 +513,10 @@ cmd_classify_paths() {
   fi
 }
 
+cmd_pending_overlay_branch() {
+  printf '%s\n' "${PENDING_OVERLAY_BRANCH}"
+}
+
 main() {
   local cmd=${1:-}
   shift || true
@@ -520,7 +525,8 @@ main() {
     merge-ref) cmd_merge_ref "$@" ;;
     record-state) cmd_record_state "$@" ;;
     classify-paths) cmd_classify_paths "$@" ;;
-    *) die "usage: $0 {plan|merge-ref|record-state|classify-paths}" ;;
+    pending-overlay-branch) cmd_pending_overlay_branch "$@" ;;
+    *) die "usage: $0 {plan|merge-ref|record-state|classify-paths|pending-overlay-branch}" ;;
   esac
 }
 
