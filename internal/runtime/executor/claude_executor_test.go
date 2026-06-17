@@ -636,6 +636,36 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	}
 }
 
+func TestSanitizeClaudeWebSearchDomains(t *testing.T) {
+	// Mirrors the litellm payload from issue #2681: a non-empty allowed_domains
+	// alongside an empty blocked_domains, which Anthropic rejects as ambiguous.
+	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["anthropic.com"],"blocked_domains":[],"max_uses":8}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("empty blocked_domains should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.allowed_domains").Array(); len(got) != 1 || got[0].String() != "anthropic.com" {
+		t.Fatalf("non-empty allowed_domains should be preserved: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.max_uses").Int(); got != 8 {
+		t.Fatalf("max_uses should be preserved: got %d", got)
+	}
+}
+
+func TestSanitizeClaudeWebSearchDomains_LeavesNonBuiltinAndNonEmpty(t *testing.T) {
+	// Empty arrays on non-web_search tools must be left untouched.
+	input := []byte(`{"tools":[{"type":"custom","name":"x","blocked_domains":[]},{"type":"web_search_20250305","name":"web_search","blocked_domains":["evil.com"]}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if !gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("non-web_search tool fields should be untouched: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.blocked_domains").Array(); len(got) != 1 || got[0].String() != "evil.com" {
+		t.Fatalf("non-empty blocked_domains should be preserved: %s", string(out))
+	}
+}
+
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
@@ -2096,7 +2126,10 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -2191,8 +2224,7 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 // must pass through unchanged) and a lowercase tool that we forward-rename.
 // Before the fix, triggering ANY forward rename caused the reverse pass to
 // lowercase every TitleCase tool in the response using a global reverse map,
-// corrupting tool names the client originally sent in TitleCase (notably Amp
-// CLI's `Bash`, which its registry lookup cannot find as `bash`).
+// corrupting tool names the client originally sent in TitleCase.
 func TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed(t *testing.T) {
 	body := []byte(`{"tools":[` +
 		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +

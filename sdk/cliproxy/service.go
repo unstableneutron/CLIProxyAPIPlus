@@ -13,15 +13,12 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
@@ -145,16 +142,6 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
-}
-
-// GetWatcher returns the underlying WatcherWrapper instance.
-// This allows external components (e.g., RefreshManager) to interact with the watcher.
-// Returns nil if the service or watcher is not initialized.
-func (s *Service) GetWatcher() *WatcherWrapper {
-	if s == nil {
-		return nil
-	}
-	return s.watcher
 }
 
 func (s *Service) registerPluginAuthParser() {
@@ -340,20 +327,10 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 }
 
 func modelRegistrationPhase(auth *coreauth.Auth) int {
-	if isConfigAPIKeyAuth(auth) {
+	if coreauth.IsConfigAPIKeyAuth(auth) {
 		return modelRegistrationPhaseConfigAPIKey
 	}
 	return modelRegistrationPhaseOther
-}
-
-func isConfigAPIKeyAuth(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	if strings.TrimSpace(auth.Attributes["api_key"]) == "" {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(auth.Attributes["source"])), "config:")
 }
 
 func modelRegistrationCategory(auth *coreauth.Auth) string {
@@ -444,15 +421,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
-		sdkAuth.NewGitLabAuthenticator(),
 	)
-}
-
-func applyKiroRuntimeConfig(cfg *config.Config) {
-	kiroauth.InitRateLimiterConfig(cfg)
-	kiroauth.InitSystemPromptInjectConfig(cfg)
-	kiroauth.InitTruncationDetectorConfig(cfg)
-	kiroauth.InitExtractThinkingTagConfig(cfg)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -761,6 +730,9 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")
 	}
+	if strings.EqualFold(provider, "xai") {
+		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
+	}
 	s.syncPluginRuntime(ctx)
 }
 
@@ -770,16 +742,6 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	}
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
-}
-
-func (s *Service) applyUsageStatisticsConfig(cfg *config.Config) {
-	if cfg == nil {
-		internalusage.SetStatisticsEnabled(false)
-		redisqueue.SetUsageStatisticsEnabled(false)
-		return
-	}
-	internalusage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 }
 
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
@@ -979,23 +941,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
-	case "kiro":
-		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
-	case "kilo":
-		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(s.cfg))
-	case "cursor":
-		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(s.cfg))
-	case "github-copilot":
-		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
-	case "codebuddy":
-		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
-	case "gitlab":
-		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
-	case "commandcode":
-		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(s.cfg))
-	case "qoder":
-		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1131,7 +1077,15 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 			activeAuthKind = "apikey"
 		}
 	}
-	activeExcluded := s.effectiveAuthExcludedModels(activeAuth, providerKey, activeAuthKind, excluded)
+	activeExcluded := s.oauthExcludedModels(providerKey, activeAuthKind)
+	if a == activeAuth && len(activeExcluded) == 0 {
+		activeExcluded = excluded
+	}
+	if activeAuth.Attributes != nil {
+		if val, ok := activeAuth.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+			activeExcluded = strings.Split(val, ",")
+		}
+	}
 	models := applyExcludedModels(result.Models, activeExcluded)
 	models = applyOAuthModelAlias(s.cfg, providerKey, activeAuthKind, models)
 	if len(models) > 0 {
@@ -1235,7 +1189,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		forceReplaceAuths: true,
 		auths:             auths,
 	})
-	ctx := context.Background()
+	ctx := coreauth.WithSkipPersist(context.Background())
 	s.registerConfigAPIKeyAuths(ctx, newCfg)
 	s.syncPluginRuntime(ctx)
 }
@@ -1260,7 +1214,7 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	tasks := make([]modelRegistrationTask, 0, len(auths))
 	for _, auth := range auths {
-		if !isConfigAPIKeyAuth(auth) {
+		if !coreauth.IsConfigAPIKeyAuth(auth) {
 			continue
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(ctx, auth)
@@ -1460,7 +1414,6 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	s.applyUsageStatisticsConfig(s.cfg)
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
@@ -1483,7 +1436,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
-	applyKiroRuntimeConfig(s.cfg)
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {
@@ -1779,7 +1731,14 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
-	excluded := s.effectiveAuthExcludedModels(a, provider, authKind, nil)
+	excluded := s.oauthExcludedModels(provider, authKind)
+	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
+	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
+	if a.Attributes != nil {
+		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+			excluded = strings.Split(val, ",")
+		}
+	}
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
 		return
 	}
@@ -1816,6 +1775,7 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		models = registry.GetAntigravityModels()
+		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -1859,51 +1819,6 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
-		models = applyExcludedModels(models, excluded)
-	case "cursor":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		models = executor.FetchCursorModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "github-copilot":
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "kiro":
-		models = s.fetchKiroModels(a)
-		// Filter out agentic variants when system prompt injection is disabled,
-		// since the agentic prompt is delivered through system prompt injection.
-		if !kirocommon.IsSystemPromptInjectEnabled() {
-			models = filterAgenticVariants(models)
-		}
-		models = applyExcludedModels(models, excluded)
-	case "kilo":
-		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
-		models = applyExcludedModels(models, excluded)
-	case "gitlab":
-		models = executor.GitLabModelsFromAuth(a)
-		models = applyExcludedModels(models, excluded)
-	case "codebuddy":
-		models = registry.GetCodeBuddyModels()
-		models = applyExcludedModels(models, excluded)
-	case "commandcode":
-		if entry := s.resolveConfigCommandCodeKey(a); entry != nil && len(entry.Models) > 0 {
-			models = buildCommandCodeConfigModels(entry)
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			models = executor.FetchCommandCodeModels(ctx, a, s.cfg)
-			cancel()
-			if entry := s.resolveConfigCommandCodeKey(a); entry != nil && authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "qoder":
-		models = executor.FetchQoderModels(context.Background(), a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -2172,32 +2087,6 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	return nil
 }
 
-func (s *Service) resolveConfigCommandCodeKey(auth *coreauth.Auth) *config.CommandCodeKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.CommandCodeKey {
-		entry := &s.cfg.CommandCodeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
-}
-
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 	cfg := s.cfg
 	if cfg == nil {
@@ -2209,47 +2098,6 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
-}
-
-func (s *Service) effectiveAuthExcludedModels(auth *coreauth.Auth, provider, authKind string, fallback []string) []string {
-	return mergeExcludedModels(
-		fallback,
-		s.oauthExcludedModels(provider, authKind),
-		excludedModelsFromAuthAttributes(auth),
-	)
-}
-
-func excludedModelsFromAuthAttributes(auth *coreauth.Auth) []string {
-	if auth == nil || auth.Attributes == nil {
-		return nil
-	}
-	value := strings.TrimSpace(auth.Attributes["excluded_models"])
-	if value == "" {
-		return nil
-	}
-	return strings.Split(value, ",")
-}
-
-func mergeExcludedModels(lists ...[]string) []string {
-	seen := make(map[string]struct{})
-	out := make([]string, 0)
-	for _, list := range lists {
-		for _, item := range list {
-			trimmed := strings.ToLower(strings.TrimSpace(item))
-			if trimmed == "" {
-				continue
-			}
-			if _, exists := seen[trimmed]; exists {
-				continue
-			}
-			seen[trimmed] = struct{}{}
-			out = append(out, trimmed)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -2488,13 +2336,6 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
 }
 
-func buildCommandCodeConfigModels(entry *config.CommandCodeKey) []*ModelInfo {
-	if entry == nil {
-		return nil
-	}
-	return buildConfigModels(entry.Models, "commandcode", "commandcode")
-}
-
 func rewriteModelInfoName(name, oldID, newID string) string {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -2623,245 +2464,4 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 	}
 	return out
-}
-
-// fetchKiroModels attempts to dynamically fetch Kiro models from the API.
-// If dynamic fetch fails, it falls back to static registry.GetKiroModels().
-func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
-	if a == nil {
-		log.Debug("kiro: auth is nil, using static models")
-		return registry.GetKiroModels()
-	}
-
-	// Extract token data from auth attributes
-	tokenData := s.extractKiroTokenData(a)
-	if tokenData == nil || tokenData.AccessToken == "" {
-		log.Debug("kiro: no valid token data in auth, using static models")
-		return registry.GetKiroModels()
-	}
-
-	// Create KiroAuth instance
-	kAuth := kiroauth.NewKiroAuth(s.cfg)
-	if kAuth == nil {
-		log.Warn("kiro: failed to create KiroAuth instance, using static models")
-		return registry.GetKiroModels()
-	}
-
-	// Use timeout context for API call
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Attempt to fetch dynamic models
-	apiModels, err := kAuth.ListAvailableModels(ctx, tokenData)
-	if err != nil {
-		log.Warnf("kiro: failed to fetch dynamic models: %v, using static models", err)
-		return registry.GetKiroModels()
-	}
-
-	if len(apiModels) == 0 {
-		log.Debug("kiro: API returned no models, using static models")
-		return registry.GetKiroModels()
-	}
-
-	// Convert API models to ModelInfo
-	models := convertKiroAPIModels(apiModels)
-
-	baseCount := len(models)
-
-	// Generate agentic variants (only when kiro-system-prompt-inject-enable is on).
-	models = generateKiroAgenticVariants(models)
-
-	if len(models) > baseCount {
-		log.Infof("kiro: fetched %d models from API (+%d agentic variants)", baseCount, len(models)-baseCount)
-	} else {
-		log.Infof("kiro: fetched %d models from API", baseCount)
-	}
-	return models
-}
-
-// extractKiroTokenData extracts KiroTokenData from auth attributes and metadata.
-// It supports both config-based tokens (stored in Attributes) and file-based tokens (stored in Metadata).
-func (s *Service) extractKiroTokenData(a *coreauth.Auth) *kiroauth.KiroTokenData {
-	if a == nil {
-		return nil
-	}
-
-	var accessToken, profileArn, refreshToken string
-
-	// Priority 1: Try to get from Attributes (config.yaml source)
-	if a.Attributes != nil {
-		accessToken = strings.TrimSpace(a.Attributes["access_token"])
-		profileArn = strings.TrimSpace(a.Attributes["profile_arn"])
-		refreshToken = strings.TrimSpace(a.Attributes["refresh_token"])
-	}
-
-	// Priority 2: If not found in Attributes, try Metadata (JSON file source)
-	if accessToken == "" && a.Metadata != nil {
-		if at, ok := a.Metadata["access_token"].(string); ok {
-			accessToken = strings.TrimSpace(at)
-		}
-		if pa, ok := a.Metadata["profile_arn"].(string); ok {
-			profileArn = strings.TrimSpace(pa)
-		}
-		if rt, ok := a.Metadata["refresh_token"].(string); ok {
-			refreshToken = strings.TrimSpace(rt)
-		}
-	}
-
-	// access_token is required
-	if accessToken == "" {
-		return nil
-	}
-
-	return &kiroauth.KiroTokenData{
-		AccessToken:  accessToken,
-		ProfileArn:   profileArn,
-		RefreshToken: refreshToken,
-	}
-}
-
-// convertKiroAPIModels converts Kiro API models to ModelInfo slice.
-func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
-	if len(apiModels) == 0 {
-		return nil
-	}
-
-	now := time.Now().Unix()
-	models := make([]*ModelInfo, 0, len(apiModels))
-
-	for _, m := range apiModels {
-		if m == nil || m.ModelID == "" {
-			continue
-		}
-
-		// Create model ID with kiro- prefix
-		modelID := "kiro-" + normalizeKiroModelID(m.ModelID)
-
-		info := &ModelInfo{
-			ID:                  modelID,
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         formatKiroDisplayName(m.ModelName, m.RateMultiplier),
-			Description:         m.Description,
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
-		}
-
-		if m.MaxInputTokens > 0 {
-			info.ContextLength = m.MaxInputTokens
-		}
-
-		models = append(models, info)
-	}
-
-	return models
-}
-
-// normalizeKiroModelID normalizes a Kiro model ID by converting dots to dashes
-// and removing common prefixes.
-func normalizeKiroModelID(modelID string) string {
-	// Remove common prefixes
-	modelID = strings.TrimPrefix(modelID, "anthropic.")
-	modelID = strings.TrimPrefix(modelID, "amazon.")
-
-	// Replace dots with dashes for consistency
-	modelID = strings.ReplaceAll(modelID, ".", "-")
-
-	// Replace underscores with dashes
-	modelID = strings.ReplaceAll(modelID, "_", "-")
-
-	return strings.ToLower(modelID)
-}
-
-// formatKiroDisplayName formats the display name with rate multiplier info.
-func formatKiroDisplayName(modelName string, rateMultiplier float64) string {
-	if modelName == "" {
-		return ""
-	}
-
-	displayName := "Kiro " + modelName
-	if rateMultiplier > 0 && rateMultiplier != 1.0 {
-		displayName += fmt.Sprintf(" (%.1fx credit)", rateMultiplier)
-	}
-
-	return displayName
-}
-
-// filterAgenticVariants removes -agentic model variants from the list.
-// Used when system prompt injection is disabled, since the agentic prompt
-// is delivered via system prompt injection and would have no effect.
-func filterAgenticVariants(models []*ModelInfo) []*ModelInfo {
-	result := make([]*ModelInfo, 0, len(models))
-	for _, m := range models {
-		if m != nil && strings.HasSuffix(m.ID, "-agentic") {
-			continue
-		}
-		result = append(result, m)
-	}
-	return result
-}
-
-// generateKiroAgenticVariants generates agentic variants for Kiro models.
-// Agentic variants share the backend model ID but apply a wrapped system
-// prompt for coding agents; that wrapping only happens when
-// kiro-system-prompt-inject-enable is on. When it's off, exposing "-agentic"
-// IDs in /v1/models is misleading (the flag gates the actual behavior), so
-// we return the input list unchanged.
-func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return models
-	}
-
-	if !kirocommon.IsSystemPromptInjectEnabled() {
-		return models
-	}
-
-	result := make([]*ModelInfo, 0, len(models)*2)
-	result = append(result, models...)
-
-	for _, m := range models {
-		if m == nil {
-			continue
-		}
-
-		// Skip if already an agentic variant
-		if strings.HasSuffix(m.ID, "-agentic") {
-			continue
-		}
-
-		// Skip auto models from agentic variant generation
-		if strings.Contains(m.ID, "-auto") {
-			continue
-		}
-
-		// Create agentic variant
-		agentic := &ModelInfo{
-			ID:                  m.ID + "-agentic",
-			Object:              m.Object,
-			Created:             m.Created,
-			OwnedBy:             m.OwnedBy,
-			Type:                m.Type,
-			DisplayName:         m.DisplayName + " (Agentic)",
-			Description:         m.Description + " - Optimized for coding agents (chunked writes)",
-			ContextLength:       m.ContextLength,
-			MaxCompletionTokens: m.MaxCompletionTokens,
-		}
-
-		// Copy thinking support if present
-		if m.Thinking != nil {
-			agentic.Thinking = &registry.ThinkingSupport{
-				Min:            m.Thinking.Min,
-				Max:            m.Thinking.Max,
-				ZeroAllowed:    m.Thinking.ZeroAllowed,
-				DynamicAllowed: m.Thinking.DynamicAllowed,
-			}
-		}
-
-		result = append(result, agentic)
-	}
-
-	return result
 }

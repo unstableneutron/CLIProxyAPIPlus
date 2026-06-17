@@ -23,7 +23,7 @@ import (
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
-	wsReqBody := buildCodexWebsocketRequestBody(body, "wss://chatgpt.com/backend-api/codex/responses")
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
@@ -36,124 +36,6 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
-	}
-}
-
-func TestBuildCodexWebsocketRequestBodyStripsTokenLimitsOnlyForChatGPTBackend(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","input":[],"max_output_tokens":123,"max_completion_tokens":456,"max_tokens":789}`)
-
-	chatgptPayload := buildCodexWebsocketRequestBody(body, "wss://chatgpt.com/backend-api/codex/responses")
-
-	if got := gjson.GetBytes(chatgptPayload, "type").String(); got != "response.create" {
-		t.Fatalf("type = %s, want response.create", got)
-	}
-	for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
-		if gjson.GetBytes(chatgptPayload, field).Exists() {
-			t.Fatalf("%s should be stripped for ChatGPT Codex websocket payload: %s", field, chatgptPayload)
-		}
-	}
-	if got := gjson.GetBytes(chatgptPayload, "model").String(); got != "gpt-5-codex" {
-		t.Fatalf("model = %s, want gpt-5-codex", got)
-	}
-
-	customPayload := buildCodexWebsocketRequestBody(body, "wss://example.test/backend-api/codex/responses")
-
-	for _, field := range []string{"max_output_tokens", "max_completion_tokens", "max_tokens"} {
-		if !gjson.GetBytes(customPayload, field).Exists() {
-			t.Fatalf("%s should be preserved for non-ChatGPT websocket payload: %s", field, customPayload)
-		}
-	}
-}
-
-func TestCodexWebsocketsExecuteStreamRewritesPayloadModelToExecutionModel(t *testing.T) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	capturedPayload := make(chan []byte, 1)
-	capturedQuery := make(chan map[string]string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			t.Fatalf("request path = %s, want /responses", r.URL.Path)
-		}
-		query := r.URL.Query()
-		capturedQuery <- map[string]string{
-			"api-version":           query.Get("api-version"),
-			"deployment":            query.Get("deployment"),
-			"region":                query.Get("region"),
-			"azure-resource-bucket": query.Get("azure-resource-bucket"),
-		}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade websocket: %v", err)
-		}
-		defer func() { _ = conn.Close() }()
-
-		msgType, payload, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read upstream websocket message: %v", err)
-		}
-		if msgType != websocket.TextMessage {
-			t.Fatalf("message type = %d, want text", msgType)
-		}
-		capturedPayload <- bytes.Clone(payload)
-
-		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","output":[]}}`)); errWrite != nil {
-			t.Fatalf("write created websocket message: %v", errWrite)
-		}
-		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
-		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
-			t.Fatalf("write completed websocket message: %v", errWrite)
-		}
-	}))
-	defer server.Close()
-
-	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":                     "sk-test",
-		"base_url":                    server.URL,
-		"query:api-version":           "preview",
-		"query:deployment":            "gpt-5.4-nomoderation",
-		"query:region":                "global",
-		"query:azure-resource-bucket": "internal-productivity",
-	}}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.4-nomoderation",
-		Payload: []byte(`{"model":"prototype/gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
-	}
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
-
-	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
-	}
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error = %v", chunk.Err)
-		}
-	}
-
-	select {
-	case payload := <-capturedPayload:
-		if got := gjson.GetBytes(payload, "model").String(); got != "gpt-5.4-nomoderation" {
-			t.Fatalf("upstream model = %s, want gpt-5.4-nomoderation; payload=%s", got, payload)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream websocket payload")
-	}
-
-	select {
-	case query := <-capturedQuery:
-		want := map[string]string{
-			"api-version":           "preview",
-			"deployment":            "gpt-5.4-nomoderation",
-			"region":                "global",
-			"azure-resource-bucket": "internal-productivity",
-		}
-		for key, wantValue := range want {
-			if got := query[key]; got != wantValue {
-				t.Fatalf("query %s = %q, want %q", key, got, wantValue)
-			}
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream websocket query")
 	}
 }
 
@@ -211,8 +93,10 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsExecuteReturnsOnResponseFailed(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDownstreamWebsocket(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -225,39 +109,53 @@ func TestCodexWebsocketsExecuteReturnsOnResponseFailed(t *testing.T) {
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
-		failed := []byte(`{"type":"response.failed","response":{"id":"resp-1","status":"failed","error":{"code":"server_error","message":"upstream failed"}}}`)
-		if errWrite := conn.WriteMessage(websocket.TextMessage, failed); errWrite != nil {
-			t.Errorf("write failed websocket message: %v", errWrite)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, delta); errWrite != nil {
+			t.Errorf("write delta websocket message: %v", errWrite)
 			return
 		}
-		<-r.Context().Done()
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+			return
+		}
 	}))
 	defer server.Close()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err := exec.Execute(ctx, auth, req, opts)
-	if err == nil {
-		t.Fatal("expected response.failed error")
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
 	}
-	if got := statusCodeFromTestError(t, err); got != http.StatusInternalServerError {
-		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusInternalServerError, err)
-	}
-	if !strings.Contains(err.Error(), "upstream failed") {
-		t.Fatalf("error missing upstream message: %v", err)
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before first chunk")
+		}
+		if chunk.Err != nil {
+			t.Fatalf("first chunk error = %v", chunk.Err)
+		}
+		if !bytes.Equal(bytes.TrimSpace(chunk.Payload), delta) {
+			t.Fatalf("first chunk = %q, want raw upstream websocket payload %q", chunk.Payload, delta)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first stream chunk")
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
+func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsocket(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	errorPayload := []byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -270,49 +168,50 @@ func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
 			t.Errorf("read upstream websocket message: %v", errRead)
 			return
 		}
-		failed := []byte(`{"type":"response.failed","response":{"id":"resp-1","status":"failed","error":{"code":"server_error","message":"upstream failed"}}}`)
-		if errWrite := conn.WriteMessage(websocket.TextMessage, failed); errWrite != nil {
-			t.Errorf("write failed websocket message: %v", errWrite)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, errorPayload); errWrite != nil {
+			t.Errorf("write error websocket message: %v", errWrite)
 			return
 		}
-		<-r.Context().Done()
 	}))
 	defer server.Close()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
-	auth := &cliproxyauth.Auth{ID: "auth-1", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
 	}
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 
-	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
 	}
 
-	var gotFailed bool
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case chunk, ok := <-streamResult.Chunks:
-			if !ok {
-				if !gotFailed {
-					t.Fatal("stream closed without forwarding response.failed")
-				}
-				return
-			}
-			if chunk.Err != nil {
-				t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
-			}
-			if strings.Contains(string(chunk.Payload), "response.failed") {
-				gotFailed = true
-			}
-		case <-timer.C:
-			t.Fatal("timed out waiting for stream to close after response.failed")
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before error chunk")
 		}
+		if len(bytes.TrimSpace(chunk.Payload)) != 0 {
+			t.Fatalf("error chunk payload = %q, want empty", chunk.Payload)
+		}
+		if chunk.Err == nil {
+			t.Fatal("error chunk Err = nil, want upstream error")
+		}
+		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
+		}
+		if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for error stream chunk")
 	}
 }
 
@@ -969,53 +868,5 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
-	}
-}
-
-func TestNewProxyAwareWebsocketDialerUsesCodexUTLSForDirectWSS(t *testing.T) {
-	t.Parallel()
-
-	dialer := newProxyAwareWebsocketDialer(
-		&config.Config{},
-		&cliproxyauth.Auth{Provider: "codex"},
-	)
-
-	if dialer.NetDialTLSContext == nil {
-		t.Fatal("expected codex websocket dialer to install uTLS NetDialTLSContext")
-	}
-	if dialer.Proxy != nil {
-		t.Fatal("expected codex websocket uTLS dialer to bypass gorilla proxy wrapping")
-	}
-}
-
-func TestNewProxyAwareWebsocketDialerUsesCodexUTLSWithConfiguredProxy(t *testing.T) {
-	t.Parallel()
-
-	dialer := newProxyAwareWebsocketDialer(
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:8080"}},
-		&cliproxyauth.Auth{Provider: "codex"},
-	)
-
-	if dialer.NetDialTLSContext == nil {
-		t.Fatal("expected codex websocket dialer to install uTLS NetDialTLSContext with configured proxy")
-	}
-	if dialer.Proxy != nil {
-		t.Fatal("expected codex websocket uTLS dialer to own proxy tunneling")
-	}
-}
-
-func TestNewProxyAwareWebsocketDialerLeavesNonCodexTLSStandard(t *testing.T) {
-	t.Parallel()
-
-	dialer := newProxyAwareWebsocketDialer(
-		&config.Config{},
-		&cliproxyauth.Auth{Provider: "openai"},
-	)
-
-	if dialer.NetDialTLSContext != nil {
-		t.Fatal("expected non-codex websocket dialer to keep standard TLS path")
-	}
-	if dialer.Proxy == nil {
-		t.Fatal("expected non-codex websocket dialer to keep environment proxy behavior")
 	}
 }
