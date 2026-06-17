@@ -320,6 +320,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          gh label create "${PR_LABEL}" \
+            --color "1D76DB" \
+            --description "Automated upstream sync PR." \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+
           TITLE="chore(upstream-sync): pending overlay for original ${{ steps.plan.outputs.original_tag }} and Plus ${{ steps.plan.outputs.plus_tag }}"
           BODY=$(cat <<'EOF'
           ## Upstream sync pending overlay
@@ -401,6 +406,10 @@ jobs:
           gh label create "${TRACKING_ISSUE_LABEL}" \
             --color "B60205" \
             --description "Automated upstream sync is blocked; needs maintainer attention." \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+          gh label create "${PR_LABEL}" \
+            --color "1D76DB" \
+            --description "Automated upstream sync PR." \
             --repo "${{ github.repository }}" 2>/dev/null || true
 
           NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
