@@ -37,6 +37,9 @@ import (
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
+	codexResponsesWebsocketPongWait        = 90 * time.Second
+	codexResponsesWebsocketPingPeriod      = 30 * time.Second
+	codexResponsesWebsocketPingWriteTO     = 10 * time.Second
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
 
@@ -144,14 +147,27 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 }
 
 func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
+	s.configureConnWithTimings(conn, codexResponsesWebsocketPongWait, codexResponsesWebsocketPingWriteTO)
+}
+
+func (s *codexWebsocketSession) configureConnWithTimings(conn *websocket.Conn, pongWait time.Duration, writeTimeout time.Duration) {
 	if s == nil || conn == nil {
 		return
+	}
+	if pongWait > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(pongWait))
+		})
+	}
+	if writeTimeout <= 0 {
+		writeTimeout = codexResponsesWebsocketPingWriteTO
 	}
 	conn.SetPingHandler(func(appData string) error {
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
 		// Reply pongs from the same write lock to avoid concurrent writes.
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeTimeout))
 	})
 }
 
@@ -1501,11 +1517,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.connMu.Unlock()
 	if conn != nil {
 		if readerConn != conn {
-			sess.connMu.Lock()
-			sess.readerConn = conn
-			sess.connMu.Unlock()
-			sess.configureConn(conn)
-			go e.readUpstreamLoop(sess, conn)
+			e.startUpstreamConnLoops(sess, conn)
 		}
 		return conn, nil, nil
 	}
@@ -1530,18 +1542,36 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
-	sess.configureConn(conn)
-	go e.readUpstreamLoop(sess, conn)
+	e.startUpstreamConnLoops(sess, conn)
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, resp, nil
 }
 
+func (e *CodexWebsocketsExecutor) startUpstreamConnLoops(sess *codexWebsocketSession, conn *websocket.Conn) {
+	if e == nil || sess == nil || conn == nil {
+		return
+	}
+	sess.connMu.Lock()
+	sess.readerConn = conn
+	sess.connMu.Unlock()
+
+	sess.configureConn(conn)
+	go e.readUpstreamLoop(sess, conn)
+	go e.pingUpstreamLoop(sess, conn)
+}
+
 func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, conn *websocket.Conn) {
+	e.readUpstreamLoopWithPongWait(sess, conn, codexResponsesWebsocketPongWait)
+}
+
+func (e *CodexWebsocketsExecutor) readUpstreamLoopWithPongWait(sess *codexWebsocketSession, conn *websocket.Conn, pongWait time.Duration) {
 	if e == nil || sess == nil || conn == nil {
 		return
 	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
+		if pongWait > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		}
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
 			sess.activeMu.Lock()
@@ -1557,7 +1587,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				sess.clearActive(ch)
 				close(ch)
 			}
-			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
+			reason := "upstream_disconnected"
+			if isCodexWebsocketTimeoutError(errRead) {
+				reason = "upstream_read_timeout"
+			}
+			e.invalidateUpstreamConn(sess, conn, reason, errRead)
 			return
 		}
 
@@ -1595,6 +1629,54 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		case <-done:
 		}
 	}
+}
+
+func (e *CodexWebsocketsExecutor) pingUpstreamLoop(sess *codexWebsocketSession, conn *websocket.Conn) {
+	e.pingUpstreamLoopWithTimings(sess, conn, codexResponsesWebsocketPingPeriod, codexResponsesWebsocketPingWriteTO)
+}
+
+func (e *CodexWebsocketsExecutor) pingUpstreamLoopWithTimings(sess *codexWebsocketSession, conn *websocket.Conn, pingPeriod time.Duration, writeTimeout time.Duration) {
+	if e == nil || sess == nil || conn == nil || pingPeriod <= 0 {
+		return
+	}
+	if writeTimeout <= 0 {
+		writeTimeout = codexResponsesWebsocketPingWriteTO
+	}
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if !sess.isCurrentConn(conn) {
+			return
+		}
+		sess.writeMu.Lock()
+		errPing := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout))
+		sess.writeMu.Unlock()
+		if errPing != nil {
+			e.invalidateUpstreamConn(sess, conn, "upstream_ping_failed", errPing)
+			return
+		}
+	}
+}
+
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn == conn
+}
+
+func isCodexWebsocketTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type timeout interface{ Timeout() bool }
+	if te, ok := err.(timeout); ok && te.Timeout() {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "i/o timeout")
 }
 
 func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSession, conn *websocket.Conn, reason string, err error) {

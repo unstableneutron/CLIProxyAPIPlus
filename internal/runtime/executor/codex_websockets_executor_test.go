@@ -374,6 +374,69 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 	}
 }
 
+func TestCodexWebsocketHeartbeatInvalidatesSilentUpstream(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverDone := make(chan struct{})
+	serverConnCh := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		serverConnCh <- conn
+		<-serverDone
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	defer close(serverDone)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case serverConn := <-serverConnCh:
+		defer func() { _ = serverConn.Close() }()
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for server websocket")
+	}
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "heartbeat-session"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	sess := exec.getOrCreateSession(sessionID)
+	sess.connMu.Lock()
+	sess.conn = conn
+	sess.authID = "auth-1"
+	sess.wsURL = wsURL
+	sess.readerConn = conn
+	sess.connMu.Unlock()
+
+	sess.configureConnWithTimings(conn, 75*time.Millisecond, 20*time.Millisecond)
+	go exec.readUpstreamLoopWithPongWait(sess, conn, 75*time.Millisecond)
+	go exec.pingUpstreamLoopWithTimings(sess, conn, 10*time.Millisecond, 20*time.Millisecond)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		if !ok {
+			t.Fatal("expected disconnect channel to deliver timeout error before closing")
+		}
+		if errRead == nil || !isCodexWebsocketTimeoutError(errRead) {
+			t.Fatalf("disconnect error = %v, want timeout", errRead)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for heartbeat disconnect")
+	}
+
+	if sess.isCurrentConn(conn) {
+		t.Fatal("expected silent connection to be invalidated")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
