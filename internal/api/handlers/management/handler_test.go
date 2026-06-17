@@ -1,8 +1,12 @@
 package management
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,6 +41,43 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 	}
 	if !strings.HasPrefix(errMsg, "IP banned due to too many failed attempts. Try again in") {
 		t.Fatalf("unexpected banned message: %q", errMsg)
+	}
+}
+
+func TestPutConfigYAML_UpdatesWritableFileInNonWritableDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod directory write bits are not portable on Windows")
+	}
+
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("debug: false\n"), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+	})
+
+	h := &Handler{cfg: &config.Config{}, configFilePath: configPath}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", bytes.NewBufferString("debug: true\n"))
+
+	h.PutConfigYAML(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	if string(data) != "debug: true\n" {
+		t.Fatalf("config contents = %q, want %q", string(data), "debug: true\n")
 	}
 }
 
