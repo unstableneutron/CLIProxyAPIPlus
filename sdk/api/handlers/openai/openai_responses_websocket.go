@@ -312,6 +312,31 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
+		updatedPayload, prefixErrMsg := handlers.ApplyForceModelPrefixHeader(c, payload)
+		if prefixErrMsg != nil {
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), prefixErrMsg)
+			markAPIResponseTimestamp(c)
+			errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, prefixErrMsg)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				passthroughSessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				log.Warnf(
+					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					passthroughSessionID,
+					websocketPayloadEventType(errorPayload),
+					errWrite,
+				)
+				return
+			}
+			continue
+		}
+		payload = updatedPayload
+
 		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
@@ -1304,6 +1329,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
 	}
+	logAPIResponseError := func(errMsg *interfaces.ErrorMessage) {
+		if h != nil {
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+		}
+	}
 
 	for {
 		select {
@@ -1316,7 +1346,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+				logAPIResponseError(errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
 				log.Infof(
@@ -1350,7 +1380,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
-					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					logAPIResponseError(errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
 					log.Infof(
@@ -1385,9 +1415,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
-					if h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
-					}
+					logAPIResponseError(payloadErrMsg)
 				} else if isResponsesWebsocketCompletionEvent(eventType) {
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
@@ -1628,16 +1656,6 @@ func websocketPayloadEventType(payload []byte) string {
 	return eventType
 }
 
-func websocketPayloadPreview(payload []byte) string {
-	trimmedPayload := bytes.TrimSpace(payload)
-	if len(trimmedPayload) == 0 {
-		return "<empty>"
-	}
-	previewText := strings.ReplaceAll(string(trimmedPayload), "\n", "\\n")
-	previewText = strings.ReplaceAll(previewText, "\r", "\\r")
-	return previewText
-}
-
 func isResponsesWebsocketCompletionEvent(eventType string) bool {
 	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
 }
@@ -1662,6 +1680,16 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		errText = http.StatusText(status)
 	}
 	return &interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errText)}
+}
+
+func websocketPayloadPreview(payload []byte) string {
+	trimmedPayload := bytes.TrimSpace(payload)
+	if len(trimmedPayload) == 0 {
+		return "<empty>"
+	}
+	previewText := strings.ReplaceAll(string(trimmedPayload), "\n", "\\n")
+	previewText = strings.ReplaceAll(previewText, "\r", "\\r")
+	return previewText
 }
 
 func setWebsocketTimelineBody(c *gin.Context, body string) {
