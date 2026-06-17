@@ -673,13 +673,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
+				} else if isCodexWebsocketFailureTerminalEvent(eventType) {
+					reporter.PublishFailure(ctx, codexWebsocketTerminalResponseErr(payload))
 				}
 				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
 				}
-				if isTerminalEvent {
+				if isCodexWebsocketTerminalEvent(eventType) || isTerminalEvent {
 					return
 				}
 				continue

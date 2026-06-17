@@ -488,7 +488,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 
 func isResponsesToolCallType(itemType string) bool {
 	switch strings.TrimSpace(itemType) {
-	case "function_call", "custom_tool_call":
+	case "function_call", "custom_tool_call", "tool_search_call":
 		return true
 	default:
 		return false
@@ -497,7 +497,7 @@ func isResponsesToolCallType(itemType string) bool {
 
 func isResponsesToolCallOutputType(itemType string) bool {
 	switch strings.TrimSpace(itemType) {
-	case "function_call_output", "custom_tool_call_output":
+	case "function_call_output", "custom_tool_call_output", "tool_search_output":
 		return true
 	default:
 		return false
