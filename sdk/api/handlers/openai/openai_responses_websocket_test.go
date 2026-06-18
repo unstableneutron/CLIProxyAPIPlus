@@ -744,6 +744,49 @@ func TestNormalizeResponsesWebsocketRequestInjectsPreviousResponseIDForIncrement
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestDoesNotInjectPreviousResponseIDForCompactReplay(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1","role":"user"}]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"message","id":"assistant-1"},
+		{"type":"function_call","id":"fc-1","call_id":"call-1"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"message","id":"compact-msg-1","role":"user"},
+		{"type":"message","id":"compact-msg-2","role":"user"},
+		{"type":"message","id":"compact-msg-3","role":"user"},
+		{"type":"message","id":"compact-msg-4","role":"user"},
+		{"type":"message","id":"compact-msg-5","role":"user"},
+		{"type":"compaction","id":"cmp-1"}
+	]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", nil, true, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must not be injected for compact replay: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "type").Exists() {
+		t.Fatalf("type must be removed from normalized request: %s", normalized)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 6 {
+		t.Fatalf("compact replay input len = %d, want 6: %s", len(input), normalized)
+	}
+	if input[0].Get("id").String() != "compact-msg-1" || input[5].Get("type").String() != "compaction" {
+		t.Fatalf("unexpected compact replay input: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "model").String() != "test-model" {
+		t.Fatalf("unexpected model: %s", gjson.GetBytes(normalized, "model").String())
+	}
+	if gjson.GetBytes(normalized, "instructions").String() != "be helpful" {
+		t.Fatalf("unexpected instructions: %s", gjson.GetBytes(normalized, "instructions").String())
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestInjectsPreviousResponseIDWhenPendingOutputIsPresent(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[]`)
