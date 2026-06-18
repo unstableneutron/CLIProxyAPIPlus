@@ -982,7 +982,7 @@ func xaiMetadataString(meta map[string]any, key string) string {
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
 	body = removeXAIEncryptedReasoningInclude(body)
 	if !xaiSupportsReasoningEffort(model) {
-		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
+		body, _ = sjson.DeleteBytes(body, "reasoning")
 	}
 	return body
 }

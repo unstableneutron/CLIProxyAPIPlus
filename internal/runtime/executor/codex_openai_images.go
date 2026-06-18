@@ -32,7 +32,7 @@ const (
 	codexImagesGenerationsPath   = "/v1/images/generations"
 	codexImagesEditsPath         = "/v1/images/edits"
 	codexDirectImagesGenerations = "/images/generations"
-	codexDirectImagesEdit        = "/images/edits"
+	codexDirectImagesEdit        = "/images/edit"
 	codexGPTImage15Model         = "gpt-image-1.5"
 	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
 )
