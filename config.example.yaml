@@ -121,7 +121,7 @@ disable-cooling: false
 # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
 disable-image-generation: false
 
-# Base model used when proxying gpt-image-2 via the hosted image_generation tool (Responses API).
+# Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"
 

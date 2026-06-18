@@ -741,7 +741,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// compact transcript on the next `response.create`. When the input already
 	// contains historical model output items, treating it as an incremental append
 	// duplicates stale turn-state and can leave late orphaned function_call items.
-	if shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
+	if shouldReplaceWebsocketTranscript(rawJSON, nextInput, allowCompactionReplayBypass) {
 		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
 		return normalized, bytes.Clone(normalized), nil
 	}
@@ -851,7 +851,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	return normalized, bytes.Clone(normalized), nil
 }
 
-func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
+func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result, allowCompactionReplayBypass bool) bool {
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
 		return false
@@ -861,6 +861,10 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	}
 	if !nextInput.Exists() || !nextInput.IsArray() {
 		return false
+	}
+
+	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
+		return true
 	}
 
 	for _, item := range nextInput.Array() {
