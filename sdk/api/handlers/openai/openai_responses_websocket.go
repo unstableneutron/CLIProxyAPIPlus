@@ -718,6 +718,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 			Error:      fmt.Errorf("missing model in response.create request"),
 		}
 	}
+	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -776,6 +777,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
+			normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
@@ -848,6 +850,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -930,7 +933,27 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return bytes.Clone(normalized)
+}
+
+func stripUnsupportedResponsesWebsocketInputItemMetadata(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+	sanitized := payload
+	for i, item := range input.Array() {
+		if !item.Get("metadata").Exists() {
+			continue
+		}
+		updated, errDelete := sjson.DeleteBytes(sanitized, fmt.Sprintf("input.%d.metadata", i))
+		if errDelete != nil {
+			continue
+		}
+		sanitized = updated
+	}
+	return sanitized
 }
 
 func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
@@ -1225,6 +1248,7 @@ func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName str
 		normalized, _ = sjson.SetBytes(normalized, "model", modelName)
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return normalized, nil
 }
 

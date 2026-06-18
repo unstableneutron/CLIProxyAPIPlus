@@ -2925,6 +2925,69 @@ func TestNormalizeResponsesWebsocketRequestTreatsTranscriptReplacementAsReset(t 
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestStripsInputItemMetadata(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	lastResponseOutput := []byte(`[]`)
+	raw := []byte(`{"type":"response.create","metadata":{"root":"kept"},"client_metadata":{"turn":"kept"},"input":[{"type":"message","id":"assistant-1","role":"assistant","metadata":{"turn_id":"turn-1"}},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","metadata":{"turn_id":"turn-1"}},{"type":"function_call_output","id":"tool-out-1","call_id":"call-1","metadata":{"turn_id":"turn-1"}}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", nil, true, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must not exist in transcript replacement mode: %s", normalized)
+	}
+	if !gjson.GetBytes(normalized, "metadata.root").Exists() {
+		t.Fatalf("root metadata should be preserved: %s", normalized)
+	}
+	if !gjson.GetBytes(normalized, "client_metadata.turn").Exists() {
+		t.Fatalf("client metadata should be preserved: %s", normalized)
+	}
+	for i, item := range gjson.GetBytes(normalized, "input").Array() {
+		if item.Get("metadata").Exists() {
+			t.Fatalf("input item %d metadata leaked: %s", i, normalized)
+		}
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match sanitized replacement request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketIncrementalRequestStripsInputItemMetadata(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	lastResponseOutput := []byte(`[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool"}]`)
+	raw := []byte(`{"type":"response.create","input":[{"type":"function_call_output","id":"tool-out-1","call_id":"call-1","metadata":{"turn_id":"turn-1"}}]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", []string{"call-1"}, true, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("previous_response_id = %q, want resp-1: %s", got, normalized)
+	}
+	if gjson.GetBytes(normalized, "input.0.metadata").Exists() {
+		t.Fatalf("incremental input metadata leaked: %s", normalized)
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match sanitized incremental request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketPassthroughRequestStripsInputItemMetadata(t *testing.T) {
+	raw := []byte(`{"type":"response.create","model":"test-model","metadata":{"root":"kept"},"input":[{"type":"message","id":"msg-1","metadata":{"turn_id":"turn-1"}}]}`)
+
+	normalized, errMsg := normalizeResponsesWebsocketPassthroughRequest(raw, "")
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if !gjson.GetBytes(normalized, "metadata.root").Exists() {
+		t.Fatalf("root metadata should be preserved: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "input.0.metadata").Exists() {
+		t.Fatalf("passthrough input metadata leaked: %s", normalized)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestDoesNotTreatDeveloperMessageAsReplacement(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
