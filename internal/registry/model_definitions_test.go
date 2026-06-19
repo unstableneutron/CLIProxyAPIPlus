@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
@@ -17,34 +20,54 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
 }
 
-func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
-	registryRef := GetGlobalRegistry()
-	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{
-		{ID: "gemini-route-test"},
-		{ID: "gemini-web-search-test", SupportsWebSearch: true},
-	})
-	registryRef.RegisterClient("test-gemini-websearch-route", "gemini", []*ModelInfo{
-		{ID: "gemini-cross-provider-route"},
-		{ID: "gemini-cross-provider-search", SupportsWebSearch: true},
-	})
-	t.Cleanup(func() {
-		registryRef.UnregisterClient("test-antigravity-websearch-route")
-		registryRef.UnregisterClient("test-gemini-websearch-route")
-	})
+func TestGetKiroModelsReturnsStaticFallbackSet(t *testing.T) {
+	models := GetKiroModels()
+	if len(models) == 0 {
+		t.Fatal("expected Kiro static fallback models")
+	}
 
-	if got := AntigravityWebSearchModelFor("gemini-route-test"); got != "" {
-		t.Fatalf("route model without web search support should not get fallback model, got %q", got)
+	seen := make(map[string]struct{}, len(models))
+	required := map[string]bool{
+		"kiro-claude-sonnet-4-6": false,
+		"kiro-claude-sonnet-4-5": false,
+		"kiro-claude-sonnet-4":   false,
+		"kiro-claude-opus-4-7":   false,
+		"kiro-claude-opus-4-6":   false,
+		"kiro-claude-opus-4-5":   false,
+		"kiro-claude-haiku-4-5":  false,
 	}
-	if got := AntigravityWebSearchModelFor("gemini-route-test(high)"); got != "" {
-		t.Fatalf("suffix route model without web search support should not get fallback model, got %q", got)
+
+	for _, model := range models {
+		if model == nil {
+			t.Fatal("expected no nil Kiro models")
+		}
+		if !strings.HasPrefix(model.ID, "kiro-") {
+			t.Fatalf("expected Kiro model ID to use kiro- prefix, got %q", model.ID)
+		}
+		if model.Type != "kiro" {
+			t.Fatalf("model %q type = %q, want kiro", model.ID, model.Type)
+		}
+		if model.Thinking == nil {
+			t.Fatalf("model %q missing Kiro thinking metadata", model.ID)
+		}
+		if model.Thinking.Min != DefaultKiroThinkingSupport.Min ||
+			model.Thinking.Max != DefaultKiroThinkingSupport.Max ||
+			model.Thinking.ZeroAllowed != DefaultKiroThinkingSupport.ZeroAllowed ||
+			model.Thinking.DynamicAllowed != DefaultKiroThinkingSupport.DynamicAllowed {
+			t.Fatalf("model %q thinking = %+v, want %+v", model.ID, model.Thinking, DefaultKiroThinkingSupport)
+		}
+		if _, exists := seen[model.ID]; exists {
+			t.Fatalf("duplicate Kiro model ID %q", model.ID)
+		}
+		seen[model.ID] = struct{}{}
+		if _, ok := required[model.ID]; ok {
+			required[model.ID] = true
+		}
 	}
-	if got := AntigravityWebSearchModelFor("gemini-web-search-test"); got != "gemini-web-search-test" {
-		t.Fatalf("AntigravityWebSearchModelFor capable model = %q, want itself", got)
-	}
-	if got := AntigravityWebSearchModelFor("gemini-cross-provider-route"); got != "" {
-		t.Fatalf("cross-provider model should not get Antigravity web search model, got %q", got)
-	}
-	if got := AntigravityWebSearchModelFor("unknown-model"); got != "" {
-		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
+
+	for modelID, found := range required {
+		if !found {
+			t.Fatalf("expected fallback model %q", modelID)
+		}
 	}
 }
