@@ -5,14 +5,24 @@ import (
 	"strconv"
 	"strings"
 
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Claude, Codex, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Claude, Codex, CommandCode, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
+
+func configLabel(label, fallback string) string {
+	trimmed := strings.TrimSpace(label)
+	if trimmed != "" {
+		return trimmed
+	}
+	return fallback
+}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
 func NewConfigSynthesizer() *ConfigSynthesizer {
@@ -32,6 +42,10 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// Kiro (AWS CodeWhisperer)
+	out = append(out, s.synthesizeKiroKeys(ctx)...)
+	// Command Code API Keys
+	out = append(out, s.synthesizeCommandCodeKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -78,7 +92,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
-			Label:      "gemini-apikey",
+			Label:      configLabel(entry.Label, "gemini-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -134,7 +148,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
-			Label:      "claude-apikey",
+			Label:      configLabel(ck.Label, "claude-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -188,11 +202,12 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		addConfigQueryParamsToAttrs(ck.QueryParams, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
-			Label:      "codex-apikey",
+			Label:      configLabel(ck.Label, "codex-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -202,6 +217,62 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeCommandCodeKeys creates Auth entries for Command Code API keys.
+func (s *ConfigSynthesizer) synthesizeCommandCodeKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.CommandCodeKey))
+	for i := range cfg.CommandCodeKey {
+		entry := cfg.CommandCodeKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("commandcode:apikey", key, base, proxyURL)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:commandcode[%s]", token),
+			"api_key": key,
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if hash := diff.ComputeCommandCodeModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "commandcode",
+			Label:      configLabel(entry.Label, "commandcode-apikey"),
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}
@@ -259,10 +330,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   internalProviderKey,
-				Label:      compat.Name,
+				Label:      configLabel(entry.Label, compat.Name),
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
@@ -298,6 +370,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   internalProviderKey,
@@ -353,7 +426,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
-			Label:      "vertex-apikey",
+			Label:      configLabel(compat.Label, "vertex-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -362,6 +435,99 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeKiroKeys creates Auth entries for Kiro (AWS CodeWhisperer) tokens.
+func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	if len(cfg.KiroKey) == 0 {
+		return nil
+	}
+
+	out := make([]*coreauth.Auth, 0, len(cfg.KiroKey))
+	kAuth := kiroauth.NewKiroAuth(cfg)
+
+	for i := range cfg.KiroKey {
+		kk := cfg.KiroKey[i]
+		var accessToken, profileArn, refreshToken string
+
+		// Try to load from token file first
+		if kk.TokenFile != "" && kAuth != nil {
+			tokenData, err := kAuth.LoadTokenFromFile(kk.TokenFile)
+			if err != nil {
+				log.Warnf("failed to load kiro token file %s: %v", kk.TokenFile, err)
+			} else {
+				accessToken = tokenData.AccessToken
+				profileArn = tokenData.ProfileArn
+				refreshToken = tokenData.RefreshToken
+			}
+		}
+
+		// Override with direct config values if provided
+		if kk.AccessToken != "" {
+			accessToken = kk.AccessToken
+		}
+		if kk.ProfileArn != "" {
+			profileArn = kk.ProfileArn
+		}
+		if kk.RefreshToken != "" {
+			refreshToken = kk.RefreshToken
+		}
+
+		if accessToken == "" {
+			log.Warnf("kiro config[%d] missing access_token, skipping", i)
+			continue
+		}
+
+		// profileArn is optional for AWS Builder ID users
+		id, token := idGen.Next("kiro:token", accessToken, profileArn)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:kiro[%s]", token),
+			"access_token": accessToken,
+		}
+		if profileArn != "" {
+			attrs["profile_arn"] = profileArn
+		}
+		if kk.Region != "" {
+			attrs["region"] = kk.Region
+		}
+		if kk.AgentTaskType != "" {
+			attrs["agent_task_type"] = kk.AgentTaskType
+		}
+		if kk.PreferredEndpoint != "" {
+			attrs["preferred_endpoint"] = kk.PreferredEndpoint
+		} else if cfg.KiroPreferredEndpoint != "" {
+			// Apply global default if not overridden by specific key
+			attrs["preferred_endpoint"] = cfg.KiroPreferredEndpoint
+		}
+		if refreshToken != "" {
+			attrs["refresh_token"] = refreshToken
+		}
+		proxyURL := strings.TrimSpace(kk.ProxyURL)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "kiro",
+			Label:      "kiro-token",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+
+		if refreshToken != "" {
+			if a.Metadata == nil {
+				a.Metadata = make(map[string]any)
+			}
+			a.Metadata["refresh_token"] = refreshToken
+		}
+
 		out = append(out, a)
 	}
 	return out
