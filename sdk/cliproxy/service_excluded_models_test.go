@@ -19,13 +19,13 @@ func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribu
 	service := &Service{
 		cfg: &config.Config{
 			OAuthExcludedModels: map[string][]string{
-				"gemini-cli": {"gemini-2.5-pro"},
+				"gemini": {"gemini-2.5-pro"},
 			},
 		},
 	}
 	auth := &coreauth.Auth{
-		ID:       "auth-gemini-cli",
-		Provider: "gemini-cli",
+		ID:       "auth-gemini",
+		Provider: "gemini",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"auth_kind":       "oauth",
@@ -41,9 +41,9 @@ func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribu
 
 	service.registerModelsForAuth(context.Background(), auth)
 
-	models := registry.GetAvailableModelsByProvider("gemini-cli")
+	models := registry.GetAvailableModelsByProvider("gemini")
 	if len(models) == 0 {
-		t.Fatal("expected gemini-cli models to be registered")
+		t.Fatal("expected gemini models to be registered")
 	}
 
 	for _, model := range models {
