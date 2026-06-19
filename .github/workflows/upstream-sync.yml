@@ -14,9 +14,9 @@ name: Upstream Sync
 # Outcomes:
 #   1. Clean merge + build + test pass -> fast-forward main, create fork tag,
 #      and dispatch release/docker workflows.
-#   2. Conflicts, unsafe Plus head deltas, or gate failures -> push the
-#      stable pending overlay branch and open/update a SINGLE tracking issue
-#      or PR.
+#   2. Conflicts, unsafe Plus head deltas, invariant failures, or gate failures
+#      -> push the stable pending overlay branch, open/update a SINGLE tracking
+#      issue or PR, then fail the run so blocked acceptance is visible.
 #   3. workflow_dispatch by unstableneutron with force_pr=true -> open a PR
 #      for manual review.
 
@@ -181,21 +181,45 @@ jobs:
       - name: Set up Go
         if: |
           steps.plan.outputs.has_changes == 'true' &&
-          steps.plan.outputs.blocked != 'true' &&
-          steps.merge_original.outputs.conflicts != 'true' &&
-          steps.merge_plus_tag.outputs.conflicts != 'true' &&
-          steps.merge_plus_head.outputs.conflicts != 'true'
+          steps.plan.outputs.blocked != 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Invariant gate
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          steps.plan.outputs.blocked != 'true' &&
+          steps.merge_original.outputs.conflicts != 'true' &&
+          steps.merge_plus_tag.outputs.conflicts != 'true' &&
+          steps.merge_plus_head.outputs.conflicts != 'true'
+        id: invariants
+        continue-on-error: true
+        run: |
+          set +e
+          INVARIANT_LOG=$(mktemp)
+          .github/scripts/upstream-sync.sh check-invariants 2>&1 | tee "${INVARIANT_LOG}"
+          INVARIANT_EXIT=${PIPESTATUS[0]}
+          if [ "${INVARIANT_EXIT}" -ne 0 ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo 'INVARIANT_TAIL<<EOF'
+            tail -n 80 "${INVARIANT_LOG}"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+          set -e
 
       - name: Record synced upstream versions
         if: |
           steps.plan.outputs.has_changes == 'true' &&
           steps.merge_original.outputs.conflicts != 'true' &&
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
-          steps.merge_plus_head.outputs.conflicts != 'true'
+          steps.merge_plus_head.outputs.conflicts != 'true' &&
+          steps.invariants.outputs.passed == 'true'
         env:
           ORIGINAL_TAG: ${{ steps.plan.outputs.original_tag }}
           ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
@@ -214,7 +238,8 @@ jobs:
           steps.plan.outputs.blocked != 'true' &&
           steps.merge_original.outputs.conflicts != 'true' &&
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
-          steps.merge_plus_head.outputs.conflicts != 'true'
+          steps.merge_plus_head.outputs.conflicts != 'true' &&
+          steps.invariants.outputs.passed == 'true'
         id: build
         continue-on-error: true
         run: |
@@ -223,7 +248,34 @@ jobs:
           go build -o test-output ./cmd/server 2>&1 | tee "${BUILD_LOG}"
           BUILD_EXIT=${PIPESTATUS[0]}
           rm -f test-output
-          if [ $BUILD_EXIT -ne 0 ]; then
+          if [ "${BUILD_EXIT}" -ne 0 ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo 'BUILD_TAIL<<EOF'
+            tail -n 60 "${BUILD_LOG}"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+          set -e
+
+      - name: Diagnostic build gate
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          steps.plan.outputs.blocked != 'true' &&
+          (steps.merge_original.outputs.conflicts == 'true' ||
+           steps.merge_plus_tag.outputs.conflicts == 'true' ||
+           steps.merge_plus_head.outputs.conflicts == 'true')
+        id: diagnostic_build
+        continue-on-error: true
+        run: |
+          set +e
+          BUILD_LOG=$(mktemp)
+          go build -o test-output ./cmd/server 2>&1 | tee "${BUILD_LOG}"
+          BUILD_EXIT=${PIPESTATUS[0]}
+          rm -f test-output
+          if [ "${BUILD_EXIT}" -ne 0 ]; then
             echo "passed=false" >> "$GITHUB_OUTPUT"
           else
             echo "passed=true" >> "$GITHUB_OUTPUT"
@@ -247,7 +299,31 @@ jobs:
           TEST_LOG=$(mktemp)
           go test ./... -count=1 -timeout 10m 2>&1 | tee "${TEST_LOG}"
           TEST_EXIT=${PIPESTATUS[0]}
-          if [ $TEST_EXIT -ne 0 ]; then
+          if [ "${TEST_EXIT}" -ne 0 ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo 'TEST_TAIL<<EOF'
+            tail -n 60 "${TEST_LOG}"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+          set -e
+
+      - name: Diagnostic test gate
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          steps.plan.outputs.blocked != 'true' &&
+          steps.diagnostic_build.outputs.passed == 'true'
+        id: diagnostic_test
+        continue-on-error: true
+        run: |
+          set +e
+          TEST_LOG=$(mktemp)
+          go test ./... -count=1 -timeout 10m 2>&1 | tee "${TEST_LOG}"
+          TEST_EXIT=${PIPESTATUS[0]}
+          if [ "${TEST_EXIT}" -ne 0 ]; then
             echo "passed=false" >> "$GITHUB_OUTPUT"
           else
             echo "passed=true" >> "$GITHUB_OUTPUT"
@@ -271,6 +347,7 @@ jobs:
           steps.merge_original.outputs.conflicts != 'true' &&
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
           steps.merge_plus_head.outputs.conflicts != 'true' &&
+          steps.invariants.outputs.passed == 'true' &&
           steps.build.outputs.passed == 'true' &&
           steps.test.outputs.passed == 'true' &&
           github.event.inputs.force_pr != 'true'
@@ -374,7 +451,7 @@ jobs:
             fi
           fi
           set -e
-          if [ $PR_EXIT -ne 0 ]; then exit $PR_EXIT; fi
+          if [ "${PR_EXIT}" -ne 0 ]; then exit "${PR_EXIT}"; fi
 
       - name: Update tracking issue on conflicts or gate failure
         if: |
@@ -384,6 +461,7 @@ jobs:
            steps.merge_original.outputs.conflicts == 'true' ||
            steps.merge_plus_tag.outputs.conflicts == 'true' ||
            steps.merge_plus_head.outputs.conflicts == 'true' ||
+           steps.invariants.outputs.passed == 'false' ||
            steps.build.outputs.passed == 'false' ||
            steps.test.outputs.passed == 'false')
         env:
@@ -392,12 +470,13 @@ jobs:
         run: |
           set +e
           STATUS=""
-          [ "${{ steps.plan.outputs.blocked }}" = "true" ] && STATUS="${STATUS}- :warning: Plan blocked: \\`${{ steps.plan.outputs.block_reason }}\\`\n"
+          [ "${{ steps.plan.outputs.blocked }}" = "true" ] && STATUS="${STATUS}- :warning: Plan blocked: \`${{ steps.plan.outputs.block_reason }}\`\n"
           [ "${{ steps.merge_original.outputs.conflicts }}" = "true" ] && STATUS="${STATUS}- :warning: Original merge conflicts detected\n"
           [ "${{ steps.merge_plus_tag.outputs.conflicts }}" = "true" ] && STATUS="${STATUS}- :warning: Plus release overlay conflicts detected\n"
           [ "${{ steps.merge_plus_head.outputs.conflicts }}" = "true" ] && STATUS="${STATUS}- :warning: Plus head delta conflicts detected\n"
-          [ "${{ steps.build.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \\`go build -o test-output ./cmd/server\\` FAILED\n"
-          [ "${{ steps.test.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \\`go test ./...\\` FAILED\n"
+          [ "${{ steps.invariants.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: Fork invariant check FAILED\n"
+          [ "${{ steps.build.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \`go build -o test-output ./cmd/server\` FAILED\n"
+          [ "${{ steps.test.outputs.passed }}" = "false" ] && STATUS="${STATUS}- :x: \`go test ./...\` FAILED\n"
 
           BRANCH="${{ steps.branch.outputs.name }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -413,7 +492,8 @@ jobs:
             --repo "${{ github.repository }}" 2>/dev/null || true
 
           NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
-          COMMENT_BODY=$(printf '**New pending overlay sync attempt** (%s)\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Plus head delta paths: `%s`\n- Unsafe Plus head paths: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n### Conflict files\n\n#### Original merge\n%s\n\n#### Plus release overlay\n%s\n\n#### Plus head delta\n%s\n\n### Resolution guidance\n\nDo not resolve conflicts by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Treat Plus untagged head deltas as safe only when they touch Plus-owned paths.\n\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
+          # shellcheck disable=SC2016
+          COMMENT_BODY=$(printf '**New pending overlay sync attempt** (%s)\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Plus head delta paths: `%s`\n- Unsafe Plus head paths: `%s`\n- Intended fork tag: `%s`\n- Sync branch: [%s](%s)\n- Workflow run: %s\n\n### Gate status\n%b\n### Conflict files\n\n#### Original merge\n%s\n\n#### Plus release overlay\n%s\n\n#### Plus head delta\n%s\n\n### Resolution guidance\n\nDo not resolve conflicts by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Treat Plus untagged head deltas as safe only when they touch Plus-owned paths.\n\n<details><summary>Invariant tail (last 80 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Build tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n\n<details><summary>Test tail (last 60 lines)</summary>\n\n```\n%s\n```\n\n</details>\n' \
             "${NOW}" \
             "${{ steps.plan.outputs.original_repository }}" \
             "${{ steps.plan.outputs.original_tag }}" \
@@ -432,10 +512,12 @@ jobs:
             "${ORIGINAL_CONFLICT_TABLE:-<none>}" \
             "${PLUS_TAG_CONFLICT_TABLE:-<none>}" \
             "${PLUS_HEAD_CONFLICT_TABLE:-<none>}" \
+            "${INVARIANT_TAIL:-<no invariant log captured>}" \
             "${BUILD_TAIL:-<no build log captured>}" \
             "${TEST_TAIL:-<no test log captured>}")
 
           ISSUE_TITLE="upstream-sync pending overlay: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }}"
+          # shellcheck disable=SC2016
           INTRO=$(printf 'The automated sync from `%s` and `%s` cannot land cleanly. This pending overlay tracker is updated in place with the latest refs and gate output. **It will be auto-closed** once a sync run reaches `main` without intervention.\n\n### What to do\n1. Pull the latest sync branch listed in the most recent comment.\n2. Reproduce locally: `go build -o test-output ./cmd/server && rm test-output && go test ./...`.\n3. Resolve by ownership: original-owned keeps the newer original base; Plus-owned keeps compatible Plus behavior; fork-owned keeps our explicit fork changes; shared hotspots must be manually composed.\n4. Push the fix to `main`. The next scheduled run will close this tracker.\n\n---\n' "${ORIGINAL_REPOSITORY}" "${PLUS_REPOSITORY}")
           ISSUE_BODY="${INTRO}${COMMENT_BODY}"
 
@@ -528,3 +610,18 @@ jobs:
               --body "${ISSUE_BODY}" || create_or_update_pr
           fi
           set -e
+
+      - name: Fail blocked sync outcome
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          github.event.inputs.force_pr != 'true' &&
+          (steps.plan.outputs.blocked == 'true' ||
+           steps.merge_original.outputs.conflicts == 'true' ||
+           steps.merge_plus_tag.outputs.conflicts == 'true' ||
+           steps.merge_plus_head.outputs.conflicts == 'true' ||
+           steps.invariants.outputs.passed == 'false' ||
+           steps.build.outputs.passed == 'false' ||
+           steps.test.outputs.passed == 'false')
+        run: |
+          echo "::error::Upstream sync did not reach main/tag acceptance; pending overlay was reported for manual resolution."
+          exit 1

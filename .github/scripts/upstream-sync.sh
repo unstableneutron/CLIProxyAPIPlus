@@ -8,6 +8,8 @@ ORIGINAL_REPOSITORY=${ORIGINAL_REPOSITORY:-router-for-me/CLIProxyAPI}
 PLUS_REPOSITORY=${PLUS_REPOSITORY:-kaitranntt/CLIProxyAPIPlus}
 TRACKING_ISSUE_LABEL=${TRACKING_ISSUE_LABEL:-upstream-sync-blocked}
 PENDING_OVERLAY_BRANCH=${PENDING_OVERLAY_BRANCH:-upstream-sync/pending-overlay}
+OWNERSHIP_FILE=${UPSTREAM_SYNC_OWNERSHIP_FILE:-.github/upstream-sync-ownership.tsv}
+INVARIANTS_FILE=${UPSTREAM_SYNC_INVARIANTS_FILE:-.github/upstream-sync-invariants.tsv}
 
 PLUS_OWNED_PREFIXES=(
   internal/auth/codebuddy/
@@ -134,6 +136,9 @@ latest_fork_suffix_for_prefix() {
 is_plus_owned_path() {
   local path=$1
   local prefix
+  if manifest_path_has_class plus-owned "${path}"; then
+    return 0
+  fi
   for prefix in "${PLUS_OWNED_PREFIXES[@]}"; do
     [[ "${path}" == "${prefix}"* ]] && return 0
   done
@@ -143,6 +148,9 @@ is_plus_owned_path() {
 is_fork_owned_path() {
   local path=$1
   local owned
+  if manifest_path_has_class fork-owned "${path}"; then
+    return 0
+  fi
   for owned in "${FORK_OWNED_PATHS[@]}"; do
     [[ "${path}" == "${owned}" ]] && return 0
   done
@@ -150,6 +158,53 @@ is_fork_owned_path() {
     [[ "${path}" == "${owned}"* ]] && return 0
   done
   return 1
+}
+
+path_matches_rule() {
+  local path=$1
+  local rule=$2
+
+  [ -n "${rule}" ] || return 1
+  if [[ "${rule}" == */ ]]; then
+    [[ "${path}" == "${rule}"* ]]
+  else
+    [[ "${path}" == "${rule}" ]]
+  fi
+}
+
+manifest_path_has_class() {
+  local wanted_class=$1
+  local path=$2
+  local file=${OWNERSHIP_FILE}
+  local class rule
+
+  [ -f "${file}" ] || return 1
+  while IFS=$'\t' read -r class rule _; do
+    [[ -n "${class}" && "${class}" != \#* ]] || continue
+    [ "${class}" = "${wanted_class}" ] || continue
+    if path_matches_rule "${path}" "${rule}"; then
+      return 0
+    fi
+  done < "${file}"
+  return 1
+}
+
+manifest_rules_for_class() {
+  local wanted_class=$1
+  local file=${OWNERSHIP_FILE}
+  local class rule
+
+  [ -f "${file}" ] || return 0
+  while IFS=$'\t' read -r class rule _; do
+    [[ -n "${class}" && "${class}" != \#* ]] || continue
+    [ "${class}" = "${wanted_class}" ] || continue
+    [ -n "${rule}" ] || continue
+    printf '%s\n' "${rule}"
+  done < "${file}"
+}
+
+require_ownership_manifest() {
+  [ -f "${OWNERSHIP_FILE}" ] || die "ownership file not found: ${OWNERSHIP_FILE}"
 }
 
 classify_path() {
@@ -173,6 +228,7 @@ classify_paths_table() {
   while IFS= read -r path; do
     [ -n "${path}" ] || continue
     class=$(classify_path "${path}")
+    # shellcheck disable=SC2016
     printf '| `%s` | `%s` |\n' "${path}" "${class}"
   done <<< "${paths}"
 }
@@ -223,6 +279,15 @@ install_original_merge_attributes() {
     for prefix in "${PLUS_OWNED_PREFIXES[@]}"; do
       printf '%s** merge=ours\n' "${prefix}"
     done
+    local rule
+    while IFS= read -r rule; do
+      [ -n "${rule}" ] || continue
+      if [[ "${rule}" == */ ]]; then
+        printf '%s** merge=ours\n' "${rule}"
+      else
+        printf '%s merge=ours\n' "${rule}"
+      fi
+    done < <({ manifest_rules_for_class plus-owned; manifest_rules_for_class fork-owned; } | sort -u)
   } >> "${attrs}"
 }
 
@@ -302,10 +367,66 @@ restore_fork_owned_paths() {
         done
   done
 
+  while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    if [[ "${path}" == */ ]]; then
+      git ls-tree -r --name-only "${source_ref}" -- "${path}" \
+        | while IFS= read -r owned_path; do
+            [ -n "${owned_path}" ] || continue
+            git checkout "${source_ref}" -- "${owned_path}" 2>/dev/null || true
+          done
+
+      git ls-files -- "${path}" \
+        | while IFS= read -r owned_path; do
+            [ -n "${owned_path}" ] || continue
+            if ! git cat-file -e "${source_ref}:${owned_path}" 2>/dev/null; then
+              git rm -f --ignore-unmatch "${owned_path}" 2>/dev/null || true
+            fi
+          done
+    elif git cat-file -e "${source_ref}:${path}" 2>/dev/null; then
+      git checkout "${source_ref}" -- "${path}" 2>/dev/null || true
+    else
+      git rm -f --ignore-unmatch "${path}" 2>/dev/null || true
+    fi
+  done < <(manifest_rules_for_class fork-owned)
+
   git add -A -- "${FORK_OWNED_PATHS[@]}" "${FORK_OWNED_PREFIXES[@]}" 2>/dev/null || true
+  while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    git add -A -- "${path}" 2>/dev/null || true
+  done < <(manifest_rules_for_class fork-owned)
+}
+
+owned_clobber_paths() {
+  local phase=$1
+  local pre_merge_head=$2
+  local ref=$3
+  local merge_base path class
+
+  merge_base=$(git merge-base "${pre_merge_head}" "${ref}")
+  git -c diff.renames=false diff --name-only "${merge_base}" "${ref}" \
+    | while IFS= read -r path; do
+        [ -n "${path}" ] || continue
+        if git diff --quiet --no-ext-diff "${pre_merge_head}" "${ref}" -- "${path}"; then
+          continue
+        fi
+        class=$(classify_path "${path}")
+        case "${phase}:${class}" in
+          original:fork-owned|original:plus-owned|plus-tag:fork-owned|plus-head:fork-owned)
+            printf '%s\n' "${path}"
+            ;;
+        esac
+      done \
+    | sort -u
+}
+
+merge_lines() {
+  awk 'NF && !seen[$0]++ { print }'
 }
 
 cmd_plan() {
+  require_ownership_manifest
+
   local force_rebuild=${FORCE_REBUILD:-false}
 
   fetch_branch "${ORIGINAL_REMOTE}" main
@@ -413,6 +534,8 @@ cmd_plan() {
 }
 
 cmd_merge_ref() {
+  require_ownership_manifest
+
   local phase=${1:-}
   local ref=${2:-}
   [ -n "${phase}" ] || die "merge-ref requires phase"
@@ -437,10 +560,13 @@ cmd_merge_ref() {
 
   local unmerged
   unmerged=$(git ls-files -u | awk '{print $4}' | sort -u || true)
+  local ownership_clobbers conflict_paths
+  ownership_clobbers=$(owned_clobber_paths "${phase}" "${pre_merge_head}" "${ref}")
+  conflict_paths=$(printf '%s\n%s\n' "${unmerged}" "${ownership_clobbers}" | merge_lines)
   local key
   key=$(phase_key "${phase}")
 
-  if [ -z "${unmerged}" ] && [ ${merge_exit} -eq 0 ]; then
+  if [ -z "${conflict_paths}" ] && [ "${merge_exit}" -eq 0 ]; then
     restore_fork_owned_paths "${pre_merge_head}"
     if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
       git commit \
@@ -448,6 +574,7 @@ cmd_merge_ref() {
         -m "Automated upstream-sync merge for ${phase}: ${ref}. Fork-owned files are restored from the fork side before committing."
     fi
     write_kv conflicts false
+    write_kv ownership_clobber_files ""
     write_env "${key}_CONFLICT_FILES" ""
     write_env "${key}_CONFLICT_TABLE" ""
     echo "[OK] ${phase} merge completed without conflicts."
@@ -455,24 +582,30 @@ cmd_merge_ref() {
   fi
 
   write_kv conflicts true
-  write_kv conflict_files "${unmerged}"
-  write_kv conflict_table "$(classify_paths_table "${unmerged}")"
-  write_env "${key}_CONFLICT_FILES" "${unmerged}"
-  write_env "${key}_CONFLICT_TABLE" "$(classify_paths_table "${unmerged}")"
+  write_kv conflict_files "${conflict_paths}"
+  write_kv conflict_table "$(classify_paths_table "${conflict_paths}")"
+  write_kv ownership_clobber_files "${ownership_clobbers}"
+  write_env "${key}_CONFLICT_FILES" "${conflict_paths}"
+  write_env "${key}_CONFLICT_TABLE" "$(classify_paths_table "${conflict_paths}")"
 
-  if [ -z "${unmerged}" ]; then
-    echo "[!] ${phase} merge failed without unmerged files; leaving branch for inspection."
+  if [ -z "${conflict_paths}" ]; then
+    echo "[!] ${phase} merge failed without conflict paths; leaving branch for inspection."
     return 0
   fi
 
-  echo "[!] ${phase} merge conflicts detected; creating blocked preview commit."
-  echo "${unmerged}"
+  echo "[!] ${phase} merge conflicts or owned clobbers detected; creating blocked preview commit."
+  echo "${conflict_paths}"
+  if [ -n "${ownership_clobbers}" ]; then
+    echo "[!] ${phase} owned clobbers:"
+    echo "${ownership_clobbers}"
+  fi
   local path side
   while IFS= read -r path; do
     [ -n "${path}" ] || continue
+    git ls-files -u -- "${path}" | grep -q . || continue
     side=$(preferred_conflict_side "${phase}" "${path}")
     checkout_conflict_side "${side}" "${ref}" "${path}"
-  done <<< "${unmerged}"
+  done <<< "${conflict_paths}"
 
   restore_fork_owned_paths "${pre_merge_head}"
   git add -A
@@ -505,6 +638,8 @@ cmd_record_state() {
 }
 
 cmd_classify_paths() {
+  require_ownership_manifest
+
   local paths=${1:-}
   if [ -n "${paths}" ]; then
     classify_paths_table "${paths}"
@@ -517,6 +652,36 @@ cmd_pending_overlay_branch() {
   printf '%s\n' "${PENDING_OVERLAY_BRANCH}"
 }
 
+cmd_check_invariants() {
+  local file=${INVARIANTS_FILE}
+  local check path pattern description
+  local failed=0
+
+  [ -f "${file}" ] || die "invariants file not found: ${file}"
+  while IFS=$'\t' read -r check path pattern description; do
+    [[ -n "${check}" && "${check}" != \#* ]] || continue
+    case "${check}" in
+      contains)
+        if [ ! -f "${path}" ]; then
+          echo "[FAIL] invariant: ${description:-${path}} (${path} missing)" >&2
+          failed=1
+        elif ! grep -Fq -- "${pattern}" "${path}"; then
+          echo "[FAIL] invariant: ${description:-${path}} (${path} missing pattern: ${pattern})" >&2
+          failed=1
+        else
+          echo "[OK] invariant: ${description:-${path}}"
+        fi
+        ;;
+      *)
+        echo "[FAIL] invariant: unsupported check ${check} for ${path}" >&2
+        failed=1
+        ;;
+    esac
+  done < "${file}"
+
+  return "${failed}"
+}
+
 main() {
   local cmd=${1:-}
   shift || true
@@ -525,8 +690,9 @@ main() {
     merge-ref) cmd_merge_ref "$@" ;;
     record-state) cmd_record_state "$@" ;;
     classify-paths) cmd_classify_paths "$@" ;;
+    check-invariants) cmd_check_invariants "$@" ;;
     pending-overlay-branch) cmd_pending_overlay_branch "$@" ;;
-    *) die "usage: $0 {plan|merge-ref|record-state|classify-paths|pending-overlay-branch}" ;;
+    *) die "usage: $0 {plan|merge-ref|record-state|classify-paths|check-invariants|pending-overlay-branch}" ;;
   esac
 }
 

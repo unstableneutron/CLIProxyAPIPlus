@@ -1,0 +1,37 @@
+# class	path
+# Paths ending with "/" match the full subtree.
+fork-owned	.gitattributes
+fork-owned	README-ccs-fork.md
+fork-owned	docker-compose.yml
+fork-owned	.github/scripts/upstream-sync.sh
+fork-owned	.github/scripts/test-upstream-sync.sh
+fork-owned	.github/upstream-sync-ownership.tsv
+fork-owned	.github/upstream-sync-invariants.tsv
+fork-owned	.github/workflows/
+
+plus-owned	internal/auth/codebuddy/
+plus-owned	internal/auth/copilot/
+plus-owned	internal/auth/cursor/
+plus-owned	internal/auth/gitlab/
+plus-owned	internal/auth/iflow/
+plus-owned	internal/auth/kilo/
+plus-owned	internal/auth/kiro/
+
+fork-owned	internal/auth/gemini/
+fork-owned	internal/runtime/geminicli/
+fork-owned	internal/runtime/executor/gemini_cli_executor.go
+fork-owned	internal/runtime/executor/gemini_cli_executor_test.go
+fork-owned	internal/thinking/provider/geminicli/
+fork-owned	internal/translator/claude/gemini-cli/
+fork-owned	internal/translator/codex/gemini-cli/
+fork-owned	internal/translator/gemini-cli/
+fork-owned	internal/translator/gemini/gemini-cli/
+fork-owned	internal/translator/openai/gemini-cli/
+fork-owned	sdk/api/handlers/gemini/gemini-cli_handlers.go
+fork-owned	sdk/auth/gemini.go
+
+fork-owned	internal/runtime/executor/commandcode_executor.go
+fork-owned	internal/runtime/executor/commandcode_executor_test.go
+fork-owned	internal/registry/commandcode_models_test.go
+fork-owned	internal/watcher/synthesizer/commandcode_config_test.go
+fork-owned	sdk/cliproxy/service_commandcode_executor_binding_test.go

@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HELPER="${SCRIPT_DIR}/upstream-sync.sh"
+export UPSTREAM_SYNC_OWNERSHIP_FILE="${UPSTREAM_SYNC_OWNERSHIP_FILE:-${SCRIPT_DIR}/../upstream-sync-ownership.tsv}"
 
 fail() {
   echo "[FAIL] $*" >&2
@@ -184,6 +185,7 @@ test_original_merge_protects_plus_owned_paths() {
   )
 
   assert_contains "${out}" "conflicts=true"
+  # shellcheck disable=SC2016
   assert_contains "${out}" '| `.github/workflows/release.yaml` | `fork-owned` |'
   if ! grep -Fq plus-provider "${fork}/internal/auth/copilot/provider.go"; then
     fail "original merge overwrote Plus-owned provider file"
@@ -224,6 +226,132 @@ test_pending_overlay_branch_name_is_stable() {
   fi
 }
 
+test_manifest_classifies_fork_surfaces() {
+  local root
+  root=$(mktemp -d)
+  local out=${root}/classify.out
+
+  printf '%s\n' \
+    .github/scripts/upstream-sync.sh \
+    .github/scripts/test-upstream-sync.sh \
+    .github/upstream-sync-ownership.tsv \
+    .github/upstream-sync-invariants.tsv \
+    internal/runtime/executor/gemini_cli_executor.go \
+    sdk/api/handlers/gemini/gemini-cli_handlers.go \
+    sdk/auth/gemini.go \
+    | "${HELPER}" classify-paths > "${out}"
+
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/scripts/upstream-sync.sh` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/scripts/test-upstream-sync.sh` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/upstream-sync-ownership.tsv` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/upstream-sync-invariants.tsv` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `internal/runtime/executor/gemini_cli_executor.go` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `sdk/api/handlers/gemini/gemini-cli_handlers.go` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `sdk/auth/gemini.go` | `fork-owned` |'
+}
+
+test_original_merge_reports_owned_clobber_without_text_conflict() {
+  local root
+  root=$(mktemp -d)
+  local original=${root}/original
+  local plus=${root}/plus
+  local fork=${root}/fork
+  local out=${root}/merge.out
+
+  new_repo "${original}"
+  commit_file "${original}" docker-compose.yml $'fork_setting=base\nupstream_setting=base' "original base"
+  run_git -C "${original}" tag v7.1.45
+
+  clone_for_fork "${original}" "${plus}"
+  clone_for_fork "${plus}" "${fork}"
+  run_git -C "${fork}" remote add original-upstream "${original}"
+
+  commit_file "${fork}" docker-compose.yml $'fork_setting=fork\nupstream_setting=base' "fork setting"
+  commit_file "${original}" docker-compose.yml $'fork_setting=base\nupstream_setting=original' "original setting"
+  run_git -C "${original}" tag v7.1.67
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream refs/tags/v7.1.67:refs/tags/v7.1.67
+    GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
+  )
+
+  assert_contains "${out}" "conflicts=true"
+  assert_contains "${out}" "ownership_clobber_files=docker-compose.yml"
+  if [ "$(cat "${fork}/docker-compose.yml")" != $'fork_setting=fork\nupstream_setting=base' ]; then
+    cat "${fork}/docker-compose.yml" >&2
+    fail "owned clobber resolution did not preserve fork side"
+  fi
+}
+
+test_original_merge_skips_identical_owned_path_touch() {
+  local root
+  root=$(mktemp -d)
+  local original=${root}/original
+  local plus=${root}/plus
+  local fork=${root}/fork
+  local out=${root}/merge.out
+
+  new_repo "${original}"
+  commit_file "${original}" docker-compose.yml "setting=base" "original base"
+  run_git -C "${original}" tag v7.1.45
+
+  clone_for_fork "${original}" "${plus}"
+  clone_for_fork "${plus}" "${fork}"
+  run_git -C "${fork}" remote add original-upstream "${original}"
+
+  commit_file "${fork}" docker-compose.yml "setting=fork" "fork setting"
+  commit_file "${original}" docker-compose.yml "setting=fork" "original same setting"
+  run_git -C "${original}" tag v7.1.67
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream refs/tags/v7.1.67:refs/tags/v7.1.67
+    GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
+  )
+
+  assert_contains "${out}" "conflicts=false"
+}
+
+test_check_invariants_detects_missing_pattern() {
+  local root
+  root=$(mktemp -d)
+  local out=${root}/invariants.out
+
+  new_repo "${root}/repo"
+  mkdir -p "${root}/repo/.github"
+  printf '%s\n' \
+    $'contains\timportant.go\tmust_keep_symbol\timportant symbol remains' \
+    > "${root}/repo/.github/upstream-sync-invariants.tsv"
+  commit_file "${root}/repo" important.go "package main" "add important file"
+
+  set +e
+  (
+    cd "${root}/repo"
+    "${HELPER}" check-invariants
+  ) > "${out}" 2>&1
+  local exit_code=$?
+  set -e
+
+  if [ ${exit_code} -eq 0 ]; then
+    fail "check-invariants passed despite missing required pattern"
+  fi
+  assert_contains "${out}" "important symbol remains"
+
+  commit_file "${root}/repo" important.go $'package main\nconst must_keep_symbol = true' "restore important symbol"
+  (
+    cd "${root}/repo"
+    "${HELPER}" check-invariants
+  ) > "${out}" 2>&1
+}
+
 main() {
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
@@ -232,6 +360,10 @@ main() {
   test_original_merge_protects_plus_owned_paths
   test_plus_merge_can_update_plus_owned_paths
   test_pending_overlay_branch_name_is_stable
+  test_manifest_classifies_fork_surfaces
+  test_original_merge_reports_owned_clobber_without_text_conflict
+  test_original_merge_skips_identical_owned_path_touch
+  test_check_invariants_detects_missing_pattern
   echo "[OK] upstream-sync helper tests passed"
 }
 
