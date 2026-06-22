@@ -25,13 +25,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	gitlabauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gitlab"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -146,7 +149,7 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 		stopForwarderInstance(port, prev)
 	}
 
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	addr := fmt.Sprintf("%s:%d", callbackForwarderListenHost(), port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -192,6 +195,39 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func callbackForwarderListenHost() string {
+	return callbackForwarderListenHostForRuntime(runningInContainer())
+}
+
+func callbackForwarderListenHostForRuntime(inContainer bool) string {
+	if inContainer || isTruthyEnv(os.Getenv("CLIPROXY_CALLBACK_FORWARDER_BIND_ALL")) {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
+
+func runningInContainer() bool {
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/.dockerenv"); err == nil {
+			return true
+		}
+		if data, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+			text := string(data)
+			return strings.Contains(text, "docker") || strings.Contains(text, "kubepods") || strings.Contains(text, "containerd")
+		}
+	}
+	return false
+}
+
+func isTruthyEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
@@ -954,13 +990,34 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	persistData := data
+	if metadata := metadataFromAuthFileBytes(data); metadata != nil {
+		if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+			normalizedData, errMarshal := json.MarshalIndent(normalized, "", "  ")
+			if errMarshal != nil {
+				return fmt.Errorf("failed to encode normalized auth file: %w", errMarshal)
+			}
+			persistData = append(normalizedData, '\n')
+		}
+	}
+	if errWrite := os.WriteFile(dst, persistData, 0o600); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
 	}
 	return nil
+}
+
+func metadataFromAuthFileBytes(data []byte) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil
+	}
+	return metadata
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -1161,6 +1218,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
+	if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
+		metadata = normalized
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -1219,6 +1279,64 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func normalizeKiroIDETokenMetadata(metadata map[string]any) (map[string]any, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	if existingType, _ := metadata["type"].(string); strings.TrimSpace(existingType) != "" {
+		return nil, false
+	}
+	accessToken := strings.TrimSpace(stringFromMetadata(metadata, "accessToken"))
+	if accessToken == "" {
+		return nil, false
+	}
+	hasKiroIDEField := false
+	for _, key := range []string{"profileArn", "clientIdHash", "startUrl"} {
+		if strings.TrimSpace(stringFromMetadata(metadata, key)) != "" {
+			hasKiroIDEField = true
+			break
+		}
+	}
+	if !hasKiroIDEField {
+		return nil, false
+	}
+
+	email := strings.TrimSpace(stringFromMetadata(metadata, "email"))
+	if email == "" {
+		email = kiroauth.ExtractEmailFromJWT(accessToken)
+	}
+	return map[string]any{
+		"type":           "kiro",
+		"access_token":   accessToken,
+		"refresh_token":  strings.TrimSpace(stringFromMetadata(metadata, "refreshToken")),
+		"profile_arn":    strings.TrimSpace(stringFromMetadata(metadata, "profileArn")),
+		"expires_at":     strings.TrimSpace(stringFromMetadata(metadata, "expiresAt")),
+		"auth_method":    strings.ToLower(strings.TrimSpace(stringFromMetadata(metadata, "authMethod"))),
+		"provider":       strings.TrimSpace(stringFromMetadata(metadata, "provider")),
+		"client_id":      strings.TrimSpace(stringFromMetadata(metadata, "clientId")),
+		"client_secret":  strings.TrimSpace(stringFromMetadata(metadata, "clientSecret")),
+		"client_id_hash": strings.TrimSpace(stringFromMetadata(metadata, "clientIdHash")),
+		"email":          email,
+		"start_url":      strings.TrimSpace(stringFromMetadata(metadata, "startUrl")),
+		"region":         strings.TrimSpace(stringFromMetadata(metadata, "region")),
+	}, true
+}
+
+func stringFromMetadata(metadata map[string]any, key string) string {
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
@@ -1435,6 +1553,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, targetAuth); errHook != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("post-auth persist hook failed: %v", errHook)})
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
@@ -1575,6 +1699,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
 	}
+	if _, ok := touchedRoots["excluded_models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	} else if _, ok := touchedRoots["excluded-models"]; ok {
+		syncAuthFileExcludedModelsAttribute(auth, touchedRoots)
+	}
 }
 
 func syncAuthFileHeaderAttributes(auth *coreauth.Auth) {
@@ -1666,6 +1795,52 @@ func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
+}
+
+func syncAuthFileExcludedModelsAttribute(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	sourceKey := "excluded_models"
+	if _, okUnderscore := touchedRoots["excluded_models"]; !okUnderscore {
+		if _, okHyphen := touchedRoots["excluded-models"]; okHyphen {
+			sourceKey = "excluded-models"
+		}
+	}
+	excluded := authFileExcludedModelsValue(auth.Metadata[sourceKey])
+	excluded = config.NormalizeExcludedModels(excluded)
+	delete(auth.Metadata, "excluded-models")
+	if len(excluded) == 0 {
+		delete(auth.Metadata, "excluded_models")
+		delete(auth.Attributes, "excluded_models")
+		delete(auth.Attributes, "excluded_models_hash")
+		return
+	}
+	auth.Metadata["excluded_models"] = append([]string(nil), excluded...)
+	auth.Attributes["excluded_models"] = strings.Join(excluded, ",")
+	auth.Attributes["excluded_models_hash"] = diff.ComputeExcludedModelsHash(excluded)
+}
+
+func authFileExcludedModelsValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, ok := item.(string); ok {
+				out = append(out, value)
+			}
+		}
+		return out
+	case string:
+		return strings.Split(typed, ",")
+	default:
+		return nil
+	}
 }
 
 func authFileBoolValue(value any) (bool, bool) {
@@ -2645,6 +2820,243 @@ func (h *Handler) rollbackSavedTokenRecords(ctx context.Context, savedPaths []st
 		}
 		h.removeAuthsForPath(ctx, path, path)
 	}
+}
+
+func gitLabBaseURLFromRequest(c *gin.Context) string {
+	if c != nil {
+		if raw := strings.TrimSpace(c.Query("base_url")); raw != "" {
+			return gitlabauth.NormalizeBaseURL(raw)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("GITLAB_BASE_URL")); raw != "" {
+		return gitlabauth.NormalizeBaseURL(raw)
+	}
+	return gitlabauth.DefaultBaseURL
+}
+
+func buildGitLabAuthMetadata(baseURL, mode string, tokenResp *gitlabauth.TokenResponse, direct *gitlabauth.DirectAccessResponse) map[string]any {
+	metadata := map[string]any{
+		"type":                     "gitlab",
+		"auth_method":              strings.TrimSpace(mode),
+		"base_url":                 gitlabauth.NormalizeBaseURL(baseURL),
+		"last_refresh":             time.Now().UTC().Format(time.RFC3339),
+		"refresh_interval_seconds": 240,
+	}
+	if tokenResp != nil {
+		metadata["access_token"] = strings.TrimSpace(tokenResp.AccessToken)
+		if refreshToken := strings.TrimSpace(tokenResp.RefreshToken); refreshToken != "" {
+			metadata["refresh_token"] = refreshToken
+		}
+		if tokenType := strings.TrimSpace(tokenResp.TokenType); tokenType != "" {
+			metadata["token_type"] = tokenType
+		}
+		if scope := strings.TrimSpace(tokenResp.Scope); scope != "" {
+			metadata["scope"] = scope
+		}
+		if expiry := gitlabauth.TokenExpiry(time.Now(), tokenResp); !expiry.IsZero() {
+			metadata["oauth_expires_at"] = expiry.Format(time.RFC3339)
+		}
+	}
+	mergeGitLabDirectAccessMetadata(metadata, direct)
+	return metadata
+}
+
+func mergeGitLabDirectAccessMetadata(metadata map[string]any, direct *gitlabauth.DirectAccessResponse) {
+	if metadata == nil || direct == nil {
+		return
+	}
+	if base := strings.TrimSpace(direct.BaseURL); base != "" {
+		metadata["duo_gateway_base_url"] = base
+	}
+	if token := strings.TrimSpace(direct.Token); token != "" {
+		metadata["duo_gateway_token"] = token
+	}
+	if direct.ExpiresAt > 0 {
+		expiry := time.Unix(direct.ExpiresAt, 0).UTC()
+		metadata["duo_gateway_expires_at"] = expiry.Format(time.RFC3339)
+		if ttl := expiry.Sub(time.Now().UTC()); ttl > 0 {
+			interval := int(ttl.Seconds()) / 2
+			if interval < 60 {
+				interval = 60
+			}
+			metadata["refresh_interval_seconds"] = interval
+		}
+	}
+	if len(direct.Headers) > 0 {
+		headers := make(map[string]string, len(direct.Headers))
+		for key, value := range direct.Headers {
+			headers[key] = value
+		}
+		metadata["headers"] = headers
+	}
+	if direct.ModelDetails != nil {
+		modelDetails := map[string]any{}
+		if provider := strings.TrimSpace(direct.ModelDetails.ModelProvider); provider != "" {
+			modelDetails["model_provider"] = provider
+			metadata["model_provider"] = provider
+		}
+		if model := strings.TrimSpace(direct.ModelDetails.ModelName); model != "" {
+			modelDetails["model_name"] = model
+			metadata["model_name"] = model
+		}
+		if len(modelDetails) > 0 {
+			metadata["model_details"] = modelDetails
+		}
+	}
+}
+
+func primaryGitLabEmail(user *gitlabauth.User) string {
+	if user == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(user.Email); value != "" {
+		return value
+	}
+	return strings.TrimSpace(user.PublicEmail)
+}
+
+func gitLabAccountIdentifier(user *gitlabauth.User) string {
+	if user == nil {
+		return "user"
+	}
+	for _, value := range []string{user.Username, primaryGitLabEmail(user), user.Name} {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "user"
+}
+
+func sanitizeGitLabFileName(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "user"
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	result := strings.Trim(builder.String(), "-")
+	if result == "" {
+		return "user"
+	}
+	return result
+}
+
+func maskGitLabToken(token string) string {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) <= 8 {
+		return trimmed
+	}
+	return trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
+}
+
+func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
+	ctx := PopulateAuthContext(context.Background(), c)
+
+	var payload struct {
+		BaseURL             string `json:"base_url"`
+		PersonalAccessToken string `json:"personal_access_token"`
+		Token               string `json:"token"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		return
+	}
+
+	baseURL := gitLabBaseURLFromRequest(c)
+	if rawBaseURL := strings.TrimSpace(payload.BaseURL); rawBaseURL != "" {
+		baseURL = gitlabauth.NormalizeBaseURL(rawBaseURL)
+	}
+	pat := strings.TrimSpace(payload.PersonalAccessToken)
+	if pat == "" {
+		pat = strings.TrimSpace(payload.Token)
+	}
+	if pat == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "personal_access_token is required"})
+		return
+	}
+
+	authClient := gitlabauth.NewAuthClient(h.cfg)
+	user, err := authClient.GetCurrentUser(ctx, baseURL, pat)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+	patSelf, err := authClient.GetPersonalAccessTokenSelf(ctx, baseURL, pat)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+	direct, err := authClient.FetchDirectAccess(ctx, baseURL, pat)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+
+	identifier := gitLabAccountIdentifier(user)
+	fileName := fmt.Sprintf("gitlab-%s-pat.json", sanitizeGitLabFileName(identifier))
+	metadata := buildGitLabAuthMetadata(baseURL, "pat", nil, direct)
+	metadata["auth_kind"] = "personal_access_token"
+	metadata["personal_access_token"] = pat
+	metadata["token_preview"] = maskGitLabToken(pat)
+	metadata["username"] = strings.TrimSpace(user.Username)
+	if email := primaryGitLabEmail(user); email != "" {
+		metadata["email"] = email
+	}
+	metadata["name"] = strings.TrimSpace(user.Name)
+	if patSelf != nil {
+		if name := strings.TrimSpace(patSelf.Name); name != "" {
+			metadata["pat_name"] = name
+		}
+		if len(patSelf.Scopes) > 0 {
+			metadata["pat_scopes"] = append([]string(nil), patSelf.Scopes...)
+		}
+	}
+
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "gitlab",
+		FileName: fileName,
+		Label:    identifier + " (PAT)",
+		Metadata: metadata,
+	}
+	savedPath, err := h.saveTokenRecord(ctx, record)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save authentication tokens"})
+		return
+	}
+
+	response := gin.H{
+		"status":      "ok",
+		"saved_path":  savedPath,
+		"username":    strings.TrimSpace(user.Username),
+		"email":       primaryGitLabEmail(user),
+		"token_label": identifier,
+	}
+	if direct != nil && direct.ModelDetails != nil {
+		if provider := strings.TrimSpace(direct.ModelDetails.ModelProvider); provider != "" {
+			response["model_provider"] = provider
+		}
+		if model := strings.TrimSpace(direct.ModelDetails.ModelName); model != "" {
+			response["model_name"] = model
+		}
+	}
+
+	fmt.Printf("GitLab Duo PAT authentication successful. Token saved to %s\n", savedPath)
+	c.JSON(http.StatusOK, response)
 }
 
 // PopulateAuthContext extracts request info and adds it to the context

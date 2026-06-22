@@ -352,6 +352,121 @@ test_check_invariants_detects_missing_pattern() {
   ) > "${out}" 2>&1
 }
 
+test_plan_reports_target_drift_from_recorded_state() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local out=${root}/plan.out
+
+  cat > "${fork}/.ccs-fork-upstream.env" <<'EOF'
+ORIGINAL_TAG=v7.1.45
+ORIGINAL_COMMIT=old-original
+PLUS_TAG=v7.1.45-0
+PLUS_TAG_COMMIT=old-plus-tag
+PLUS_HEAD_COMMIT=old-plus-head
+PLUS_HEAD_INCLUDED=false
+EOF
+  run_git -C "${fork}" add .ccs-fork-upstream.env
+  run_git -C "${fork}" commit -m "record old upstream state" >/dev/null
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+
+  assert_contains "${out}" "target_drift=true"
+  # shellcheck disable=SC2016
+  assert_contains "${out}" 'Original tag: `v7.1.45` -> `v7.1.66`'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" 'Original commit: `old-original` -> `'
+  assert_contains "${out}" $'\nPlus tag: `v7.1.45-0` -> `v7.1.66-0`'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" 'Plus tag commit: `old-plus-tag` -> `'
+}
+
+test_replay_plan_reports_all_phase_conflicts_and_gates() {
+  local root
+  root=$(mktemp -d)
+  local original=${root}/original
+  local plus=${root}/plus
+  local fork=${root}/fork
+  local origin=${root}/origin.git
+  local out=${root}/replay.out
+
+  new_repo "${original}"
+  commit_file "${original}" README.md base "original base"
+  commit_file "${original}" original-conflict.txt base "original conflict base"
+  commit_file "${original}" plus-conflict.txt base "plus conflict base"
+  run_git -C "${original}" tag v7.1.45
+
+  clone_for_fork "${original}" "${plus}"
+  run_git -C "${plus}" tag v7.1.45-0
+
+  clone_for_fork "${plus}" "${fork}"
+  mkdir -p "${fork}/.github"
+  printf '\n' > "${fork}/.github/upstream-sync-invariants.tsv"
+  commit_file "${fork}" original-conflict.txt fork-original "fork original conflict"
+  commit_file "${fork}" plus-conflict.txt fork-plus "fork plus conflict"
+  commit_file "${fork}" .github/upstream-sync-invariants.tsv "" "add empty invariants"
+  run_git -C "${fork}" tag v7.1.45-unstableneutron.0
+
+  run_git clone -q --bare "${fork}" "${origin}"
+  run_git -C "${fork}" remote set-url origin "${origin}"
+  run_git -C "${fork}" remote add original-upstream "${original}"
+  run_git -C "${fork}" remote add plus-upstream "${plus}"
+
+  commit_file "${original}" original-conflict.txt original-new "original new conflict"
+  run_git -C "${original}" tag v7.1.66
+  commit_file "${plus}" plus-conflict.txt plus-new "plus new conflict"
+  run_git -C "${plus}" tag v7.1.66-0
+
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_REPLAY_BUILD_CMD=true \
+      UPSTREAM_SYNC_REPLAY_TEST_CMD=true \
+      "${HELPER}" replay-plan > "${out}" 2>&1
+  )
+
+  assert_contains "${out}" "Original tag: v7.1.66"
+  assert_contains "${out}" "Plus tag: v7.1.66-0"
+  assert_contains "${out}" "original-conflict.txt"
+  assert_contains "${out}" "plus-conflict.txt"
+  assert_contains "${out}" "Original merge: conflicts=true"
+  assert_contains "${out}" "Plus release overlay: conflicts=true"
+  assert_contains "${out}" "Invariant status: passed"
+  assert_contains "${out}" "Build status: passed"
+  assert_contains "${out}" "Test status: passed"
+
+  if ! run_git -C "${fork}" diff --quiet; then
+    run_git -C "${fork}" status --short >&2
+    fail "replay-plan mutated the source checkout"
+  fi
+}
+
+test_replay_plan_fails_when_gate_fails() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local out=${root}/replay-fail.out
+
+  (
+    cd "${fork}"
+    set +e
+    UPSTREAM_SYNC_REPLAY_BUILD_CMD=false \
+      UPSTREAM_SYNC_REPLAY_TEST_CMD=true \
+      "${HELPER}" replay-plan > "${out}" 2>&1
+    status=$?
+    set -e
+    if [ "${status}" -eq 0 ]; then
+      fail "expected replay-plan to fail when build gate fails"
+    fi
+  )
+
+  assert_contains "${out}" "Build status: failed"
+}
+
 main() {
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
@@ -364,6 +479,9 @@ main() {
   test_original_merge_reports_owned_clobber_without_text_conflict
   test_original_merge_skips_identical_owned_path_touch
   test_check_invariants_detects_missing_pattern
+  test_plan_reports_target_drift_from_recorded_state
+  test_replay_plan_reports_all_phase_conflicts_and_gates
+  test_replay_plan_fails_when_gate_fails
   echo "[OK] upstream-sync helper tests passed"
 }
 

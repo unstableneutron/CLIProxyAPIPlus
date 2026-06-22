@@ -132,7 +132,7 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
+func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 
 	authData := map[string]any{
@@ -157,8 +157,11 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 0 {
-		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 Gemini auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "gemini-cli" {
+		t.Fatalf("gemini should be mapped to gemini-cli, got %s", auths[0].Provider)
 	}
 }
 
@@ -554,7 +557,7 @@ func TestFileSynthesizer_Synthesize_OAuthModelAliases(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_IgnoresGeminiOAuthFile(t *testing.T) {
+func TestFileSynthesizer_Synthesize_MultiProjectGeminiOAuthFile(t *testing.T) {
 	tempDir := t.TempDir()
 
 	authData := map[string]any{
@@ -581,8 +584,16 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiOAuthFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 0 {
-		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
+	if len(auths) != 4 {
+		t.Fatalf("expected Gemini auth file to create primary plus virtual auths, got %d auths", len(auths))
+	}
+	if auths[0].Provider != "gemini-cli" || auths[0].Attributes["gemini_virtual_primary"] != "true" {
+		t.Fatalf("expected disabled Gemini primary, got provider=%q attrs=%v", auths[0].Provider, auths[0].Attributes)
+	}
+	for i, auth := range auths[1:] {
+		if auth.Attributes["gemini_virtual_parent"] != auths[0].ID {
+			t.Fatalf("virtual %d parent = %q, want %q", i, auth.Attributes["gemini_virtual_parent"], auths[0].ID)
+		}
 	}
 }
 
