@@ -18,6 +18,11 @@ import (
 // OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
 const OpenAIImageModelType = "openai-image"
 
+const (
+	DefaultClaudeMaxInputTokens  = 200000
+	DefaultClaudeMaxOutputTokens = 64000
+)
+
 // ModelInfo represents information about an available model
 type ModelInfo struct {
 	// ID is the unique identifier for the model
@@ -1149,50 +1154,33 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
-		if len(model.SupportedEndpoints) > 0 {
-			result["supported_endpoints"] = model.SupportedEndpoints
-		}
 		return result
 
-	case "claude", "kiro", "antigravity":
-		// Claude, Kiro, and Antigravity all use Claude-compatible format for Claude Code client
+	case "claude":
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
 			"owned_by": model.OwnedBy,
 		}
 		if model.Created > 0 {
-			result["created_at"] = model.Created
+			result["created_at"] = time.Unix(model.Created, 0).UTC().Format(time.RFC3339)
 		}
-		if model.Type != "" {
-			result["type"] = "model"
-		}
+		result["type"] = "model"
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
+		} else {
+			result["display_name"] = model.ID
 		}
-		// Add thinking support for Claude Code client
-		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
-		// Also add "extended_thinking" for detailed budget info
-		if model.Thinking != nil {
-			result["thinking"] = true
-			result["extended_thinking"] = map[string]any{
-				"supported":       true,
-				"min":             model.Thinking.Min,
-				"max":             model.Thinking.Max,
-				"zero_allowed":    model.Thinking.ZeroAllowed,
-				"dynamic_allowed": model.Thinking.DynamicAllowed,
-			}
+		maxInput := model.ContextLength
+		if maxInput <= 0 {
+			maxInput = DefaultClaudeMaxInputTokens
 		}
-		// Include context limits so Claude Code can manage conversation
-		// context correctly, especially for Copilot-proxied models whose
-		// real prompt limit (128K-168K) is much lower than the 1M window
-		// that Claude Code may assume for Opus 4.6 with 1M context enabled.
-		if model.ContextLength > 0 {
-			result["context_length"] = model.ContextLength
+		maxOutput := model.MaxCompletionTokens
+		if maxOutput <= 0 {
+			maxOutput = DefaultClaudeMaxOutputTokens
 		}
-		if model.MaxCompletionTokens > 0 {
-			result["max_completion_tokens"] = model.MaxCompletionTokens
-		}
+		result["max_input_tokens"] = maxInput
+		result["max_tokens"] = maxOutput
 		return result
 
 	case "gemini":

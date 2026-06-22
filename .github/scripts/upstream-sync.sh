@@ -424,6 +424,62 @@ merge_lines() {
   awk 'NF && !seen[$0]++ { print }'
 }
 
+recorded_state_value() {
+  local key=$1
+  local file=.ccs-fork-upstream.env
+  [ -f "${file}" ] || return 0
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
+}
+
+append_drift_line() {
+  local label=$1
+  local old=$2
+  local new=$3
+  [ -n "${old}" ] || return 0
+  [ "${old}" != "${new}" ] || return 0
+  # shellcheck disable=SC2016
+  printf '%s: `%s` -> `%s`\n' "${label}" "${old}" "${new}"
+}
+
+phase_output_value() {
+  local file=$1
+  local key=$2
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
+}
+
+print_phase_report() {
+  local label=$1
+  local output_file=$2
+  local conflicts conflict_files
+  conflicts=$(phase_output_value "${output_file}" conflicts)
+  conflict_files=$(phase_output_value "${output_file}" conflict_files)
+
+  printf '%s: conflicts=%s\n' "${label}" "${conflicts:-false}"
+  if [ -n "${conflict_files}" ]; then
+    printf '%s\n' "${conflict_files}"
+  fi
+}
+
+run_replay_gate() {
+  local label=$1
+  shift
+  local log_file=$1
+  shift
+
+  set +e
+  "$@" > "${log_file}" 2>&1
+  local exit_code=$?
+  set -e
+
+  if [ "${exit_code}" -eq 0 ]; then
+    printf '%s status: passed\n' "${label}"
+  else
+    printf '%s status: failed\n' "${label}"
+    tail -n 40 "${log_file}" || true
+  fi
+  return "${exit_code}"
+}
+
 cmd_plan() {
   require_ownership_manifest
 
@@ -510,6 +566,21 @@ cmd_plan() {
   local safe_sync_id
   safe_sync_id="original-$(safe_ref_component "${original_tag}")_plus-$(safe_ref_component "${plus_tag}")"
 
+  local drift_summary="" drift_line="" target_drift=false
+  for drift_line in \
+    "$(append_drift_line "Original tag" "$(recorded_state_value ORIGINAL_TAG)" "${original_tag}")" \
+    "$(append_drift_line "Original commit" "$(recorded_state_value ORIGINAL_COMMIT)" "${original_commit}")" \
+    "$(append_drift_line "Plus tag" "$(recorded_state_value PLUS_TAG)" "${plus_tag}")" \
+    "$(append_drift_line "Plus tag commit" "$(recorded_state_value PLUS_TAG_COMMIT)" "${plus_tag_commit}")" \
+    "$(append_drift_line "Plus head commit" "$(recorded_state_value PLUS_HEAD_COMMIT)" "${plus_head_commit}")" \
+    "$(append_drift_line "Plus head included" "$(recorded_state_value PLUS_HEAD_INCLUDED)" "${plus_head_included}")"; do
+    [ -n "${drift_line}" ] || continue
+    drift_summary="${drift_summary}${drift_line}"$'\n'
+  done
+  if [ -n "${drift_summary}" ]; then
+    target_drift=true
+  fi
+
   write_kv original_repository "${ORIGINAL_REPOSITORY}"
   write_kv plus_repository "${PLUS_REPOSITORY}"
   write_kv original_head "${original_commit}"
@@ -526,6 +597,8 @@ cmd_plan() {
   write_kv latest_fork_suffix "${latest_fork_suffix}"
   write_kv next_fork_tag "${next_fork_tag}"
   write_kv safe_sync_id "${safe_sync_id}"
+  write_kv target_drift "${target_drift}"
+  write_kv target_drift_summary "${drift_summary}"
   write_kv has_changes "${has_changes}"
 
   echo "[i] original ${original_tag} (${original_commit})"
@@ -637,6 +710,72 @@ cmd_record_state() {
   } > .ccs-fork-upstream.env
 }
 
+cmd_replay_plan() {
+  require_ownership_manifest
+
+  local root replay_dir
+  root=$(mktemp -d)
+  replay_dir="${root}/repo"
+  git clone -q "$(pwd)" "${replay_dir}"
+
+  local remote_name remote_url
+  for remote_name in "${ORIGIN_REMOTE}" "${ORIGINAL_REMOTE}" "${PLUS_REMOTE}"; do
+    remote_url=$(git remote get-url "${remote_name}" 2>/dev/null || true)
+    [ -n "${remote_url}" ] || continue
+    if git -C "${replay_dir}" remote get-url "${remote_name}" >/dev/null 2>&1; then
+      git -C "${replay_dir}" remote set-url "${remote_name}" "${remote_url}"
+    else
+      git -C "${replay_dir}" remote add "${remote_name}" "${remote_url}"
+    fi
+  done
+
+  (
+    cd "${replay_dir}"
+    local plan_out original_out plus_tag_out plus_head_out invariant_log build_log test_log
+    plan_out="${root}/plan.out"
+    original_out="${root}/original.out"
+    plus_tag_out="${root}/plus-tag.out"
+    plus_head_out="${root}/plus-head.out"
+    invariant_log="${root}/invariants.log"
+    build_log="${root}/build.log"
+    test_log="${root}/test.log"
+
+    FORCE_REBUILD="${FORCE_REBUILD:-false}" GITHUB_OUTPUT="${plan_out}" "${BASH_SOURCE[0]}" plan >/dev/null
+
+    local original_tag plus_tag original_head plus_tag_head plus_head plus_head_included
+    original_tag=$(phase_output_value "${plan_out}" original_tag)
+    plus_tag=$(phase_output_value "${plan_out}" plus_tag)
+    original_head=$(phase_output_value "${plan_out}" original_head)
+    plus_tag_head=$(phase_output_value "${plan_out}" plus_tag_head)
+    plus_head=$(phase_output_value "${plan_out}" plus_head)
+    plus_head_included=$(phase_output_value "${plan_out}" plus_head_included)
+
+    printf 'Original tag: %s\n' "${original_tag}"
+    printf 'Plus tag: %s\n' "${plus_tag}"
+
+    GITHUB_OUTPUT="${original_out}" "${BASH_SOURCE[0]}" merge-ref original "${original_head}" >/dev/null
+    print_phase_report "Original merge" "${original_out}"
+
+    GITHUB_OUTPUT="${plus_tag_out}" "${BASH_SOURCE[0]}" merge-ref plus-tag "${plus_tag_head}" >/dev/null
+    print_phase_report "Plus release overlay" "${plus_tag_out}"
+
+    if [ "${plus_head_included}" = true ] && [ "${plus_head}" != "${plus_tag_head}" ]; then
+      GITHUB_OUTPUT="${plus_head_out}" "${BASH_SOURCE[0]}" merge-ref plus-head "${plus_head}" >/dev/null
+      print_phase_report "Plus head delta" "${plus_head_out}"
+    else
+      printf 'Plus head delta: skipped\n'
+    fi
+
+    local gate_failed=false
+    run_replay_gate "Invariant" "${invariant_log}" "${BASH_SOURCE[0]}" check-invariants || gate_failed=true
+    run_replay_gate "Build" "${build_log}" bash -c "${UPSTREAM_SYNC_REPLAY_BUILD_CMD:-go build -o test-output ./cmd/server && rm test-output}" || gate_failed=true
+    run_replay_gate "Test" "${test_log}" bash -c "${UPSTREAM_SYNC_REPLAY_TEST_CMD:-go test ./...}" || gate_failed=true
+    if [ "${gate_failed}" = true ]; then
+      return 1
+    fi
+  )
+}
+
 cmd_classify_paths() {
   require_ownership_manifest
 
@@ -688,11 +827,12 @@ main() {
   case "${cmd}" in
     plan) cmd_plan "$@" ;;
     merge-ref) cmd_merge_ref "$@" ;;
+    replay-plan) cmd_replay_plan "$@" ;;
     record-state) cmd_record_state "$@" ;;
     classify-paths) cmd_classify_paths "$@" ;;
     check-invariants) cmd_check_invariants "$@" ;;
     pending-overlay-branch) cmd_pending_overlay_branch "$@" ;;
-    *) die "usage: $0 {plan|merge-ref|record-state|classify-paths|check-invariants|pending-overlay-branch}" ;;
+    *) die "usage: $0 {plan|merge-ref|replay-plan|record-state|classify-paths|check-invariants|pending-overlay-branch}" ;;
   esac
 }
 
