@@ -195,6 +195,25 @@ test_original_merge_protects_plus_owned_paths() {
   fi
 }
 
+test_original_merge_supports_linked_worktree() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local linked=${root}/fork-worktree
+  local out=${root}/worktree-merge.out
+
+  run_git -C "${fork}" worktree add -q -b linked-worktree "${linked}" HEAD
+
+  (
+    cd "${linked}"
+    run_git fetch -q original-upstream refs/tags/v7.1.66:refs/tags/v7.1.66
+    GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.66 >/dev/null
+  )
+
+  assert_contains "${out}" "conflicts=false"
+}
+
 test_plus_merge_can_update_plus_owned_paths() {
   local root
   root=$(mktemp -d)
@@ -473,6 +492,7 @@ main() {
   test_includes_safe_plus_head_delta
   test_blocks_unsafe_plus_head_delta
   test_original_merge_protects_plus_owned_paths
+  test_original_merge_supports_linked_worktree
   test_plus_merge_can_update_plus_owned_paths
   test_pending_overlay_branch_name_is_stable
   test_manifest_classifies_fork_surfaces

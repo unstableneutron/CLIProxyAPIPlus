@@ -270,8 +270,9 @@ phase_key() {
 }
 
 install_original_merge_attributes() {
-  local attrs=.git/info/attributes
-  mkdir -p .git/info
+  local attrs
+  attrs=$(git rev-parse --git-path info/attributes)
+  mkdir -p "$(dirname -- "${attrs}")"
   [ ! -f "${attrs}" ] || cp "${attrs}" "${attrs}.upstream-sync.bak"
   {
     echo '# upstream-sync original merge protections'
@@ -292,7 +293,8 @@ install_original_merge_attributes() {
 }
 
 restore_original_merge_attributes() {
-  local attrs=.git/info/attributes
+  local attrs
+  attrs=$(git rev-parse --git-path info/attributes)
   if [ -f "${attrs}.upstream-sync.bak" ]; then
     mv "${attrs}.upstream-sync.bak" "${attrs}"
   else
