@@ -154,6 +154,14 @@ func TestNewCodexStatusErrClassifiesKnownCodexFailures(t *testing.T) {
 			wantCode:   "thinking_signature_invalid",
 		},
 		{
+			name:       "wrapped encrypted content prefix mismatch",
+			statusCode: http.StatusInternalServerError,
+			body:       []byte(`{"error":{"message":"litellm.APIConnectionError: Bedrock_mantleException - {\"error\":{\"code\":\"validation_error\",\"message\":\"encrypted content missing recognized prefix (expected ` + "`rsn_` or `smry_`" + `)\",\"param\":null,\"type\":\"invalid_request_error\"}}. Received Model Group=gpt-5.5-aws\nAvailable Model Group Fallbacks=None","type":null,"param":null,"code":"500"}}`),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantCode:   "thinking_signature_invalid",
+		},
+		{
 			name:       "previous response missing",
 			statusCode: http.StatusBadRequest,
 			body:       []byte(`{"error":{"message":"No response found for previous_response_id resp_123","type":"invalid_request_error","code":"previous_response_not_found"}}`),

@@ -110,6 +110,8 @@ type websocketEncryptedContentRetryExecutor struct {
 	mu                          sync.Mutex
 	payloads                    [][]byte
 	successes                   int
+	encryptedErrorStatus        int
+	encryptedErrorMessage       string
 	startupBeforeEncryptedError [][]byte
 }
 
@@ -335,9 +337,17 @@ func (e *websocketEncryptedContentRetryExecutor) ExecuteStream(_ context.Context
 		for _, payload := range e.startupBeforeEncryptedError {
 			chunks <- coreexecutor.StreamChunk{Payload: bytes.Clone(payload)}
 		}
+		status := e.encryptedErrorStatus
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		message := e.encryptedErrorMessage
+		if message == "" {
+			message = `{"error":{"message":"Encrypted content could not be verified","type":"invalid_request_error","code":"invalid_encrypted_content"}}`
+		}
 		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
-			status: http.StatusBadRequest,
-			msg:    `{"error":{"message":"Encrypted content could not be verified","type":"invalid_request_error","code":"invalid_encrypted_content"}}`,
+			status: status,
+			msg:    message,
 		}}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
@@ -2388,6 +2398,84 @@ func TestResponsesWebsocketRetriesInvalidEncryptedContentWithoutEncryptedContent
 	}
 	if got := gjson.GetBytes(payloads[1], "input.0.summary.0.text").String(); got != "kept" {
 		t.Fatalf("retry payload lost reasoning summary: %s", payloads[1])
+	}
+}
+
+func TestResponsesWebsocketRetriesEncryptedContentMissingRecognizedPrefix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	modelName := "encrypted-content-prefix-retry-model"
+	executor := &websocketEncryptedContentRetryExecutor{
+		encryptedErrorStatus: http.StatusBadRequest,
+		encryptedErrorMessage: `{"error":{"message":"litellm.APIConnectionError: Bedrock_mantleException - {\"error\":{\"code\":\"validation_error\",\"message\":\"encrypted content missing recognized prefix (expected ` +
+			"`rsn_` or `smry_`" +
+			`)\",\"param\":null,\"type\":\"invalid_request_error\"}}. Received Model Group=gpt-5.5-aws\nAvailable Model Group Fallbacks=None","type":null,"param":null,"code":"500"}}`,
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-ws-encrypted-prefix-retry",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	request := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"reasoning","id":"rs-1","encrypted_content":"sealed","summary":[{"type":"summary_text","text":"kept"}]},{"type":"message","id":"msg-1","role":"user","content":"hi"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+		t.Fatalf("write websocket message: %v", errWrite)
+	}
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("payload type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("upstream payload count = %d, want 2", len(payloads))
+	}
+	if gjson.GetBytes(payloads[1], "input.0.encrypted_content").Exists() {
+		t.Fatalf("retry payload still has encrypted_content: %s", payloads[1])
+	}
+	if got := gjson.GetBytes(payloads[1], "input.0.summary.0.text").String(); got != "kept" {
+		t.Fatalf("retry payload lost reasoning summary: %s", payloads[1])
+	}
+}
+
+func TestResponsesWebsocketInvalidEncryptedContentRecognizesPrefixMismatchWrapper(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusInternalServerError,
+		Error: errors.New(`{"error":{"message":"litellm.APIConnectionError: Bedrock_mantleException - {\"error\":{\"code\":\"validation_error\",\"message\":\"encrypted content missing recognized prefix (expected ` +
+			"`rsn_` or `smry_`" +
+			`)\",\"param\":null,\"type\":\"invalid_request_error\"}}. Received Model Group=gpt-5.5-aws\nAvailable Model Group Fallbacks=None","type":null,"param":null,"code":"500"}}`),
+	}
+
+	if !responsesWebsocketInvalidEncryptedContent(errMsg) {
+		t.Fatalf("expected prefix-mismatch wrapper to be recognized as invalid encrypted content")
 	}
 }
 

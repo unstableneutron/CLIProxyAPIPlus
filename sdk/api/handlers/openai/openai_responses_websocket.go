@@ -1894,7 +1894,11 @@ func responsesWebsocketPayloadPreviousResponseNotFound(payload []byte) bool {
 }
 
 func responsesWebsocketInvalidEncryptedContent(errMsg *interfaces.ErrorMessage) bool {
-	if responsesWebsocketErrorStatus(errMsg) != http.StatusBadRequest || errMsg == nil || errMsg.Error == nil {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	status := responsesWebsocketErrorStatus(errMsg)
+	if status != 0 && status != http.StatusBadRequest && status < http.StatusInternalServerError {
 		return false
 	}
 	return responsesWebsocketPayloadInvalidEncryptedContent([]byte(strings.TrimSpace(errMsg.Error.Error())))
@@ -1911,14 +1915,20 @@ func responsesWebsocketPayloadInvalidEncryptedContent(payload []byte) bool {
 			}
 		}
 		for _, path := range []string{"error.message", "body.error.message", "message", "response.error.message"} {
-			message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String()))
-			if strings.Contains(message, "encrypted content") && strings.Contains(message, "could not be verified") {
+			if responsesWebsocketInvalidEncryptedContentMessage(gjson.GetBytes(payload, path).String()) {
 				return true
 			}
 		}
 	}
-	lower := strings.ToLower(strings.TrimSpace(string(payload)))
-	return strings.Contains(lower, "encrypted content") && strings.Contains(lower, "could not be verified")
+	return responsesWebsocketInvalidEncryptedContentMessage(string(payload))
+}
+
+func responsesWebsocketInvalidEncryptedContentMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if !strings.Contains(lower, "encrypted content") {
+		return false
+	}
+	return strings.Contains(lower, "could not be verified") || strings.Contains(lower, "recognized prefix")
 }
 
 func responsesWebsocketRetryErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {

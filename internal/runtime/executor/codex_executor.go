@@ -1654,6 +1654,9 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
 		errCode = http.StatusTooManyRequests
 	}
+	if code, _, ok := codexStatusErrorClassification(errCode, body); ok && code == "thinking_signature_invalid" && errCode >= http.StatusInternalServerError {
+		errCode = http.StatusBadRequest
+	}
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body)}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
@@ -1697,7 +1700,7 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 	switch {
 	case statusCode == http.StatusRequestEntityTooLarge || upstreamCode == "context_length_exceeded" || upstreamCode == "context_too_large" || isInvalidRequest && (strings.Contains(errorMessage, "context length") || strings.Contains(errorMessage, "context_length") || strings.Contains(errorMessage, "maximum context") || strings.Contains(errorMessage, "too many tokens")):
 		return "context_too_large", "invalid_request_error", true
-	case strings.Contains(lower, "invalid signature in thinking block") || strings.Contains(lower, "invalid_encrypted_content"):
+	case strings.Contains(lower, "invalid signature in thinking block") || strings.Contains(lower, "invalid_encrypted_content") || strings.Contains(lower, "encrypted content") && strings.Contains(lower, "recognized prefix"):
 		return "thinking_signature_invalid", "invalid_request_error", true
 	case upstreamCode == "previous_response_not_found" || strings.Contains(lower, "previous_response_not_found") || strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found"):
 		return "previous_response_not_found", "invalid_request_error", true
