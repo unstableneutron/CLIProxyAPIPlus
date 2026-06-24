@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -152,7 +151,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes["path"] = path
+	auth.Attributes[cliproxyauth.AttributePath] = path
+	auth.Attributes[cliproxyauth.AttributeSource] = path
+	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceFile
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
@@ -265,8 +266,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 				if auth.Attributes == nil {
 					auth.Attributes = make(map[string]string)
 				}
-				auth.Attributes["path"] = path
-				auth.Attributes["source"] = path
+				auth.Attributes[cliproxyauth.AttributePath] = path
+				auth.Attributes[cliproxyauth.AttributeSource] = path
+				auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceFile
 				cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 			}
 			return auths, nil
@@ -306,43 +308,26 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if disabled {
 		status = cliproxyauth.StatusDisabled
 	}
-
-	// Calculate NextRefreshAfter from expires_at (20 minutes before expiry)
-	var nextRefreshAfter time.Time
-	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
-		if expiresAt, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
-			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
-		}
-	}
-
 	auth := &cliproxyauth.Auth{
-		ID:               id,
-		Provider:         provider,
-		Prefix:           authFilePrefix(metadata),
-		FileName:         id,
-		Label:            s.labelFor(metadata),
-		Status:           status,
-		Disabled:         disabled,
-		Attributes:       map[string]string{"path": path},
+		ID:       id,
+		Provider: provider,
+		FileName: id,
+		Label:    s.labelFor(metadata),
+		Status:   status,
+		Disabled: disabled,
+		Attributes: map[string]string{
+			cliproxyauth.AttributePath:          path,
+			cliproxyauth.AttributeSource:        path,
+			cliproxyauth.AttributeSourceBackend: cliproxyauth.AuthSourceFile,
+		},
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: nextRefreshAfter,
+		NextRefreshAfter: time.Time{},
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
-	}
-	if provider == "qoder" {
-		var storage qoderauth.QoderTokenStorage
-		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
-				if strings.TrimSpace(storage.Type) == "" {
-					storage.Type = "qoder"
-				}
-				auth.Storage = &storage
-			}
-		}
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
@@ -427,21 +412,6 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
 	return filepath.Join(dir, auth.ID), nil
-}
-
-func authFilePrefix(metadata map[string]any) string {
-	if metadata == nil {
-		return ""
-	}
-	rawPrefix, ok := metadata["prefix"].(string)
-	if !ok {
-		return ""
-	}
-	trimmed := strings.Trim(strings.TrimSpace(rawPrefix), "/")
-	if trimmed == "" || strings.Contains(trimmed, "/") {
-		return ""
-	}
-	return trimmed
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {
