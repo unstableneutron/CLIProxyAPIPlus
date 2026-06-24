@@ -20,8 +20,11 @@ Never call upstream sync done from a green workflow alone. Prove actual `main`, 
 
 2. **Resolve the sync PR as an overlay**
    - Treat sync PRs as preview branches until local validation passes.
+   - If `replay-plan` reports conflicts or failing gates during maintenance, attempt a local repair before declaring the sync blocked. Create or reuse a resolution branch from current fork `main`, reproduce the phase with `merge-ref`, make the smallest overlay fix, and rerun `replay-plan`.
    - Preserve owner intent from `.github/upstream-sync-ownership.tsv`; no side wins by default on shared hotspots.
+   - Mechanical owner-class conflicts can use the owner policy as a starting point; shared hotspots must be manually composed. Never blanket `ours` or `theirs`.
    - Check `.github/upstream-sync-invariants.tsv` after conflicts. Non-conflicting Git auto-merges can still clobber owned behavior.
+   - When a conflict also exposes test or replay failures, fix the behavioral root cause in the same cycle before acceptance. Recent example: `sdk/cliproxy/auth/conductor.go` needed bootstrap-marker, CommandCode, proxy-selection, `NextRefreshAfter`, and force-mapped stream behavior composed together; the replay then exposed the Codex image edit endpoint drift in `internal/runtime/executor/codex_openai_images.go`.
    - Re-check hotspots: fallback/`NoRoute`, executor sanitization, selected-auth/proxy-status, CommandCode, Gemini CLI, live model catalog, aliases, release branding, and CGO/plugin settings.
    - Also re-check hotspots seen in recent overlays: model registry `SupportedEndpoints`; server module/route registration for Amp, usage, GitLab PAT, management CORS, and ChatGPT backend fallback; auth-file callback host, GitLab PAT metadata, Kiro token persistence, `excluded_models`, and post-auth persistence; Gemini OpenAI Responses thought-only handling; watcher synthesis for CommandCode auth and Gemini virtual auths; Codex websocket executor tests when upstream adds raw-payload passthrough coverage.
 
@@ -72,11 +75,13 @@ If upstream-sync is green but no tag appears:
 3. If blocked reporting succeeds but the workflow did not fail, treat that as a workflow bug; blocked non-force sync failures must fail after reporting.
 4. Reproduce reported failures locally with the gate set above.
 5. Patch `main`, push, and rerun normal-mode sync. Do not create the tag manually unless workflow logic is broken.
+6. If the maintenance automation attempted repair and still blocked, include exactly what was tried, the branch publication state, and the next manual action. If repair succeeded, classify the run as `auto-resolved` or `released`, not merely `clean`.
 
 ## Common Mistakes
 
 - Treating workflow-level success as release success.
 - Merging a resolved sync PR without running the normal-mode acceptance sync afterward.
+- Reporting blocked before attempting a reasonable local repair for conflict or gate failures.
 - Trusting a conflict-free merge without checking ownership clobbers and invariants.
 - Letting original or Plus overwrite fork-owned workflow, Gemini CLI, CommandCode, or release behavior.
 - Declaring Docker/release complete before checking the follow-up runs.
