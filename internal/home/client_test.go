@@ -314,6 +314,37 @@ func TestGetPluginTasksUsesPluginTasksKey(t *testing.T) {
 	}
 }
 
+func TestAckPluginTasksRemovesCompletedIDs(t *testing.T) {
+	payload := `[{"id":7,"operation":"delete","plugin_id":"sample"},{"id":8,"operation":"delete","plugin_id":"other"}]`
+	client, commands := newRedisCommandTestClient(t, func(args []string) string {
+		if len(args) > 0 && strings.EqualFold(args[0], "GET") {
+			return fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+		}
+		if len(args) > 0 && strings.EqualFold(args[0], "SET") {
+			return "+OK\r\n"
+		}
+		return "-ERR unexpected command\r\n"
+	})
+
+	if errAck := client.AckPluginTasks(context.Background(), 7); errAck != nil {
+		t.Fatalf("AckPluginTasks() error = %v", errAck)
+	}
+	got := commands.Last()
+	if len(got) != 3 || !strings.EqualFold(got[0], "SET") || got[1] != "plugin-tasks" {
+		t.Fatalf("SET command = %#v, want SET plugin-tasks <payload>", got)
+	}
+	var remaining []PluginTask
+	if errUnmarshal := json.Unmarshal([]byte(got[2]), &remaining); errUnmarshal != nil {
+		t.Fatalf("unmarshal remaining tasks: %v", errUnmarshal)
+	}
+	if len(remaining) != 1 || remaining[0].ID != 8 || remaining[0].PluginID != "other" {
+		t.Fatalf("remaining tasks = %+v, want only task 8", remaining)
+	}
+	if strings.Contains(got[2], "0001-01-01") {
+		t.Fatalf("remaining payload should preserve raw task JSON, got %s", got[2])
+	}
+}
+
 type redisCommandLog struct {
 	mu       sync.Mutex
 	commands [][]string

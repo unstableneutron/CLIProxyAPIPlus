@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -180,6 +182,39 @@ func TestFileTokenStoreListPluginHandledEmptySuppressesBuiltin(t *testing.T) {
 	}
 	if len(auths) != 0 {
 		t.Fatalf("List() len = %d, want plugin-handled empty result", len(auths))
+	}
+}
+
+func TestFileTokenStoreReadAuthFilePreservesFileMetadata(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "qoder.json")
+	expiresAt := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	payload := `{"type":"qoder","prefix":"/team/","email":"qoder@example.com","expires_at":"` + expiresAt.Format(time.RFC3339) + `","token":"tok","refresh_token":"refresh"}`
+	if errWrite := os.WriteFile(path, []byte(payload), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth, errRead := store.readAuthFile(path, baseDir)
+	if errRead != nil {
+		t.Fatalf("readAuthFile() error = %v", errRead)
+	}
+	if auth.Prefix != "team" {
+		t.Fatalf("Prefix = %q, want team", auth.Prefix)
+	}
+	wantRefresh := expiresAt.Add(-20 * time.Minute)
+	if !auth.NextRefreshAfter.Equal(wantRefresh) {
+		t.Fatalf("NextRefreshAfter = %s, want %s", auth.NextRefreshAfter, wantRefresh)
+	}
+	if auth.Attributes[cliproxyauth.AttributePath] != path ||
+		auth.Attributes[cliproxyauth.AttributeSource] != path ||
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] != cliproxyauth.AuthSourceFile {
+		t.Fatalf("attributes = %#v, want file source attributes", auth.Attributes)
+	}
+	storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage)
+	if !ok || storage.Type != "qoder" || storage.Token != "tok" || storage.RefreshToken != "refresh" {
+		t.Fatalf("Storage = %#v, want qoder token storage", auth.Storage)
 	}
 }
 

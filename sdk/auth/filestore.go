@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -308,9 +309,18 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if disabled {
 		status = cliproxyauth.StatusDisabled
 	}
+
+	var nextRefreshAfter time.Time
+	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
+		if expiresAt, errParse := time.Parse(time.RFC3339, expiresAtStr); errParse == nil {
+			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
+		}
+	}
+
 	auth := &cliproxyauth.Auth{
 		ID:       id,
 		Provider: provider,
+		Prefix:   authFilePrefix(metadata),
 		FileName: id,
 		Label:    s.labelFor(metadata),
 		Status:   status,
@@ -324,10 +334,21 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		CreatedAt:        info.ModTime(),
 		UpdatedAt:        info.ModTime(),
 		LastRefreshedAt:  time.Time{},
-		NextRefreshAfter: time.Time{},
+		NextRefreshAfter: nextRefreshAfter,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	if provider == "qoder" {
+		var storage qoderauth.QoderTokenStorage
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
+				if strings.TrimSpace(storage.Type) == "" {
+					storage.Type = "qoder"
+				}
+				auth.Storage = &storage
+			}
+		}
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return []*cliproxyauth.Auth{auth}, nil
@@ -412,6 +433,21 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
 	return filepath.Join(dir, auth.ID), nil
+}
+
+func authFilePrefix(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	rawPrefix, ok := metadata["prefix"].(string)
+	if !ok {
+		return ""
+	}
+	trimmed := strings.Trim(strings.TrimSpace(rawPrefix), "/")
+	if trimmed == "" || strings.Contains(trimmed, "/") {
+		return ""
+	}
+	return trimmed
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {

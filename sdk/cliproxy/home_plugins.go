@@ -45,25 +45,25 @@ func (s *Service) markHomePluginsSynced(syncKey string) {
 	s.homePluginSyncMu.Unlock()
 }
 
-func (s *Service) reportHomePluginStatus(ctx context.Context, cfg *config.Config, report homeplugins.SyncReport) {
+func (s *Service) reportHomePluginStatus(ctx context.Context, cfg *config.Config, report homeplugins.SyncReport) error {
 	if s == nil || cfg == nil {
-		return
+		return nil
 	}
 	if s.homeClient == nil {
 		log.Warn("failed to report home plugin status: home client is unavailable")
-		return
+		return fmt.Errorf("home client is unavailable")
 	}
 	nodeID := strings.TrimSpace(cfg.Home.NodeID)
 	if nodeID == "" {
 		log.Warn("failed to report home plugin status: node id is empty")
-		return
+		return fmt.Errorf("home node id is empty")
 	}
 	report.NodeID = nodeID
 	report.UpdatedAt = time.Now().UTC()
 	raw, errMarshal := json.Marshal(report)
 	if errMarshal != nil {
 		log.Warnf("failed to marshal home plugin status: %v", errMarshal)
-		return
+		return errMarshal
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -72,7 +72,9 @@ func (s *Service) reportHomePluginStatus(ctx context.Context, cfg *config.Config
 	defer cancel()
 	if errReport := s.homeClient.RPushPluginStatus(reportCtx, raw); errReport != nil {
 		log.Warnf("failed to report home plugin status: %v", errReport)
+		return errReport
 	}
+	return nil
 }
 
 func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config) {
@@ -87,6 +89,7 @@ func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config
 		log.Warnf("failed to fetch home plugin tasks: %v", errTasks)
 		return
 	}
+	acked := make([]uint, 0, len(tasks))
 	for _, task := range tasks {
 		if !strings.EqualFold(strings.TrimSpace(task.Operation), "delete") {
 			continue
@@ -95,7 +98,15 @@ func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config
 		if !report.OK && strings.TrimSpace(report.Error) != "" {
 			log.Warnf("failed to process home plugin delete task %d for %s: %v", task.ID, task.PluginID, report.Error)
 		}
-		s.reportHomePluginStatus(ctx, cfg, report)
+		errReport := s.reportHomePluginStatus(ctx, cfg, report)
+		if report.OK && errReport == nil {
+			acked = append(acked, task.ID)
+		}
+	}
+	if len(acked) > 0 {
+		if errAck := s.homeClient.AckPluginTasks(ctx, acked...); errAck != nil {
+			log.Warnf("failed to acknowledge home plugin tasks: %v", errAck)
+		}
 	}
 }
 

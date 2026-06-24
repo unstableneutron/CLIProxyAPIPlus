@@ -930,6 +930,60 @@ func (c *Client) GetPluginTasks(ctx context.Context) ([]PluginTask, error) {
 	return tasks, nil
 }
 
+func (c *Client) AckPluginTasks(ctx context.Context, ids ...uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ackIDs := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		ackIDs[id] = struct{}{}
+	}
+	if len(ackIDs) == 0 {
+		return nil
+	}
+
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return errClient
+	}
+	raw, errGet := cmd.Get(ctx, redisKeyPluginTasks).Bytes()
+	if errors.Is(errGet, redis.Nil) {
+		return nil
+	}
+	if errGet != nil {
+		return errGet
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var rawTasks []json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &rawTasks); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	remaining := make([]json.RawMessage, 0, len(rawTasks))
+	changed := false
+	for _, rawTask := range rawTasks {
+		var task PluginTask
+		if errUnmarshal := json.Unmarshal(rawTask, &task); errUnmarshal != nil {
+			return errUnmarshal
+		}
+		if _, ok := ackIDs[task.ID]; ok {
+			changed = true
+			continue
+		}
+		remaining = append(remaining, append(json.RawMessage(nil), rawTask...))
+	}
+	if !changed {
+		return nil
+	}
+	next, errMarshal := json.Marshal(remaining)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	return cmd.Set(ctx, redisKeyPluginTasks, next, 0).Err()
+}
+
 func (c *Client) handleSubscriptionPayload(ctx context.Context, channel string, payload string, onConfig func([]byte) error) error {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
