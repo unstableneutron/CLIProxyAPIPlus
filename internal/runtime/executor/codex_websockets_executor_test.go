@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -327,6 +328,123 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	wsPayloads := make(chan []byte, 2)
+	compactBody := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			wsPayloads <- bytes.Clone(payload)
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1","role":"assistant","content":[{"type":"output_text","text":"first"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+			}
+			compactBody <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","created_at":1775555723,"status":"completed","output":[{"type":"compaction","id":"cmp-1","summary":"compressed"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`))
+		default:
+			t.Errorf("request path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-compact", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "codex-compact-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	firstResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first ExecuteStream error: %v", err)
+	}
+	for chunk := range firstResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("first stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-wsPayloads:
+		if gjson.GetBytes(payload, "input.0.id").String() != "msg-1" {
+			t.Fatalf("first websocket payload = %s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first websocket payload")
+	}
+
+	compactResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("compact ExecuteStream error: %v", err)
+	}
+	var sawCompleted bool
+	for chunk := range compactResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("compact stream chunk error: %v", chunk.Err)
+		}
+		if strings.Contains(string(chunk.Payload), "response.completed") {
+			sawCompleted = true
+		}
+	}
+	if !sawCompleted {
+		t.Fatal("compact fallback did not emit response.completed")
+	}
+
+	select {
+	case body := <-compactBody:
+		if gjson.GetBytes(body, "previous_response_id").Exists() {
+			t.Fatalf("compact fallback leaked previous_response_id: %s", body)
+		}
+		inputRaw := gjson.GetBytes(body, "input").Raw
+		for _, want := range []string{`"id":"msg-1"`, `"id":"out-1"`} {
+			if !strings.Contains(inputRaw, want) {
+				t.Fatalf("compact fallback input missing %s: %s", want, inputRaw)
+			}
+		}
+		if strings.Contains(inputRaw, "compaction_trigger") {
+			t.Fatalf("compact fallback input kept compaction_trigger: %s", inputRaw)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compact request body")
+	}
+
+	select {
+	case payload := <-wsPayloads:
+		t.Fatalf("compaction trigger reached upstream websocket instead of compact fallback: %s", payload)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

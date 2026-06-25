@@ -33,6 +33,14 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// ResponsesStateModeMetadataKey controls whether an executor may forward previous_response_id.
+	ResponsesStateModeMetadataKey = "responses_state_mode"
+)
+
+const (
+	ResponsesStateModeReplay   = "replay"
+	ResponsesStateModeProbe    = "probe"
+	ResponsesStateModeStateful = "stateful"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

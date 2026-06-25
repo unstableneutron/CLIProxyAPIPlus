@@ -89,12 +89,13 @@ type websocketBootstrapFallbackExecutor struct {
 }
 
 type websocketDirectCaptureExecutor struct {
-	mu       sync.Mutex
-	provider string
-	authIDs  []string
-	payloads [][]byte
-	done     chan struct{}
-	doneOnce sync.Once
+	mu          sync.Mutex
+	provider    string
+	authIDs     []string
+	payloads    [][]byte
+	responseIDs []string
+	done        chan struct{}
+	doneOnce    sync.Once
 }
 
 type websocketPreviousResponseRetryExecutor struct {
@@ -221,10 +222,13 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *
 	e.authIDs = append(e.authIDs, authID)
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	count := len(e.payloads)
+	responseID := fmt.Sprintf("resp-%d", count)
+	if count <= len(e.responseIDs) && strings.TrimSpace(e.responseIDs[count-1]) != "" {
+		responseID = strings.TrimSpace(e.responseIDs[count-1])
+	}
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	responseID := fmt.Sprintf("resp-%d", count)
 	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d"}]}}`, responseID, count))}
 	close(chunks)
 	if count >= 2 && e.done != nil {
@@ -3480,6 +3484,78 @@ func TestResponsesWebsocketProbesResponsesStateForSSEUpstream(t *testing.T) {
 	}
 	if input := gjson.GetBytes(payloads[2], "input").Array(); len(input) != 1 || input[0].Get("id").String() != "msg-3" {
 		t.Fatalf("third upstream input was not incremental: %s", payloads[2])
+	}
+}
+
+func TestResponsesWebsocketSkipsResponsesStateProbeForUnsupportedSSEUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{provider: "test-provider"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-sse-stateless",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{responsesStateAuthCapabilityKey: "false"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`,
+	}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wsEventTypeCompleted, payload)
+		}
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("upstream payload count = %d, want 2", len(payloads))
+	}
+	second := payloads[1]
+	if gjson.GetBytes(second, "previous_response_id").Exists() {
+		t.Fatalf("unsupported route leaked previous_response_id probe: %s", second)
+	}
+	input := gjson.GetBytes(second, "input").Raw
+	for _, want := range []string{`"id":"msg-1"`, `"id":"out-1"`, `"id":"msg-2"`} {
+		if !strings.Contains(input, want) {
+			t.Fatalf("full replay input missing %s: %s", want, input)
+		}
 	}
 }
 

@@ -240,6 +240,31 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	return originalTranslated, body
 }
 
+func codexExecutorPreservePreviousResponseID(opts cliproxyexecutor.Options) bool {
+	if len(opts.Metadata) == 0 {
+		return false
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.ResponsesStateModeMetadataKey]
+	if !ok || raw == nil {
+		return false
+	}
+	mode := ""
+	switch v := raw.(type) {
+	case string:
+		mode = strings.TrimSpace(v)
+	case []byte:
+		mode = strings.TrimSpace(string(v))
+	default:
+		return false
+	}
+	switch strings.ToLower(mode) {
+	case cliproxyexecutor.ResponsesStateModeProbe, cliproxyexecutor.ResponsesStateModeStateful:
+		return true
+	default:
+		return false
+	}
+}
+
 type codexReasoningReplayScope struct {
 	modelName  string
 	sessionKey string
@@ -775,7 +800,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	if !codexExecutorPreservePreviousResponseID(opts) {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	}
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -1062,7 +1089,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	if !codexExecutorPreservePreviousResponseID(opts) {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	}
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")

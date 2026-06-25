@@ -61,6 +61,8 @@ const (
 	responsesWebsocketStateUnsupported
 )
 
+const responsesStateAuthCapabilityKey = "responses_state"
+
 type websocketTimelineLog struct {
 	enabled bool
 	source  *requestlogging.FileBodySource
@@ -421,7 +423,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowIncrementalInputWithPreviousResponseID = responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth)
 				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
-				if !useUpstreamWebsocketPassthrough && hasPreviousResponseCandidate && !allowIncrementalInputWithPreviousResponseID {
+				if !useUpstreamWebsocketPassthrough &&
+					hasPreviousResponseCandidate &&
+					!allowIncrementalInputWithPreviousResponseID &&
+					responsesWebsocketAuthResponsesStateSupport(pinnedAuth) != responsesWebsocketStateUnsupported {
 					allowIncrementalInputWithPreviousResponseID = responsesStateForRoute(pinnedAuthID, requestModelName) != responsesWebsocketStateUnsupported
 					dynamicResponsesStateProbe = allowIncrementalInputWithPreviousResponseID
 				}
@@ -429,7 +434,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		} else {
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 			allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
-			if !useUpstreamWebsocketPassthrough && hasPreviousResponseCandidate && !allowIncrementalInputWithPreviousResponseID {
+			if !useUpstreamWebsocketPassthrough &&
+				hasPreviousResponseCandidate &&
+				!allowIncrementalInputWithPreviousResponseID &&
+				!h.responsesWebsocketResponsesStateUnsupportedForModel(requestModelName) {
 				allowIncrementalInputWithPreviousResponseID = true
 				dynamicResponsesStateProbe = true
 			}
@@ -596,6 +604,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
+			if !useUpstreamWebsocketPassthrough {
+				stateMode := cliproxyexecutor.ResponsesStateModeReplay
+				if gjson.GetBytes(upstreamPayload, "previous_response_id").Exists() {
+					stateMode = cliproxyexecutor.ResponsesStateModeProbe
+				}
+				cliCtx = handlers.WithResponsesStateMode(cliCtx, stateMode)
+			}
 			selectedAuthID := strings.TrimSpace(pinnedAuthID)
 			if pinnedAuthID != "" {
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
@@ -1236,6 +1251,21 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayFor
 	return true
 }
 
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketResponsesStateUnsupportedForModel(modelName string) bool {
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+	seenHTTPRoute := false
+	for _, auth := range auths {
+		if auth == nil || responsesWebsocketAuthSupportsIncrementalInput(auth) {
+			continue
+		}
+		seenHTTPRoute = true
+		if responsesWebsocketAuthResponsesStateSupport(auth) != responsesWebsocketStateUnsupported {
+			return false
+		}
+	}
+	return seenHTTPRoute
+}
+
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(modelName string) ([]*coreauth.Auth, string) {
 	if h == nil || h.AuthManager == nil {
 		return nil, ""
@@ -1301,6 +1331,52 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
 		return false
 	}
 	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+}
+
+func responsesWebsocketAuthResponsesStateSupport(auth *coreauth.Auth) responsesWebsocketStateSupport {
+	if auth == nil {
+		return responsesWebsocketStateUnknown
+	}
+	if value, ok := parseResponsesWebsocketStateSupportValue(auth.Attributes[responsesStateAuthCapabilityKey]); ok {
+		return value
+	}
+	if len(auth.Metadata) == 0 {
+		return responsesWebsocketStateUnknown
+	}
+	raw, ok := auth.Metadata[responsesStateAuthCapabilityKey]
+	if !ok || raw == nil {
+		return responsesWebsocketStateUnknown
+	}
+	if value, ok := parseResponsesWebsocketStateSupport(raw); ok {
+		return value
+	}
+	return responsesWebsocketStateUnknown
+}
+
+func parseResponsesWebsocketStateSupport(raw any) (responsesWebsocketStateSupport, bool) {
+	switch value := raw.(type) {
+	case bool:
+		if value {
+			return responsesWebsocketStateSupported, true
+		}
+		return responsesWebsocketStateUnsupported, true
+	case string:
+		return parseResponsesWebsocketStateSupportValue(value)
+	default:
+		return responsesWebsocketStateUnknown, false
+	}
+}
+
+func parseResponsesWebsocketStateSupportValue(raw string) (responsesWebsocketStateSupport, bool) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	switch value {
+	case "true", "1", "yes", "y", "on", "supported", "stateful":
+		return responsesWebsocketStateSupported, true
+	case "false", "0", "no", "n", "off", "unsupported", "stateless":
+		return responsesWebsocketStateUnsupported, true
+	default:
+		return responsesWebsocketStateUnknown, false
+	}
 }
 
 func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName string) ([]byte, *interfaces.ErrorMessage) {

@@ -629,6 +629,9 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// ResponsesState controls whether HTTP/SSE Responses previous_response_id state is supported.
+	ResponsesState string `yaml:"responses-state,omitempty" json:"responses-state,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -1292,6 +1295,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ResponsesState = strings.TrimSpace(e.ResponsesState)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)

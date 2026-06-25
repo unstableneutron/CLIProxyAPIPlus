@@ -201,6 +201,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Websockets {
 			attrs["websockets"] = "true"
 		}
+		if responsesState := strings.TrimSpace(ck.ResponsesState); responsesState != "" {
+			attrs["responses_state"] = responsesState
+		}
 		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}

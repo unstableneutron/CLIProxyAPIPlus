@@ -971,6 +971,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
+		ResponsesState *string              `json:"responses-state"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
 		QueryParams    *map[string]string   `json:"query-params"`
@@ -1025,6 +1026,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.ResponsesState != nil {
+		entry.ResponsesState = strings.TrimSpace(*body.Value.ResponsesState)
 	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
@@ -1164,6 +1168,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.ResponsesState = strings.TrimSpace(entry.ResponsesState)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.QueryParams = config.NormalizeQueryParams(entry.QueryParams)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
