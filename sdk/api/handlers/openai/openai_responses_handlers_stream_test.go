@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,7 +9,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -30,6 +34,80 @@ func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *h
 	}
 
 	return h, recorder, c, flusher
+}
+
+func newDirectResponsesStateModeTestHandler(t *testing.T, authAttributes map[string]string, models ...string) (*OpenAIResponsesAPIHandler, *websocketDirectCaptureExecutor) {
+	t.Helper()
+
+	executor := &websocketDirectCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-direct-responses-state",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: authAttributes,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register: %v", err)
+	}
+	infos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		infos = append(infos, &registry.ModelInfo{ID: model})
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, infos)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	return NewOpenAIResponsesAPIHandler(base), executor
+}
+
+func executeDirectResponsesStateModeRequest(t *testing.T, h *OpenAIResponsesAPIHandler, body string) {
+	t.Helper()
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDirectResponsesStreamingSetsResponsesStateProbeMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, executor := newDirectResponsesStateModeTestHandler(t, nil, "test-model")
+
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"test-model","stream":true,"previous_response_id":"resp-1","input":[]}`)
+
+	options := executor.Options()
+	if len(options) != 1 {
+		t.Fatalf("options count = %d, want 1", len(options))
+	}
+	if got := options[0].Metadata[coreexecutor.ResponsesStateModeMetadataKey]; got != coreexecutor.ResponsesStateModeProbe {
+		t.Fatalf("responses state mode = %#v, want probe", got)
+	}
+}
+
+func TestDirectResponsesStreamingSkipsResponsesStateProbeForScopedUnsupportedRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, executor := newDirectResponsesStateModeTestHandler(t, map[string]string{
+		responsesStateAuthCapabilityKey: "false",
+		responsesStateAuthModelsKey:     `["gpt-5.5-aws"]`,
+	}, "gpt-5.5-aws")
+
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"gpt-5.5-aws","stream":true,"previous_response_id":"resp-1","input":[]}`)
+
+	options := executor.Options()
+	if len(options) != 1 {
+		t.Fatalf("options count = %d, want 1", len(options))
+	}
+	if _, ok := options[0].Metadata[coreexecutor.ResponsesStateModeMetadataKey]; ok {
+		t.Fatalf("responses state mode metadata should be absent for unsupported route: %#v", options[0].Metadata)
+	}
 }
 
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -489,6 +490,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = h.withDirectResponsesStateMode(cliCtx, modelName, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -553,6 +555,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = h.withDirectResponsesStateMode(cliCtx, modelName, rawJSON)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -590,6 +593,16 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			)
 		},
 	)
+}
+
+func (h *OpenAIResponsesAPIHandler) withDirectResponsesStateMode(ctx context.Context, modelName string, rawJSON []byte) context.Context {
+	if !gjson.GetBytes(rawJSON, "previous_response_id").Exists() {
+		return ctx
+	}
+	if h.responsesWebsocketResponsesStateUnsupportedForModel(modelName) {
+		return ctx
+	}
+	return handlers.WithResponsesStateMode(ctx, cliproxyexecutor.ResponsesStateModeProbe)
 }
 
 func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(

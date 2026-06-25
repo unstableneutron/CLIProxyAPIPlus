@@ -93,6 +93,7 @@ type websocketDirectCaptureExecutor struct {
 	provider    string
 	authIDs     []string
 	payloads    [][]byte
+	options     []coreexecutor.Options
 	responseIDs []string
 	done        chan struct{}
 	doneOnce    sync.Once
@@ -213,7 +214,7 @@ func (e *websocketDirectCaptureExecutor) Execute(context.Context, *coreauth.Auth
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
-func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
@@ -221,6 +222,7 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *
 	e.mu.Lock()
 	e.authIDs = append(e.authIDs, authID)
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	e.options = append(e.options, opts)
 	count := len(e.payloads)
 	responseID := fmt.Sprintf("resp-%d", count)
 	if count <= len(e.responseIDs) && strings.TrimSpace(e.responseIDs[count-1]) != "" {
@@ -265,6 +267,12 @@ func (e *websocketDirectCaptureExecutor) AuthIDs() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketDirectCaptureExecutor) Options() []coreexecutor.Options {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]coreexecutor.Options(nil), e.options...)
 }
 
 func (e *websocketPreviousResponseRetryExecutor) Identifier() string {
