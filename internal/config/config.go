@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -213,6 +214,50 @@ type Config struct {
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// ResponsesStateCapability stores a Codex route's Responses state capability.
+// YAML operators commonly write boolean-like modes such as `responses-state: false`;
+// normalize those to the string modes consumed by the routing layer.
+type ResponsesStateCapability string
+
+func (v *ResponsesStateCapability) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil || node.Tag == "!!null" {
+		*v = ""
+		return nil
+	}
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("responses-state must be a scalar")
+	}
+	if node.Tag == "!!bool" {
+		parsed, err := strconv.ParseBool(node.Value)
+		if err != nil {
+			return fmt.Errorf("parse responses-state bool: %w", err)
+		}
+		*v = ResponsesStateCapability(strconv.FormatBool(parsed))
+		return nil
+	}
+	*v = ResponsesStateCapability(strings.TrimSpace(node.Value))
+	return nil
+}
+
+func (v *ResponsesStateCapability) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*v = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*v = ResponsesStateCapability(strings.TrimSpace(s))
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*v = ResponsesStateCapability(strconv.FormatBool(b))
+		return nil
+	}
+	return fmt.Errorf("responses-state must be a string or boolean")
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -630,7 +675,7 @@ type CodexKey struct {
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// ResponsesState controls whether HTTP/SSE Responses previous_response_id state is supported.
-	ResponsesState string `yaml:"responses-state,omitempty" json:"responses-state,omitempty"`
+	ResponsesState ResponsesStateCapability `yaml:"responses-state,omitempty" json:"responses-state,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -1295,7 +1340,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
-		e.ResponsesState = strings.TrimSpace(e.ResponsesState)
+		e.ResponsesState = ResponsesStateCapability(strings.TrimSpace(string(e.ResponsesState)))
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
