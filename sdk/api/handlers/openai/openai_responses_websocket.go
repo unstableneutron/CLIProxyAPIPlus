@@ -388,6 +388,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
+		logicalPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
@@ -484,6 +485,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		logicalPreviousResponseID = responsesWebsocketEffectivePreviousResponseID(logicalPreviousResponseID, requestJSON)
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
@@ -582,6 +584,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				interceptPreviousResponseNotFound: interceptPreviousResponseNotFound,
 				interceptInvalidEncryptedContent:  interceptInvalidEncryptedContent,
 				interceptProviderItemNotFound:     interceptProviderItemNotFound,
+				logicalPreviousResponseID:         logicalPreviousResponseID,
 			})
 		}
 
@@ -1539,6 +1542,7 @@ type responsesWebsocketForwardOptions struct {
 	interceptPreviousResponseNotFound bool
 	interceptInvalidEncryptedContent  bool
 	interceptProviderItemNotFound     bool
+	logicalPreviousResponseID         string
 }
 
 type responsesWebsocketForwardResult struct {
@@ -1597,6 +1601,34 @@ func responsesWebsocketBufferableStartupPayload(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+func responsesWebsocketEffectivePreviousResponseID(rawPreviousResponseID string, requestJSON []byte) string {
+	rawPreviousResponseID = strings.TrimSpace(rawPreviousResponseID)
+	if rawPreviousResponseID != "" {
+		return rawPreviousResponseID
+	}
+	return strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String())
+}
+
+func responsesWebsocketPayloadWithLogicalPreviousResponseID(payload []byte, previousResponseID string) []byte {
+	previousResponseID = strings.TrimSpace(previousResponseID)
+	if previousResponseID == "" || len(payload) == 0 {
+		return payload
+	}
+	response := gjson.GetBytes(payload, "response")
+	responseRaw := strings.TrimSpace(response.Raw)
+	if response.Type != gjson.JSON || !strings.HasPrefix(responseRaw, "{") {
+		return payload
+	}
+	if current := strings.TrimSpace(gjson.GetBytes(payload, "response.previous_response_id").String()); current != "" {
+		return payload
+	}
+	updated, errSet := sjson.SetBytes(payload, "response.previous_response_id", previousResponseID)
+	if errSet != nil {
+		return payload
+	}
+	return updated
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
@@ -1782,6 +1814,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				payloads[i] = responsesWebsocketPayloadWithLogicalPreviousResponseID(payloads[i], options.logicalPreviousResponseID)
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()

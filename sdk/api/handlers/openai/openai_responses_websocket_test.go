@@ -1103,6 +1103,19 @@ func TestAppendWebsocketTimelineEvent(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketPayloadWithLogicalPreviousResponseID_preservesExistingPreviousResponseID(t *testing.T) {
+	// Given
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-next","previous_response_id":"resp-upstream"}}`)
+
+	// When
+	got := responsesWebsocketPayloadWithLogicalPreviousResponseID(payload, "resp-client")
+
+	// Then
+	if previousResponseID := gjson.GetBytes(got, "response.previous_response_id").String(); previousResponseID != "resp-upstream" {
+		t.Fatalf("response.previous_response_id = %q, want resp-upstream; payload=%s", previousResponseID, got)
+	}
+}
+
 func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -1588,6 +1601,91 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	}
 	if strings.Contains(string(payload), "response.done") {
 		t.Fatalf("payload unexpectedly rewrote completed event: %s", payload)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketRestoresLogicalPreviousResponseID_whenUpstreamRequestWasReplayed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 2)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"response.created","response":{"id":"resp-next","previous_response_id":null}}`)
+		data <- []byte(`{"type":"response.completed","response":{"id":"resp-next","output":[{"type":"message","id":"out-1"}]}}`)
+		close(data)
+		close(errCh)
+
+		result, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocketWithOptions(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-1",
+			responsesWebsocketForwardOptions{
+				logicalPreviousResponseID: "resp-client-prev",
+			},
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if result.errorMessage != nil {
+			serverErrCh <- fmt.Errorf("unexpected websocket error message: %v", result.errorMessage.Error)
+			return
+		}
+		if result.completedResponseID != "resp-next" {
+			serverErrCh <- fmt.Errorf("completed response id = %q, want resp-next", result.completedResponseID)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	for i, wantType := range []string{"response.created", wsEventTypeCompleted} {
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantType {
+			t.Fatalf("payload type = %s, want %s; payload=%s", got, wantType, payload)
+		}
+		if got := gjson.GetBytes(payload, "response.previous_response_id").String(); got != "resp-client-prev" {
+			t.Fatalf("response.previous_response_id = %q, want resp-client-prev; payload=%s", got, payload)
+		}
 	}
 
 	if errServer := <-serverErrCh; errServer != nil {
@@ -3229,6 +3327,7 @@ func TestResponsesWebsocketInjectsPreviousResponseIDForWebsocketUpstream(t *test
 		`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`,
 		`{"type":"response.create","input":[{"type":"message","id":"msg-2"}]}`,
 	}
+	downstreamPayloads := make([][]byte, 0, len(requests))
 	for i := range requests {
 		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
 			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
@@ -3240,6 +3339,10 @@ func TestResponsesWebsocketInjectsPreviousResponseIDForWebsocketUpstream(t *test
 		if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
 			t.Fatalf("message %d payload type = %s, want %s", i+1, got, wsEventTypeCompleted)
 		}
+		downstreamPayloads = append(downstreamPayloads, bytes.Clone(payload))
+	}
+	if got := gjson.GetBytes(downstreamPayloads[1], "response.previous_response_id").String(); got != "resp-upstream" {
+		t.Fatalf("second downstream previous_response_id = %q, want resp-upstream: %s", got, downstreamPayloads[1])
 	}
 
 	if len(executor.payloads) != 2 {
