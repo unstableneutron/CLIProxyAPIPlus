@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,7 +24,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -53,6 +54,7 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	onCompleted          func([]byte)
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -114,6 +116,9 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.recordOutputItem(payload)
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
+		if f.onCompleted != nil {
+			f.onCompleted(repaired)
+		}
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
@@ -313,6 +318,95 @@ type responsesStreamBootstrapResult struct {
 	errs            <-chan *interfaces.ErrorMessage
 }
 
+type directResponsesStateEntry struct {
+	request            []byte
+	output             []byte
+	pendingToolCallIDs []string
+	createdAt          time.Time
+}
+
+type directResponsesStateCache struct {
+	mu      sync.Mutex
+	entries map[string]directResponsesStateEntry
+	order   []string
+}
+
+const (
+	directResponsesStateCacheMaxEntries = 512
+	directResponsesStateCacheTTL        = time.Hour
+)
+
+func newDirectResponsesStateCache() *directResponsesStateCache {
+	return &directResponsesStateCache{entries: make(map[string]directResponsesStateEntry)}
+}
+
+func (c *directResponsesStateCache) get(responseID string) (directResponsesStateEntry, bool) {
+	responseID = strings.TrimSpace(responseID)
+	if c == nil || responseID == "" {
+		return directResponsesStateEntry{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pruneLocked(time.Now())
+	entry, ok := c.entries[responseID]
+	if !ok {
+		return directResponsesStateEntry{}, false
+	}
+	entry.request = bytes.Clone(entry.request)
+	entry.output = bytes.Clone(entry.output)
+	entry.pendingToolCallIDs = append([]string(nil), entry.pendingToolCallIDs...)
+	return entry, true
+}
+
+func (c *directResponsesStateCache) put(responseID string, entry directResponsesStateEntry) {
+	responseID = strings.TrimSpace(responseID)
+	if c == nil || responseID == "" || len(entry.request) == 0 {
+		return
+	}
+	if len(entry.output) == 0 {
+		entry.output = []byte("[]")
+	}
+	entry.request = bytes.Clone(entry.request)
+	entry.output = bytes.Clone(entry.output)
+	entry.pendingToolCallIDs = append([]string(nil), entry.pendingToolCallIDs...)
+	if entry.createdAt.IsZero() {
+		entry.createdAt = time.Now()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.entries[responseID]; !exists {
+		c.order = append(c.order, responseID)
+	}
+	c.entries[responseID] = entry
+	c.pruneLocked(time.Now())
+}
+
+func (c *directResponsesStateCache) pruneLocked(now time.Time) {
+	if c == nil {
+		return
+	}
+	keep := c.order[:0]
+	for _, id := range c.order {
+		entry, ok := c.entries[id]
+		if !ok {
+			continue
+		}
+		if !entry.createdAt.IsZero() && now.Sub(entry.createdAt) > directResponsesStateCacheTTL {
+			delete(c.entries, id)
+			continue
+		}
+		keep = append(keep, id)
+	}
+	c.order = keep
+	for len(c.order) > directResponsesStateCacheMaxEntries {
+		oldest := c.order[0]
+		copy(c.order, c.order[1:])
+		c.order = c.order[:len(c.order)-1]
+		delete(c.entries, oldest)
+	}
+}
+
 func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 	if len(pending) == 0 || len(chunk) == 0 {
 		return false
@@ -339,6 +433,7 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	directResponsesState *directResponsesStateCache
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -351,7 +446,8 @@ type OpenAIResponsesAPIHandler struct {
 //   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
-		BaseAPIHandler: apiHandlers,
+		BaseAPIHandler:       apiHandlers,
+		directResponsesState: newDirectResponsesStateCache(),
 	}
 }
 
@@ -490,7 +586,6 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	cliCtx = h.withDirectResponsesStateMode(cliCtx, modelName, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -531,6 +626,98 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 	cliCancel()
 }
 
+type directResponsesStreamStateTracker struct {
+	cache   *directResponsesStateCache
+	request []byte
+}
+
+func (t directResponsesStreamStateTracker) Complete(payload []byte) {
+	if t.cache == nil || len(t.request) == 0 || len(payload) == 0 || !json.Valid(payload) {
+		return
+	}
+	response := gjson.GetBytes(payload, "response")
+	if !response.Exists() || !response.IsObject() {
+		return
+	}
+	responseID := strings.TrimSpace(response.Get("id").String())
+	if responseID == "" {
+		return
+	}
+	outputRaw := response.Get("output").Raw
+	if strings.TrimSpace(outputRaw) == "" {
+		outputRaw = "[]"
+	}
+	output := []byte(outputRaw)
+	t.cache.put(responseID, directResponsesStateEntry{
+		request:            t.request,
+		output:             output,
+		pendingToolCallIDs: responsesWebsocketPendingToolCallIDs(output),
+		createdAt:          time.Now(),
+	})
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareDirectResponsesStreamState(modelName string, rawJSON []byte) ([]byte, directResponsesStreamStateTracker) {
+	normalized := normalizeDirectResponsesStreamStateRequest(rawJSON)
+	tracker := directResponsesStreamStateTracker{cache: h.directResponsesStateCache()}
+	if h.responsesWebsocketResponsesStateUnsupportedForModel(modelName) {
+		stripped, _ := sjson.DeleteBytes(normalized, "previous_response_id")
+		tracker.request = bytes.Clone(stripped)
+		return stripped, tracker
+	}
+
+	previousResponseID := strings.TrimSpace(gjson.GetBytes(normalized, "previous_response_id").String())
+	if previousResponseID == "" {
+		tracker.request = bytes.Clone(normalized)
+		return normalized, tracker
+	}
+
+	entry, ok := tracker.cache.get(previousResponseID)
+	if !ok {
+		stripped, _ := sjson.DeleteBytes(normalized, "previous_response_id")
+		tracker.request = bytes.Clone(stripped)
+		return stripped, tracker
+	}
+
+	replay, _, errMsg := normalizeResponseSubsequentRequest(
+		normalized,
+		entry.request,
+		entry.output,
+		previousResponseID,
+		entry.pendingToolCallIDs,
+		false,
+		false,
+	)
+	if errMsg != nil || len(replay) == 0 {
+		stripped, _ := sjson.DeleteBytes(normalized, "previous_response_id")
+		tracker.request = bytes.Clone(stripped)
+		return stripped, tracker
+	}
+	replay = repairResponsesWebsocketToolCalls("", replay)
+	replay = dedupeResponsesWebsocketInputItemsByID(replay)
+	tracker.request = bytes.Clone(replay)
+	return replay, tracker
+}
+
+func (h *OpenAIResponsesAPIHandler) directResponsesStateCache() *directResponsesStateCache {
+	if h == nil {
+		return nil
+	}
+	if h.directResponsesState == nil {
+		h.directResponsesState = newDirectResponsesStateCache()
+	}
+	return h.directResponsesState
+}
+
+func normalizeDirectResponsesStreamStateRequest(rawJSON []byte) []byte {
+	normalized := bytes.Clone(rawJSON)
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if !gjson.GetBytes(normalized, "input").Exists() {
+		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
+	}
+	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
+	return normalized
+}
+
 // handleStreamingResponse handles streaming responses for Gemini models.
 // It establishes a streaming connection with the backend service and forwards
 // the response chunks to the client in real-time using Server-Sent Events.
@@ -554,8 +741,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	rawJSON, stateTracker := h.prepareDirectResponsesStreamState(modelName, rawJSON)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	cliCtx = h.withDirectResponsesStateMode(cliCtx, modelName, rawJSON)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -563,7 +750,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{onCompleted: stateTracker.Complete}
 
 	h.handleResponsesStreamBootstrap(
 		c,
@@ -593,16 +780,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			)
 		},
 	)
-}
-
-func (h *OpenAIResponsesAPIHandler) withDirectResponsesStateMode(ctx context.Context, modelName string, rawJSON []byte) context.Context {
-	if !gjson.GetBytes(rawJSON, "previous_response_id").Exists() {
-		return ctx
-	}
-	if h.responsesWebsocketResponsesStateUnsupportedForModel(modelName) {
-		return ctx
-	}
-	return handlers.WithResponsesStateMode(ctx, cliproxyexecutor.ResponsesStateModeProbe)
 }
 
 func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(

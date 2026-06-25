@@ -231,7 +231,7 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d"}]}}`, responseID, count))}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf("data: "+`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d","role":"assistant","content":[{"type":"output_text","text":"state-output-%d"}]}]}}`+"\n\n", responseID, count, count))}
 	close(chunks)
 	if count >= 2 && e.done != nil {
 		e.doneOnce.Do(func() {

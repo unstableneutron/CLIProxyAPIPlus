@@ -12,7 +12,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -77,22 +76,37 @@ func executeDirectResponsesStateModeRequest(t *testing.T, h *OpenAIResponsesAPIH
 	}
 }
 
-func TestDirectResponsesStreamingSetsResponsesStateProbeMode(t *testing.T) {
+func TestDirectResponsesStreamingReplaysCachedPreviousResponseState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, executor := newDirectResponsesStateModeTestHandler(t, nil, "test-model")
 
-	executeDirectResponsesStateModeRequest(t, h, `{"model":"test-model","stream":true,"previous_response_id":"resp-1","input":[]}`)
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"test-model","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"test-model","stream":true,"previous_response_id":"resp-1","input":[{"role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
 
-	options := executor.Options()
-	if len(options) != 1 {
-		t.Fatalf("options count = %d, want 1", len(options))
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("payload count = %d, want 2", len(payloads))
 	}
-	if got := options[0].Metadata[coreexecutor.ResponsesStateModeMetadataKey]; got != coreexecutor.ResponsesStateModeProbe {
-		t.Fatalf("responses state mode = %#v, want probe", got)
+	second := payloads[1]
+	if gjson.GetBytes(second, "previous_response_id").Exists() {
+		t.Fatalf("cached replay should strip previous_response_id: %s", second)
+	}
+	input := gjson.GetBytes(second, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("second replay input length = %d, want 3; payload=%s", len(input), second)
+	}
+	if got := input[0].Get("content.0.text").String(); got != "first" {
+		t.Fatalf("first input text = %q, want first; payload=%s", got, second)
+	}
+	if got := input[1].Get("content.0.text").String(); got != "state-output-1" {
+		t.Fatalf("cached assistant output = %q, want state-output-1; payload=%s", got, second)
+	}
+	if got := input[2].Get("content.0.text").String(); got != "second" {
+		t.Fatalf("second input text = %q, want second; payload=%s", got, second)
 	}
 }
 
-func TestDirectResponsesStreamingSkipsResponsesStateProbeForScopedUnsupportedRoute(t *testing.T) {
+func TestDirectResponsesStreamingStripsPreviousResponseIDForScopedUnsupportedRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, executor := newDirectResponsesStateModeTestHandler(t, map[string]string{
 		responsesStateAuthCapabilityKey: "false",
@@ -101,12 +115,12 @@ func TestDirectResponsesStreamingSkipsResponsesStateProbeForScopedUnsupportedRou
 
 	executeDirectResponsesStateModeRequest(t, h, `{"model":"gpt-5.5-aws","stream":true,"previous_response_id":"resp-1","input":[]}`)
 
-	options := executor.Options()
-	if len(options) != 1 {
-		t.Fatalf("options count = %d, want 1", len(options))
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("payload count = %d, want 1", len(payloads))
 	}
-	if _, ok := options[0].Metadata[coreexecutor.ResponsesStateModeMetadataKey]; ok {
-		t.Fatalf("responses state mode metadata should be absent for unsupported route: %#v", options[0].Metadata)
+	if gjson.GetBytes(payloads[0], "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id should be stripped for unsupported route: %s", payloads[0])
 	}
 }
 
