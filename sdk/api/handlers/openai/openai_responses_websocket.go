@@ -2034,6 +2034,10 @@ func responsesWebsocketPreviousResponseNotFound(errMsg *interfaces.ErrorMessage)
 	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
+	status := responsesWebsocketErrorStatus(errMsg)
+	if status != 0 && status != http.StatusBadRequest && status != http.StatusNotFound && status < http.StatusInternalServerError {
+		return false
+	}
 	return responsesWebsocketPayloadPreviousResponseNotFound([]byte(strings.TrimSpace(errMsg.Error.Error())))
 }
 

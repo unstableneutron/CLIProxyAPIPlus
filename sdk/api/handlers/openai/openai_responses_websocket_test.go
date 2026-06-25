@@ -1229,6 +1229,22 @@ func TestResponsesWebsocketPreviousResponseNotFound_ignoresGenericServerError(t 
 	}
 }
 
+func TestResponsesWebsocketPreviousResponseNotFound_ignoresAuthFailureWithPreviousResponseText(t *testing.T) {
+	// Given
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusUnauthorized,
+		Error:      errors.New(`{"error":{"message":"previous_response_id unsupported without valid auth","type":"authentication_error"}}`),
+	}
+
+	// When
+	got := responsesWebsocketPreviousResponseNotFound(errMsg)
+
+	// Then
+	if got {
+		t.Fatalf("authentication failure was classified as previous_response_id unsupported")
+	}
+}
+
 func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
