@@ -53,6 +53,14 @@ type websocketTimelineAppender interface {
 	Append(eventType string, payload []byte, timestamp time.Time)
 }
 
+type responsesWebsocketStateSupport int
+
+const (
+	responsesWebsocketStateUnknown responsesWebsocketStateSupport = iota
+	responsesWebsocketStateSupported
+	responsesWebsocketStateUnsupported
+)
+
 type websocketTimelineLog struct {
 	enabled bool
 	source  *requestlogging.FileBodySource
@@ -331,6 +339,21 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return h.AuthManager.GetByID(authID)
 	}
 	forceTranscriptReplayNextRequest := false
+	responsesStateByRoute := make(map[string]responsesWebsocketStateSupport)
+	responsesStateForRoute := func(authID string, modelName string) responsesWebsocketStateSupport {
+		key := responsesWebsocketStateRouteKey(authID, modelName)
+		if key == "" {
+			return responsesWebsocketStateUnknown
+		}
+		return responsesStateByRoute[key]
+	}
+	markResponsesStateForRoute := func(authID string, modelName string, support responsesWebsocketStateSupport) {
+		key := responsesWebsocketStateRouteKey(authID, modelName)
+		if key == "" {
+			return
+		}
+		responsesStateByRoute[key] = support
+	}
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -389,20 +412,31 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
 		logicalPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+		hasPreviousResponseCandidate := responsesWebsocketCanProbeResponsesState(logicalPreviousResponseID, lastResponseID)
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
+		dynamicResponsesStateProbe := false
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowIncrementalInputWithPreviousResponseID = responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth)
 				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
+				if !useUpstreamWebsocketPassthrough && hasPreviousResponseCandidate && !allowIncrementalInputWithPreviousResponseID {
+					allowIncrementalInputWithPreviousResponseID = responsesStateForRoute(pinnedAuthID, requestModelName) != responsesWebsocketStateUnsupported
+					dynamicResponsesStateProbe = allowIncrementalInputWithPreviousResponseID
+				}
 			}
 		} else {
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 			allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
+			if !useUpstreamWebsocketPassthrough && hasPreviousResponseCandidate && !allowIncrementalInputWithPreviousResponseID {
+				allowIncrementalInputWithPreviousResponseID = true
+				dynamicResponsesStateProbe = true
+			}
 		}
 		if forceTranscriptReplayNextRequest {
 			allowIncrementalInputWithPreviousResponseID = false
+			dynamicResponsesStateProbe = false
 		}
 
 		var requestJSON []byte
@@ -557,11 +591,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastRequest = updatedLastRequest
 		}
 
-		runUpstreamRequest := func(upstreamPayload []byte, interceptPreviousResponseNotFound bool, interceptInvalidEncryptedContent bool, interceptProviderItemNotFound bool) (responsesWebsocketForwardResult, error) {
+		runUpstreamRequest := func(upstreamPayload []byte, interceptPreviousResponseNotFound bool, interceptInvalidEncryptedContent bool, interceptProviderItemNotFound bool) responsesWebsocketUpstreamAttempt {
 			modelName := gjson.GetBytes(upstreamPayload, "model").String()
 			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
+			selectedAuthID := strings.TrimSpace(pinnedAuthID)
 			if pinnedAuthID != "" {
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 			} else {
@@ -570,6 +605,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					if authID == "" || h == nil || h.AuthManager == nil {
 						return
 					}
+					selectedAuthID = authID
 					selectedAuth, ok := sessionAuthByID(authID)
 					if !ok || selectedAuth == nil {
 						return
@@ -580,29 +616,47 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				})
 			}
 			dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, upstreamPayload, "")
-			return h.forwardResponsesWebsocketWithOptions(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID, responsesWebsocketForwardOptions{
+			forwardResult, errForward := h.forwardResponsesWebsocketWithOptions(c, conn, cliCancel, dataChan, errChan, wsTimelineLog, passthroughSessionID, responsesWebsocketForwardOptions{
 				interceptPreviousResponseNotFound: interceptPreviousResponseNotFound,
 				interceptInvalidEncryptedContent:  interceptInvalidEncryptedContent,
 				interceptProviderItemNotFound:     interceptProviderItemNotFound,
 				logicalPreviousResponseID:         logicalPreviousResponseID,
 			})
+			return responsesWebsocketUpstreamAttempt{
+				forwardResult:  forwardResult,
+				selectedAuthID: selectedAuthID,
+				err:            errForward,
+			}
 		}
 
 		beginUpstreamForward()
-		forwardResult, errForward := runUpstreamRequest(requestJSON, len(fallbackRequestJSON) > 0, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+		usedResponsesState := !useUpstreamWebsocketPassthrough && gjson.GetBytes(requestJSON, "previous_response_id").Exists()
+		usedDynamicResponsesState := usedResponsesState && dynamicResponsesStateProbe
+		attempt := runUpstreamRequest(requestJSON, len(fallbackRequestJSON) > 0, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+		forwardResult, errForward := attempt.forwardResult, attempt.err
 		usedRollbackRetry := false
 		usedFullReplayRetry := false
+		stateProbeFailed := false
 		if errForward == nil && forwardResult.interceptedForRetry && len(fallbackRequestJSON) > 0 && responsesWebsocketPreviousResponseNotFound(forwardResult.errorMessage) {
-			if len(rollbackRequestJSON) > 0 {
+			if usedDynamicResponsesState &&
+				strings.TrimSpace(attempt.selectedAuthID) != "" &&
+				responsesStateForRoute(attempt.selectedAuthID, requestModelName) != responsesWebsocketStateSupported {
+				stateProbeFailed = true
+				markResponsesStateForRoute(attempt.selectedAuthID, requestModelName, responsesWebsocketStateUnsupported)
+				pinnedAuthID = strings.TrimSpace(attempt.selectedAuthID)
+			}
+			if len(rollbackRequestJSON) > 0 && !stateProbeFailed {
 				clearPendingUpstreamDisconnectClose()
 				log.Infof("responses websocket: previous_response_id not found id=%s, retrying from previous checkpoint", passthroughSessionID)
-				forwardResult, errForward = runUpstreamRequest(rollbackRequestJSON, true, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+				attempt = runUpstreamRequest(rollbackRequestJSON, true, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+				forwardResult, errForward = attempt.forwardResult, attempt.err
 				usedRollbackRetry = errForward == nil && !responsesWebsocketPreviousResponseNotFound(forwardResult.errorMessage)
 			}
 			if errForward == nil && forwardResult.interceptedForRetry && responsesWebsocketPreviousResponseNotFound(forwardResult.errorMessage) {
 				clearPendingUpstreamDisconnectClose()
 				log.Infof("responses websocket: previous_response_id not found id=%s, retrying with full transcript", passthroughSessionID)
-				forwardResult, errForward = runUpstreamRequest(fallbackRequestJSON, false, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+				attempt = runUpstreamRequest(fallbackRequestJSON, false, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+				forwardResult, errForward = attempt.forwardResult, attempt.err
 				usedRollbackRetry = false
 				usedFullReplayRetry = true
 			}
@@ -611,7 +665,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errForward == nil && forwardResult.interceptedForRetry && len(encryptedContentRetryRequestJSON) > 0 && responsesWebsocketInvalidEncryptedContent(forwardResult.errorMessage) {
 			clearPendingUpstreamDisconnectClose()
 			log.Infof("responses websocket: invalid encrypted content id=%s, retrying without reasoning encrypted_content", passthroughSessionID)
-			forwardResult, errForward = runUpstreamRequest(encryptedContentRetryRequestJSON, false, false, len(portableReplayRequestJSON) > 0)
+			attempt = runUpstreamRequest(encryptedContentRetryRequestJSON, false, false, len(portableReplayRequestJSON) > 0)
+			forwardResult, errForward = attempt.forwardResult, attempt.err
 			usedEncryptedContentRetry = errForward == nil && !responsesWebsocketInvalidEncryptedContent(forwardResult.errorMessage)
 			if usedEncryptedContentRetry {
 				lastRequest = bytes.Clone(encryptedContentRetryRequestJSON)
@@ -621,7 +676,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errForward == nil && forwardResult.interceptedForRetry && len(portableReplayRequestJSON) > 0 && responsesWebsocketProviderItemNotFound(forwardResult.errorMessage) {
 			clearPendingUpstreamDisconnectClose()
 			log.Infof("responses websocket: provider item id not found id=%s, retrying with portable replay", passthroughSessionID)
-			forwardResult, errForward = runUpstreamRequest(portableReplayRequestJSON, false, false, false)
+			attempt = runUpstreamRequest(portableReplayRequestJSON, false, false, false)
+			forwardResult, errForward = attempt.forwardResult, attempt.err
 			usedPortableReplayRetry = errForward == nil && !responsesWebsocketProviderItemNotFound(forwardResult.errorMessage)
 			if usedPortableReplayRetry {
 				lastRequest = bytes.Clone(portableReplayRequestJSON)
@@ -645,6 +701,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				passthroughModelName = ""
 			}
 			continue
+		}
+		if strings.TrimSpace(attempt.selectedAuthID) != "" && forwardResult.errorMessage == nil && forwardResult.completedResponseID != "" {
+			pinnedAuthID = strings.TrimSpace(attempt.selectedAuthID)
+			if usedDynamicResponsesState && !stateProbeFailed {
+				markResponsesStateForRoute(attempt.selectedAuthID, requestModelName, responsesWebsocketStateSupported)
+			}
 		}
 		lastResponseOutput = forwardResult.completedOutput
 		lastResponsePendingToolCallIDs = append([]string(nil), forwardResult.pendingToolCallIDs...)
@@ -1553,6 +1615,12 @@ type responsesWebsocketForwardResult struct {
 	interceptedForRetry bool
 }
 
+type responsesWebsocketUpstreamAttempt struct {
+	forwardResult  responsesWebsocketForwardResult
+	selectedAuthID string
+	err            error
+}
+
 const responsesWebsocketStartupBufferMaxBytes = 1024 * 1024
 
 type responsesWebsocketStartupBuffer struct {
@@ -1609,6 +1677,28 @@ func responsesWebsocketEffectivePreviousResponseID(rawPreviousResponseID string,
 		return rawPreviousResponseID
 	}
 	return strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String())
+}
+
+func responsesWebsocketStateRouteKey(authID string, modelName string) string {
+	authID = strings.TrimSpace(authID)
+	modelName = strings.TrimSpace(modelName)
+	if authID == "" || modelName == "" {
+		return ""
+	}
+	return authID + "\n" + modelName
+}
+
+func responsesWebsocketCanProbeResponsesState(rawPreviousResponseID string, lastResponseID string) bool {
+	rawPreviousResponseID = strings.TrimSpace(rawPreviousResponseID)
+	if rawPreviousResponseID != "" {
+		return !responsesWebsocketSyntheticPrewarmResponseID(rawPreviousResponseID)
+	}
+	lastResponseID = strings.TrimSpace(lastResponseID)
+	return lastResponseID != "" && !responsesWebsocketSyntheticPrewarmResponseID(lastResponseID)
+}
+
+func responsesWebsocketSyntheticPrewarmResponseID(responseID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(responseID), "resp_prewarm_")
 }
 
 func responsesWebsocketPayloadWithLogicalPreviousResponseID(payload []byte, previousResponseID string) []byte {
@@ -1941,7 +2031,7 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 }
 
 func responsesWebsocketPreviousResponseNotFound(errMsg *interfaces.ErrorMessage) bool {
-	if responsesWebsocketErrorStatus(errMsg) != http.StatusBadRequest || errMsg == nil || errMsg.Error == nil {
+	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
 	return responsesWebsocketPayloadPreviousResponseNotFound([]byte(strings.TrimSpace(errMsg.Error.Error())))
@@ -1959,7 +2049,14 @@ func responsesWebsocketPayloadPreviousResponseNotFound(payload []byte) bool {
 		}
 	}
 	lower := strings.ToLower(strings.TrimSpace(string(payload)))
-	return strings.Contains(lower, "previous_response_not_found") || (strings.Contains(lower, "previous response") && strings.Contains(lower, "not found"))
+	return strings.Contains(lower, "previous_response_not_found") ||
+		(strings.Contains(lower, "previous response") && strings.Contains(lower, "not found")) ||
+		(strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "unsupported")) ||
+		(strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not supported")) ||
+		(strings.Contains(lower, "previous response") && strings.Contains(lower, "unsupported")) ||
+		(strings.Contains(lower, "previous response") && strings.Contains(lower, "not supported")) ||
+		strings.Contains(lower, "invalid previous response") ||
+		(strings.Contains(lower, "unknown response") && strings.Contains(lower, "id"))
 }
 
 func responsesWebsocketInvalidEncryptedContent(errMsg *interfaces.ErrorMessage) bool {
