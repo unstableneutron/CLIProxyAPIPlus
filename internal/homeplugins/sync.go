@@ -206,6 +206,15 @@ func installManifest(ctx context.Context, client sdkpluginstore.Client, manifest
 		GOOS:         platform.GOOS,
 		GOARCH:       platform.GOARCH,
 		PluginLoaded: pluginIsBusy,
+		BeforeWrite: func() error {
+			if !pluginIsBusy() {
+				return nil
+			}
+			if pluginRuntime == nil || !pluginRuntime.UnloadPlugin(id) && pluginIsBusy() {
+				return sdkpluginstore.ErrLoadedPluginLocked
+			}
+			return nil
+		},
 	})
 	if errInstall != nil {
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)

@@ -451,6 +451,9 @@ func (h *Host) retireLoadedPluginLocked(lp *loadedPlugin) {
 }
 
 func (h *Host) recordCurrent(record capabilityRecord) bool {
+	if strings.TrimSpace(record.path) == "" && strings.TrimSpace(record.version) == "" {
+		return true
+	}
 	return h.pluginIdentityCurrent(record.id, record.path, record.version)
 }
 
@@ -464,6 +467,9 @@ func (h *Host) pluginIdentityCurrent(id string, path string, version string) boo
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return false
+	}
+	if path == "" && version == "" {
+		return true
 	}
 	path = cleanPluginPath(path)
 	if path == "" || h.activePluginPaths[id] != path {
