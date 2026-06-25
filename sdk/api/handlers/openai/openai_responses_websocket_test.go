@@ -3703,6 +3703,33 @@ func TestResponsesWebsocketKeepsResponsesStateAfterLaterStaleIDForSSEUpstream(t 
 	}
 }
 
+func TestResponsesWebsocketResponsesStateSupportScopesModelsAttribute(t *testing.T) {
+	auth := &coreauth.Auth{
+		Attributes: map[string]string{
+			responsesStateAuthCapabilityKey: "false",
+			responsesStateAuthModelsKey:     `["gpt-5.5-aws","devai/gpt-5.5-aws"]`,
+		},
+	}
+
+	if got := responsesWebsocketAuthResponsesStateSupportForModel(auth, "gpt-5.5-aws"); got != responsesWebsocketStateUnsupported {
+		t.Fatalf("gpt-5.5-aws support = %v, want unsupported", got)
+	}
+	if got := responsesWebsocketAuthResponsesStateSupportForModel(auth, "devai/gpt-5.5-aws"); got != responsesWebsocketStateUnsupported {
+		t.Fatalf("devai/gpt-5.5-aws support = %v, want unsupported", got)
+	}
+	if got := responsesWebsocketAuthResponsesStateSupportForModel(auth, "gpt-5.5-nomoderation"); got != responsesWebsocketStateUnknown {
+		t.Fatalf("gpt-5.5-nomoderation support = %v, want unknown", got)
+	}
+}
+
+func TestResponsesWebsocketResponsesStateSupportFallsBackWithoutModelScope(t *testing.T) {
+	auth := &coreauth.Auth{Attributes: map[string]string{responsesStateAuthCapabilityKey: "false"}}
+
+	if got := responsesWebsocketAuthResponsesStateSupportForModel(auth, "gpt-5.5-nomoderation"); got != responsesWebsocketStateUnsupported {
+		t.Fatalf("support = %v, want unsupported", got)
+	}
+}
+
 func TestResponsesWebsocketResponsesStateFalseIsScopedToSelectedSSEAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

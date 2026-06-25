@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -347,6 +348,7 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 					ProxyURL:       "http://proxy.local",
 					Websockets:     true,
 					ResponsesState: "false",
+					Models:         []config.CodexModel{{Name: "gpt-5.5-aws", Alias: "gpt-5.5"}},
 					DisableCooling: true,
 				},
 			},
@@ -377,6 +379,10 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 	if auths[0].Attributes["responses_state"] != "false" {
 		t.Errorf("expected responses_state=false, got %s", auths[0].Attributes["responses_state"])
+	}
+	modelsAttr := auths[0].Attributes["responses_state_models"]
+	if !strings.Contains(modelsAttr, "gpt-5.5-aws") || !strings.Contains(modelsAttr, "dev/gpt-5.5-aws") {
+		t.Errorf("expected responses_state_models to include route model names, got %s", modelsAttr)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])

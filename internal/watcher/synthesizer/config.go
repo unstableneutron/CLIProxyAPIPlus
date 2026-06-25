@@ -1,11 +1,13 @@
 package synthesizer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -203,6 +205,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		}
 		if responsesState := strings.TrimSpace(string(ck.ResponsesState)); responsesState != "" {
 			attrs["responses_state"] = responsesState
+			if modelsAttr := codexResponsesStateModelsAttribute(prefix, ck.Models); modelsAttr != "" {
+				attrs["responses_state_models"] = modelsAttr
+			}
 		}
 		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
@@ -229,6 +234,40 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		out = append(out, a)
 	}
 	return out
+}
+
+func codexResponsesStateModelsAttribute(prefix string, models []config.CodexModel) string {
+	seen := make(map[string]struct{}, len(models)*4)
+	values := make([]string, 0, len(models)*4)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		add(name)
+		add(alias)
+		if prefix != "" {
+			add(prefix + "/" + name)
+			add(prefix + "/" + alias)
+		}
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // synthesizeCommandCodeKeys creates Auth entries for Command Code API keys.

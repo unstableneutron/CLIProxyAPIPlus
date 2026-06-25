@@ -62,6 +62,7 @@ const (
 )
 
 const responsesStateAuthCapabilityKey = "responses_state"
+const responsesStateAuthModelsKey = "responses_state_models"
 
 type websocketTimelineLog struct {
 	enabled bool
@@ -426,7 +427,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !useUpstreamWebsocketPassthrough &&
 					hasPreviousResponseCandidate &&
 					!allowIncrementalInputWithPreviousResponseID &&
-					responsesWebsocketAuthResponsesStateSupport(pinnedAuth) != responsesWebsocketStateUnsupported {
+					responsesWebsocketAuthResponsesStateSupportForModel(pinnedAuth, requestModelName) != responsesWebsocketStateUnsupported {
 					allowIncrementalInputWithPreviousResponseID = responsesStateForRoute(pinnedAuthID, requestModelName) != responsesWebsocketStateUnsupported
 					dynamicResponsesStateProbe = allowIncrementalInputWithPreviousResponseID
 				}
@@ -1259,7 +1260,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketResponsesStateUnsupportedF
 			continue
 		}
 		seenHTTPRoute = true
-		if responsesWebsocketAuthResponsesStateSupport(auth) != responsesWebsocketStateUnsupported {
+		if responsesWebsocketAuthResponsesStateSupportForModel(auth, modelName) != responsesWebsocketStateUnsupported {
 			return false
 		}
 	}
@@ -1351,6 +1352,87 @@ func responsesWebsocketAuthResponsesStateSupport(auth *coreauth.Auth) responsesW
 		return value
 	}
 	return responsesWebsocketStateUnknown
+}
+
+func responsesWebsocketAuthResponsesStateSupportForModel(auth *coreauth.Auth, modelName string) responsesWebsocketStateSupport {
+	if auth == nil {
+		return responsesWebsocketStateUnknown
+	}
+	if scoped, hasScope := responsesWebsocketAuthResponsesStateModelsMatch(auth, modelName); hasScope && !scoped {
+		return responsesWebsocketStateUnknown
+	}
+	return responsesWebsocketAuthResponsesStateSupport(auth)
+}
+
+func responsesWebsocketAuthResponsesStateModelsMatch(auth *coreauth.Auth, modelName string) (bool, bool) {
+	modelName = strings.TrimSpace(modelName)
+	if auth == nil || modelName == "" {
+		return false, false
+	}
+	if matched, hasScope := responsesWebsocketResponsesStateModelsValueMatches(auth.Attributes[responsesStateAuthModelsKey], modelName); hasScope {
+		return matched, true
+	}
+	if len(auth.Metadata) == 0 {
+		return false, false
+	}
+	raw, ok := auth.Metadata[responsesStateAuthModelsKey]
+	if !ok || raw == nil {
+		return false, false
+	}
+	return responsesWebsocketResponsesStateModelsRawMatches(raw, modelName)
+}
+
+func responsesWebsocketResponsesStateModelsRawMatches(raw any, modelName string) (bool, bool) {
+	switch value := raw.(type) {
+	case string:
+		return responsesWebsocketResponsesStateModelsValueMatches(value, modelName)
+	case []string:
+		return responsesWebsocketResponsesStateModelListMatches(value, modelName), len(value) > 0
+	case []any:
+		values := make([]string, 0, len(value))
+		for _, item := range value {
+			if s, ok := item.(string); ok {
+				values = append(values, s)
+			}
+		}
+		return responsesWebsocketResponsesStateModelListMatches(values, modelName), len(values) > 0
+	default:
+		return false, false
+	}
+}
+
+func responsesWebsocketResponsesStateModelsValueMatches(raw string, modelName string) (bool, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, false
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err == nil {
+		return responsesWebsocketResponsesStateModelListMatches(values, modelName), len(values) > 0
+	}
+	parts := strings.Split(raw, ",")
+	return responsesWebsocketResponsesStateModelListMatches(parts, modelName), len(parts) > 0
+}
+
+func responsesWebsocketResponsesStateModelListMatches(values []string, modelName string) bool {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return false
+	}
+	parsedModelName := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if value == modelName || strings.EqualFold(value, modelName) {
+			return true
+		}
+		if parsedModelName != "" && (value == parsedModelName || strings.EqualFold(value, parsedModelName)) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseResponsesWebsocketStateSupport(raw any) (responsesWebsocketStateSupport, bool) {
