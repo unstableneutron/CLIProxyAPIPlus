@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -400,7 +401,45 @@ func pluginFilePreferred(candidate pluginFileInfo, current pluginFileInfo) bool 
 	if current.Version == "" {
 		return true
 	}
-	return sdkpluginstore.UpdateAvailable(current.Version, candidate.Version)
+	comparison, comparable := comparePluginFileVersions(candidate.Version, current.Version)
+	if !comparable {
+		return candidate.Version > current.Version
+	}
+	return comparison > 0
+}
+
+func comparePluginFileVersions(a, b string) (int, bool) {
+	segmentsA := strings.Split(a, ".")
+	segmentsB := strings.Split(b, ".")
+	length := len(segmentsA)
+	if len(segmentsB) > length {
+		length = len(segmentsB)
+	}
+	for index := 0; index < length; index++ {
+		numberA, okA := pluginFileVersionSegment(segmentsA, index)
+		numberB, okB := pluginFileVersionSegment(segmentsB, index)
+		if !okA || !okB {
+			return 0, false
+		}
+		if numberA != numberB {
+			if numberA < numberB {
+				return -1, true
+			}
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func pluginFileVersionSegment(segments []string, index int) (int64, bool) {
+	if index >= len(segments) {
+		return 0, true
+	}
+	number, errParse := strconv.ParseInt(segments[index], 10, 64)
+	if errParse != nil || number < 0 {
+		return 0, false
+	}
+	return number, true
 }
 
 func pluginExtension(goos string) string {

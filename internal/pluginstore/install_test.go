@@ -235,6 +235,49 @@ func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveOverwritesPreferredRuntimeVersion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	extension := pluginExtension(runtime.GOOS)
+	stalePath := filepath.Join(targetDir, "sample-provider-v0.1.0"+extension)
+	preferredPath := filepath.Join(targetDir, "sample-provider-v0.2.0"+extension)
+	if errWrite := os.WriteFile(stalePath, []byte("stale"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", stalePath, errWrite)
+	}
+	if errWrite := os.WriteFile(preferredPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", preferredPath, errWrite)
+	}
+
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider" + extension: "new",
+	}), testPlugin(), InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if result.Path != preferredPath {
+		t.Fatalf("Path = %q, want preferred runtime plugin %q", result.Path, preferredPath)
+	}
+	data, errRead := os.ReadFile(preferredPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", preferredPath, errRead)
+	}
+	if string(data) != "new" {
+		t.Fatalf("preferred plugin data = %q, want new", data)
+	}
+	data, errRead = os.ReadFile(stalePath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", stalePath, errRead)
+	}
+	if string(data) != "stale" {
+		t.Fatalf("stale plugin data = %q, want stale", data)
+	}
+}
+
 func TestInstallArchiveRejectsUnsafeArchives(t *testing.T) {
 	t.Parallel()
 

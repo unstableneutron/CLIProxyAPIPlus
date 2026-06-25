@@ -153,6 +153,57 @@ func TestSyncPlatformWithReportRecordsSkippedIdenticalArtifact(t *testing.T) {
 	}
 }
 
+func TestSyncPlatformSelectsPreferredVersionedArtifact(t *testing.T) {
+	root := t.TempDir()
+	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	extension := pluginExtension(runtime.GOOS)
+	staleTarget := filepath.Join(targetDir, "sample-v0.1.0"+extension)
+	preferredTarget := filepath.Join(targetDir, "sample-v0.2.0"+extension)
+	if errWrite := os.WriteFile(staleTarget, []byte("stale"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", staleTarget, errWrite)
+	}
+	if errWrite := os.WriteFile(preferredTarget, []byte("library-data"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", preferredTarget, errWrite)
+	}
+	archiveData := makeZip(t, map[string]string{"sample" + extension: "library-data"})
+	archiveName := "sample_0.2.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	httpClient := mapHTTPDoer{
+		"https://api.github.com/repos/owner/sample-plugin/releases/tags/v0.2.0": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}
+	restore := replacePluginStoreClientForTest(httpClient)
+	defer restore()
+
+	report, errSync := SyncPlatformWithReport(context.Background(), syncTestConfig(t, root), nil, Platform{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
+	if errSync != nil {
+		t.Fatalf("SyncPlatformWithReport() error = %v", errSync)
+	}
+	if len(report.Plugins) != 1 {
+		t.Fatalf("plugins len = %d, want 1", len(report.Plugins))
+	}
+	if report.Plugins[0].Path != preferredTarget {
+		t.Fatalf("plugin path = %q, want preferred target %q", report.Plugins[0].Path, preferredTarget)
+	}
+	data, errRead := os.ReadFile(staleTarget)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", staleTarget, errRead)
+	}
+	if string(data) != "stale" {
+		t.Fatalf("stale target data = %q, want stale", data)
+	}
+}
+
 func TestSyncPlatformSkipsIdenticalBusyPlugin(t *testing.T) {
 	root := t.TempDir()
 	targetDir := filepath.Join(root, "windows", "amd64")

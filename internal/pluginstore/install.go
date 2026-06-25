@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -304,8 +305,8 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 	}
 	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
 	extension := pluginExtension(runtime.GOOS)
-	selected := make([]pluginFileInfo, 0)
-	seen := make(map[string]struct{})
+	selectedByID := make(map[string]pluginFileInfo)
+	order := make([]string, 0)
 	for _, dir := range candidates {
 		entries, errReadDir := os.ReadDir(dir)
 		if errReadDir != nil {
@@ -329,12 +330,20 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 			if !okFile {
 				continue
 			}
-			if _, exists := seen[file.ID]; exists {
+			current, exists := selectedByID[file.ID]
+			if !exists {
+				selectedByID[file.ID] = file
+				order = append(order, file.ID)
 				continue
 			}
-			seen[file.ID] = struct{}{}
-			selected = append(selected, file)
+			if pluginFileInfoPreferred(file, current) {
+				selectedByID[file.ID] = file
+			}
 		}
+	}
+	selected := make([]pluginFileInfo, 0, len(order))
+	for _, id := range order {
+		selected = append(selected, selectedByID[id])
 	}
 	return selected, nil
 }
@@ -398,6 +407,57 @@ func pluginFileInfoFromPath(filePath string, requiredExtension string) (pluginFi
 		return pluginFileInfo{}, false
 	}
 	return pluginFileInfo{ID: id, Path: filePath, Version: version}, true
+}
+
+func pluginFileInfoPreferred(candidate pluginFileInfo, current pluginFileInfo) bool {
+	if strings.TrimSpace(current.Path) == "" {
+		return true
+	}
+	if candidate.Version == "" {
+		return false
+	}
+	if current.Version == "" {
+		return true
+	}
+	comparison, comparable := comparePluginFileInfoVersions(candidate.Version, current.Version)
+	if !comparable {
+		return candidate.Version > current.Version
+	}
+	return comparison > 0
+}
+
+func comparePluginFileInfoVersions(a, b string) (int, bool) {
+	segmentsA := strings.Split(a, ".")
+	segmentsB := strings.Split(b, ".")
+	length := len(segmentsA)
+	if len(segmentsB) > length {
+		length = len(segmentsB)
+	}
+	for index := 0; index < length; index++ {
+		numberA, okA := pluginFileInfoVersionSegment(segmentsA, index)
+		numberB, okB := pluginFileInfoVersionSegment(segmentsB, index)
+		if !okA || !okB {
+			return 0, false
+		}
+		if numberA != numberB {
+			if numberA < numberB {
+				return -1, true
+			}
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func pluginFileInfoVersionSegment(segments []string, index int) (int64, bool) {
+	if index >= len(segments) {
+		return 0, true
+	}
+	number, errParse := strconv.ParseInt(segments[index], 10, 64)
+	if errParse != nil || number < 0 {
+		return 0, false
+	}
+	return number, true
 }
 
 func pluginExtension(goos string) string {
