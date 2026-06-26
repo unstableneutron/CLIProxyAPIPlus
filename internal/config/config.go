@@ -756,10 +756,14 @@ type CommandCodeModel struct {
 
 	// Alias is the client-facing model name that maps to Name.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ForceMapping rewrites upstream response model fields back to Alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
-func (m CommandCodeModel) GetName() string  { return m.Name }
-func (m CommandCodeModel) GetAlias() string { return m.Alias }
+func (m CommandCodeModel) GetName() string       { return m.Name }
+func (m CommandCodeModel) GetAlias() string      { return m.Alias }
+func (m CommandCodeModel) GetForceMapping() bool { return m.ForceMapping }
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
