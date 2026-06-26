@@ -75,6 +75,36 @@ func TestInstallArchiveBlocksLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveBlocksLoadedLegacyWindowsPluginBeforeCleanup(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	legacyPath := filepath.Join(targetDir, "sample-provider.dll")
+	if errWrite := os.WriteFile(legacyPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	versionedPath := filepath.Join(targetDir, "sample-provider-v0.1.0.dll")
+
+	_, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "library-data",
+	}), testPlugin(), InstallOptions{
+		PluginsDir:   root,
+		GOOS:         "windows",
+		GOARCH:       "amd64",
+		PluginLoaded: func() bool { return true },
+	})
+	if !errors.Is(errInstall, ErrLoadedPluginLocked) {
+		t.Fatalf("InstallArchive() error = %v, want ErrLoadedPluginLocked", errInstall)
+	}
+	if _, errStat := os.Stat(versionedPath); !os.IsNotExist(errStat) {
+		t.Fatalf("versioned target stat error = %v, want not exist", errStat)
+	}
+}
+
 func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	t.Parallel()
 
@@ -214,7 +244,7 @@ func TestInstallArchiveReportsOverwrite(t *testing.T) {
 	}
 }
 
-func TestInstallArchiveWritesVersionedRuntimePlugin(t *testing.T) {
+func TestInstallArchiveMigratesLegacyRuntimePlugin(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -243,12 +273,8 @@ func TestInstallArchiveWritesVersionedRuntimePlugin(t *testing.T) {
 	if string(data) != "new" {
 		t.Fatalf("installed data = %q, want new", data)
 	}
-	data, errRead = os.ReadFile(existingPath)
-	if errRead != nil {
-		t.Fatalf("ReadFile(existing) error = %v", errRead)
-	}
-	if string(data) != "old" {
-		t.Fatalf("existing data = %q, want old", data)
+	if _, errStat := os.Stat(existingPath); !os.IsNotExist(errStat) {
+		t.Fatalf("legacy target stat error = %v, want not exist", errStat)
 	}
 }
 

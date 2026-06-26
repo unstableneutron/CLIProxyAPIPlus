@@ -139,6 +139,10 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	if errTarget != nil {
 		return InstallResult{}, errTarget
 	}
+	legacyPaths, errLegacyPaths := legacyPluginPaths(options, id, targetPath)
+	if errLegacyPaths != nil {
+		return InstallResult{}, errLegacyPaths
+	}
 	overwritten := false
 	if _, errStat := os.Stat(targetPath); errStat == nil {
 		overwritten = true
@@ -151,6 +155,12 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 			return InstallResult{}, fmt.Errorf("read target plugin: %w", errReadExisting)
 		}
 		if bytes.Equal(existingData, libraryData) {
+			if errPrepare := preparePluginWrite(options, len(legacyPaths) > 0); errPrepare != nil {
+				return InstallResult{}, errPrepare
+			}
+			if errCleanup := removeLegacyPluginFiles(legacyPaths); errCleanup != nil {
+				return InstallResult{}, errCleanup
+			}
 			return InstallResult{
 				ID:          id,
 				Version:     strings.TrimSpace(plugin.Version),
@@ -162,16 +172,14 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	}
 	// Re-check immediately before replacing an existing file: the same version
 	// may have been loaded while the archive was being downloaded and verified.
-	if overwritten && options.BeforeWrite != nil {
-		if errBeforeWrite := options.BeforeWrite(); errBeforeWrite != nil {
-			return InstallResult{}, fmt.Errorf("prepare plugin write: %w", errBeforeWrite)
-		}
-	}
-	if overwritten && loadedPluginInstallBlocked(options) {
-		return InstallResult{}, ErrLoadedPluginLocked
+	if errPrepare := preparePluginWrite(options, overwritten || len(legacyPaths) > 0); errPrepare != nil {
+		return InstallResult{}, errPrepare
 	}
 	if errWrite := writeFileAtomic(targetPath, libraryData, mode); errWrite != nil {
 		return InstallResult{}, errWrite
+	}
+	if errCleanup := removeLegacyPluginFiles(legacyPaths); errCleanup != nil {
+		return InstallResult{}, errCleanup
 	}
 	return InstallResult{
 		ID:          id,
@@ -187,6 +195,70 @@ func installTargetPath(options InstallOptions, id string, version string) (strin
 		return "", fmt.Errorf("invalid plugin version %q", version)
 	}
 	return filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, versionedPluginFileName(id, version, options.GOOS)), nil
+}
+
+func preparePluginWrite(options InstallOptions, replacingExisting bool) error {
+	if !replacingExisting {
+		return nil
+	}
+	if options.BeforeWrite != nil {
+		if errBeforeWrite := options.BeforeWrite(); errBeforeWrite != nil {
+			return fmt.Errorf("prepare plugin write: %w", errBeforeWrite)
+		}
+	}
+	if loadedPluginInstallBlocked(options) {
+		return ErrLoadedPluginLocked
+	}
+	return nil
+}
+
+func legacyPluginPaths(options InstallOptions, id string, targetPath string) ([]string, error) {
+	extension := pluginExtension(options.GOOS)
+	variant := ""
+	if options.GOOS == runtime.GOOS && options.GOARCH == runtime.GOARCH {
+		variant = cpuVariant()
+	}
+	targetPath = filepath.Clean(targetPath)
+	seen := make(map[string]struct{})
+	paths := make([]string, 0)
+	for _, dir := range pluginCandidateDirs(options.PluginsDir, options.GOOS, options.GOARCH, variant) {
+		entries, errReadDir := os.ReadDir(dir)
+		if errReadDir != nil {
+			if os.IsNotExist(errReadDir) {
+				continue
+			}
+			return nil, fmt.Errorf("read plugin dir %s: %w", dir, errReadDir)
+		}
+		for _, entry := range entries {
+			if entry == nil || !entry.Type().IsRegular() {
+				continue
+			}
+			filePath := filepath.Join(dir, entry.Name())
+			if filepath.Clean(filePath) == targetPath {
+				continue
+			}
+			file, okFile := pluginFileInfoFromPath(filePath, extension)
+			if !okFile || file.ID != id || file.Version != "" {
+				continue
+			}
+			if _, okSeen := seen[filePath]; okSeen {
+				continue
+			}
+			seen[filePath] = struct{}{}
+			paths = append(paths, filePath)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func removeLegacyPluginFiles(paths []string) error {
+	for _, filePath := range paths {
+		if errRemove := os.Remove(filePath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			return fmt.Errorf("remove legacy plugin %s: %w", filePath, errRemove)
+		}
+	}
+	return nil
 }
 
 func readTargetLibrary(reader *zip.Reader, id string, version string, goos string) ([]byte, os.FileMode, error) {
