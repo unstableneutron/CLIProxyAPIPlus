@@ -419,7 +419,7 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 
 	compactResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","stream":true,"stream_options":{"include_usage":true},"store":false,"include":["reasoning.encrypted_content"],"tools":[],"tool_choice":"auto","text":{"verbosity":"low"},"client_metadata":{"x":"y"},"prompt_cache_key":"cache-key","input":[{"type":"compaction_trigger"}]}`),
 	}, opts)
 	if err != nil {
 		t.Fatalf("compact ExecuteStream error: %v", err)
@@ -449,8 +449,10 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 
 	select {
 	case body := <-compactBody:
-		if gjson.GetBytes(body, "previous_response_id").Exists() {
-			t.Fatalf("compact fallback leaked previous_response_id: %s", body)
+		for _, field := range []string{"previous_response_id", "stream", "stream_options", "store", "include", "tools", "tool_choice", "text", "client_metadata", "prompt_cache_key"} {
+			if gjson.GetBytes(body, field).Exists() {
+				t.Fatalf("compact fallback leaked %s: %s", field, body)
+			}
 		}
 		inputRaw := gjson.GetBytes(body, "input").Raw
 		if strings.Contains(inputRaw, `"id":`) {

@@ -817,6 +817,22 @@ func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
 		return payload
 	}
 	updated := bytes.Clone(payload)
+	for _, field := range []string{
+		"stream",
+		"stream_options",
+		"store",
+		"tools",
+		"tool_choice",
+		"text",
+		"client_metadata",
+		"prompt_cache_key",
+		"prompt_cache_retention",
+		"safety_identifier",
+	} {
+		if next, errDelete := sjson.DeleteBytes(updated, field); errDelete == nil {
+			updated = next
+		}
+	}
 	if include := gjson.GetBytes(updated, "include"); include.Exists() && include.IsArray() {
 		kept := make([]string, 0, len(include.Array()))
 		changed := false

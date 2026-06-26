@@ -118,6 +118,10 @@ func TestCodexExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testi
   "stream":true,
   "store":false,
   "include":["reasoning.encrypted_content"],
+  "tools":[],
+  "tool_choice":"auto",
+  "text":{"verbosity":"low"},
+  "client_metadata":{"x":"y"},
   "input":[
     {"id":"msg-user","role":"user","content":[{"type":"input_text","text":"hello"}]},
     {"id":"rs-prev","type":"reasoning","summary":[]},
@@ -152,6 +156,11 @@ func TestCodexExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testi
 	}
 	if gjson.GetBytes(gotBody, "include").Exists() {
 		t.Fatalf("include reached compact body: %s", string(gotBody))
+	}
+	for _, field := range []string{"tool_choice", "text", "client_metadata"} {
+		if gjson.GetBytes(gotBody, field).Exists() {
+			t.Fatalf("%s reached compact body: %s", field, string(gotBody))
+		}
 	}
 	if got := len(gjson.GetBytes(gotBody, "input").Array()); got != 3 {
 		t.Fatalf("compact input length = %d, want 3; body=%s", got, string(gotBody))
