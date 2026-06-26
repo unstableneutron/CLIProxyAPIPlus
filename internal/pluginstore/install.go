@@ -49,9 +49,6 @@ func (c Client) Install(ctx context.Context, plugin Plugin, options InstallOptio
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
-		return InstallResult{}, ErrLoadedPluginLocked
-	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
 		return InstallResult{}, errRelease
@@ -70,9 +67,6 @@ func (c Client) InstallVersion(ctx context.Context, plugin Plugin, releaseTag st
 		return InstallResult{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	if loadedPluginInstallBlocked(options) && options.BeforeWrite == nil {
-		return InstallResult{}, ErrLoadedPluginLocked
-	}
 	version = normalizeVersion(version)
 	if !validPluginVersion(version) {
 		return InstallResult{}, fmt.Errorf("invalid plugin version %q", version)
@@ -166,14 +160,14 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 			}, nil
 		}
 	}
-	// Re-check immediately before writing: the plugin may have been loaded
-	// while the archive was being downloaded and verified.
-	if options.BeforeWrite != nil {
+	// Re-check immediately before replacing an existing file: the same version
+	// may have been loaded while the archive was being downloaded and verified.
+	if overwritten && options.BeforeWrite != nil {
 		if errBeforeWrite := options.BeforeWrite(); errBeforeWrite != nil {
 			return InstallResult{}, fmt.Errorf("prepare plugin write: %w", errBeforeWrite)
 		}
 	}
-	if loadedPluginInstallBlocked(options) {
+	if overwritten && loadedPluginInstallBlocked(options) {
 		return InstallResult{}, ErrLoadedPluginLocked
 	}
 	if errWrite := writeFileAtomic(targetPath, libraryData, mode); errWrite != nil {
@@ -192,20 +186,7 @@ func installTargetPath(options InstallOptions, id string, version string) (strin
 	if !validPluginVersion(version) {
 		return "", fmt.Errorf("invalid plugin version %q", version)
 	}
-	defaultPath := filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, id+pluginExtension(options.GOOS))
-	if options.GOOS != runtime.GOOS || options.GOARCH != runtime.GOARCH {
-		return defaultPath, nil
-	}
-	files, errDiscover := discoverCurrentPluginFiles(options.PluginsDir)
-	if errDiscover != nil {
-		return "", fmt.Errorf("discover current plugin files: %w", errDiscover)
-	}
-	for _, file := range files {
-		if file.ID == id && strings.TrimSpace(file.Path) != "" {
-			return file.Path, nil
-		}
-	}
-	return defaultPath, nil
+	return filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, versionedPluginFileName(id, version, options.GOOS)), nil
 }
 
 func readTargetLibrary(reader *zip.Reader, id string, version string, goos string) ([]byte, os.FileMode, error) {

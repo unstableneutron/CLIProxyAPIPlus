@@ -62,7 +62,7 @@ func TestSyncPlatformInstallsManifestArtifact(t *testing.T) {
 	if errSync := SyncPlatform(context.Background(), syncTestConfig(t, root), nil, Platform{GOOS: "windows", GOARCH: "amd64"}); errSync != nil {
 		t.Fatalf("SyncPlatform() error = %v", errSync)
 	}
-	target := filepath.Join(root, "windows", "amd64", "sample.dll")
+	target := pluginTestPath(root, "windows", "amd64", "sample", "0.2.0")
 	got, errRead := os.ReadFile(target)
 	if errRead != nil {
 		t.Fatalf("read target: %v", errRead)
@@ -105,7 +105,7 @@ func TestSyncPlatformWithReportRecordsSuccessfulInstall(t *testing.T) {
 	if plugin.ID != "sample" || plugin.InstallStatus != pluginInstallStatusInstalled || plugin.Version != "0.2.0" {
 		t.Fatalf("plugin report = %+v, want installed sample 0.2.0", plugin)
 	}
-	if wantPath := filepath.Join(root, "windows", "amd64", "sample.dll"); plugin.Path != wantPath {
+	if wantPath := pluginTestPath(root, "windows", "amd64", "sample", "0.2.0"); plugin.Path != wantPath {
 		t.Fatalf("plugin path = %q, want %q", plugin.Path, wantPath)
 	}
 }
@@ -116,7 +116,7 @@ func TestSyncPlatformWithReportRecordsSkippedIdenticalArtifact(t *testing.T) {
 	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdir)
 	}
-	target := filepath.Join(targetDir, "sample.dll")
+	target := filepath.Join(targetDir, "sample-v0.2.0.dll")
 	if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
@@ -210,7 +210,7 @@ func TestSyncPlatformSkipsIdenticalBusyPlugin(t *testing.T) {
 	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
 		t.Fatalf("MkdirAll() error = %v", errMkdir)
 	}
-	target := filepath.Join(targetDir, "sample.dll")
+	target := filepath.Join(targetDir, "sample-v0.2.0.dll")
 	if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
@@ -412,6 +412,15 @@ store:
 			},
 		},
 	}
+}
+
+func pluginTestPath(root string, goos string, goarch string, id string, version string) string {
+	name := strings.TrimSpace(id)
+	version = strings.TrimSpace(version)
+	if version != "" {
+		name += "-v" + version
+	}
+	return filepath.Join(root, goos, goarch, name+pluginExtension(goos))
 }
 
 func pluginConfigFromYAML(t *testing.T, text string) config.PluginInstanceConfig {
