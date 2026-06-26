@@ -504,6 +504,10 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	stream := streamResult.Type == gjson.True
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	if isNativeCheckpointCompactionRequest(rawJSON) {
+		h.handleNativeCheckpointCompaction(c, rawJSON, stream)
+		return
+	}
 	if overrideEndpoint, ok := resolveEndpointOverride(modelName, openAIResponsesEndpoint); ok && overrideEndpoint == openAIChatEndpoint {
 		chatJSON := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(chatJSON, "stream").Bool()
@@ -557,6 +561,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 			rawJSON = updated
 		}
 	}
+	rawJSON = sanitizeOpenAIResponsesCompactRequest(rawJSON)
 
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -571,6 +576,58 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Context, rawJSON []byte, stream bool) {
+	compactJSON := sanitizeOpenAIResponsesCompactRequest(rawJSON)
+	modelName := gjson.GetBytes(compactJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if stream {
+		h.handleNativeCheckpointCompactionStream(c, cliCtx, cliCancel, modelName, compactJSON)
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, compactJSON, "responses/compact")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompactionStream(c *gin.Context, cliCtx context.Context, cliCancel handlers.APIHandlerCancelFunc, modelName string, compactJSON []byte) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported",
+				Type:    "server_error",
+			},
+		})
+		cliCancel(fmt.Errorf("streaming not supported"))
+		return
+	}
+
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, compactJSON, "responses/compact")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	writeOpenAIResponsesCompactSSE(c.Writer, resp)
+	flusher.Flush()
 	cliCancel()
 }
 
