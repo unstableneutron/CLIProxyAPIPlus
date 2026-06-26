@@ -341,6 +341,63 @@ checkout_conflict_side() {
   fi
 }
 
+ensure_commandcode_api_key_force_mapping() {
+  local phase=$1
+  [ "${phase}" = original ] || return 0
+
+  local file="sdk/cliproxy/auth/conductor.go"
+  [ -f "${file}" ] || return 0
+  grep -Fq 'func (m *Manager) resolveAPIKeyModelAliasWithResult' "${file}" || return 0
+  grep -Fq 'resolveCommandCodeAPIKeyConfig' "${file}" || return 0
+
+  if sed -n '/func (m \*Manager) resolveAPIKeyModelAliasWithResult/,/^func (m \*Manager) prepareExecutionModels/p' "${file}" \
+    | grep -Fq 'case "commandcode":'; then
+    return 0
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  awk '
+    BEGIN {
+      in_func = 0
+      in_codex = 0
+      inserted = 0
+    }
+    /^func \(m \*Manager\) resolveAPIKeyModelAliasWithResult/ {
+      in_func = 1
+    }
+    /^func \(m \*Manager\) prepareExecutionModels/ {
+      in_func = 0
+    }
+    {
+      print
+      if (in_func && !inserted && $0 ~ /^[[:space:]]*case "codex":/) {
+        in_codex = 1
+        next
+      }
+      if (in_func && in_codex && $0 ~ /^[[:space:]]*}/) {
+        print "\tcase \"commandcode\":"
+        print "\t\tif entry := resolveCommandCodeAPIKeyConfig(cfg, auth); entry != nil {"
+        print "\t\t\tmodels = asModelAliasEntries(entry.Models)"
+        print "\t\t}"
+        inserted = 1
+        in_codex = 0
+      }
+    }
+    END {
+      if (!inserted) {
+        exit 1
+      }
+    }
+  ' "${file}" > "${tmp}" || {
+    rm -f "${tmp}"
+    die "failed to compose CommandCode API-key force-mapping compatibility"
+  }
+  mv "${tmp}" "${file}"
+  git add -- "${file}"
+  echo "[OK] Composed CommandCode API-key force-mapping compatibility."
+}
+
 restore_fork_owned_paths() {
   local source_ref=$1
   local path prefix
@@ -643,6 +700,7 @@ cmd_merge_ref() {
 
   if [ -z "${conflict_paths}" ] && [ "${merge_exit}" -eq 0 ]; then
     restore_fork_owned_paths "${pre_merge_head}"
+    ensure_commandcode_api_key_force_mapping "${phase}"
     if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
       git commit \
         -m "chore(upstream-sync): merge ${phase} ref" \
