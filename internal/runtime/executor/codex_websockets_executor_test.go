@@ -477,6 +477,22 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 	}
 }
 
+func TestSanitizeCodexWebsocketCompactionReplayPayloadPreservesEncryptedContent(t *testing.T) {
+	payload := []byte(`{"model":"gpt-5.5","stream":true,"include":["reasoning.encrypted_content"],"input":[{"type":"compaction","id":"cmp-1","encrypted_content":"sealed-compaction"},{"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"sealed-reasoning"}]}`)
+
+	got := sanitizeCodexWebsocketCompactionReplayPayload(payload)
+
+	if gjson.GetBytes(got, "input.0.id").Exists() || gjson.GetBytes(got, "input.1.id").Exists() {
+		t.Fatalf("compact replay kept item ids: %s", got)
+	}
+	if gotValue := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotValue != "sealed-compaction" {
+		t.Fatalf("compaction encrypted_content = %q, want sealed-compaction; payload=%s", gotValue, got)
+	}
+	if gotValue := gjson.GetBytes(got, "input.1.encrypted_content").String(); gotValue != "sealed-reasoning" {
+		t.Fatalf("reasoning encrypted_content = %q, want sealed-reasoning; payload=%s", gotValue, got)
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -858,7 +858,7 @@ func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
 		return updated
 	}
 	for index := range input.Array() {
-		for _, field := range []string{"id", "encrypted_content"} {
+		for _, field := range []string{"id"} {
 			path := fmt.Sprintf("input.%d.%s", index, field)
 			if !gjson.GetBytes(updated, path).Exists() {
 				continue
