@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -490,6 +491,210 @@ func TestSanitizeCodexWebsocketCompactionReplayPayloadPreservesEncryptedContent(
 	}
 	if gotValue := gjson.GetBytes(got, "input.1.encrypted_content").String(); gotValue != "sealed-reasoning" {
 		t.Fatalf("reasoning encrypted_content = %q, want sealed-reasoning; payload=%s", gotValue, got)
+	}
+}
+
+func TestSanitizeCodexWebsocketCompactionReplayPayloadCanStripEncryptedContent(t *testing.T) {
+	payload := []byte(`{"model":"gpt-5.5","stream":true,"input":[{"type":"compaction","id":"cmp-1","encrypted_content":"sealed-compaction"},{"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"sealed-reasoning"}]}`)
+
+	got := sanitizeCodexWebsocketCompactionReplayPayloadWithOptions(payload, codexWebsocketCompactionReplaySanitizeOptions{StripEncryptedContent: true})
+
+	if strings.Contains(string(got), "encrypted_content") {
+		t.Fatalf("compact replay kept encrypted_content after strip option: %s", got)
+	}
+	if strings.Contains(string(got), `"id":`) {
+		t.Fatalf("compact replay kept item ids: %s", got)
+	}
+}
+
+func TestCodexWebsocketsCompactionRetryStripsEncryptedContentWhenUnsupported(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	compactBodies := make(chan []byte, 2)
+	var compactCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"compaction","id":"cmp-state","summary":"state","encrypted_content":"sealed-state"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+			}
+			compactBodies <- bytes.Clone(body)
+			call := compactCalls.Add(1)
+			if call == 1 {
+				if !strings.Contains(string(body), "encrypted_content") {
+					t.Errorf("first compact body should keep encrypted_content: %s", body)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"Unknown parameter: 'input[1].encrypted_content'."}}`))
+				return
+			}
+			if strings.Contains(string(body), "encrypted_content") {
+				t.Errorf("retry compact body should strip encrypted_content: %s", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","created_at":1775555723,"status":"completed","output":[{"type":"compaction","id":"cmp-1","summary":"compressed"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`))
+		default:
+			t.Errorf("request path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-compact", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "codex-compact-retry-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	firstResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first ExecuteStream error: %v", err)
+	}
+	for chunk := range firstResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("first stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	compactResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("compact ExecuteStream error: %v", err)
+	}
+	for chunk := range compactResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("compact stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	if got := compactCalls.Load(); got != 2 {
+		t.Fatalf("compact calls = %d, want 2", got)
+	}
+	firstBody := <-compactBodies
+	secondBody := <-compactBodies
+	if strings.Contains(gjson.GetBytes(firstBody, "input").Raw, `"id":`) {
+		t.Fatalf("first compact body kept item ids: %s", firstBody)
+	}
+	if !strings.Contains(string(firstBody), "encrypted_content") {
+		t.Fatalf("first compact body missing encrypted_content: %s", firstBody)
+	}
+	if strings.Contains(string(secondBody), "encrypted_content") {
+		t.Fatalf("second compact body kept encrypted_content: %s", secondBody)
+	}
+}
+
+func TestCodexWebsocketsCompactionProvenanceChangeStripsEncryptedContent(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	compactBody := make(chan []byte, 1)
+	var compactCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"compaction","id":"cmp-state","summary":"state","encrypted_content":"sealed-state"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+			}
+			compactCalls.Add(1)
+			compactBody <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","created_at":1775555723,"status":"completed","output":[{"type":"compaction","id":"cmp-1","summary":"compressed"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`))
+		default:
+			t.Errorf("request path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	authA := &cliproxyauth.Auth{ID: "auth-a", Attributes: map[string]string{"api_key": "sk-test-a", "base_url": server.URL}}
+	authB := &cliproxyauth.Auth{ID: "auth-b", Attributes: map[string]string{"api_key": "sk-test-b", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "codex-compact-provenance-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	firstResult, err := exec.ExecuteStream(ctx, authA, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first ExecuteStream error: %v", err)
+	}
+	for chunk := range firstResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("first stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	compactResult, err := exec.ExecuteStream(ctx, authB, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("compact ExecuteStream error: %v", err)
+	}
+	for chunk := range compactResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("compact stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	if got := compactCalls.Load(); got != 1 {
+		t.Fatalf("compact calls = %d, want 1", got)
+	}
+	body := <-compactBody
+	if strings.Contains(string(body), "encrypted_content") {
+		t.Fatalf("provenance-changed compact body kept encrypted_content: %s", body)
+	}
+	if strings.Contains(gjson.GetBytes(body, "input").Raw, `"id":`) {
+		t.Fatalf("provenance-changed compact body kept item ids: %s", body)
 	}
 }
 

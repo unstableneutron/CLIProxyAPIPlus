@@ -180,3 +180,35 @@ func TestCodexExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testi
 		t.Fatalf("compact trigger stream missing response.completed: %s", streamed.String())
 	}
 }
+
+func TestCodexCompactShouldRetryWithoutEncryptedContent(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "unknown encrypted content parameter",
+			err:  statusErr{code: http.StatusBadRequest, msg: `{"error":{"message":"Unknown parameter: 'input[1].encrypted_content'."}}`},
+			want: true,
+		},
+		{
+			name: "missing required encrypted content",
+			err:  statusErr{code: http.StatusBadRequest, msg: `{"error":{"message":"Missing required parameter: 'input[1].encrypted_content'."}}`},
+			want: false,
+		},
+		{
+			name: "auth error mentioning encrypted content",
+			err:  statusErr{code: http.StatusUnauthorized, msg: `{"error":{"message":"invalid encrypted_content"}}`},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexCompactShouldRetryWithoutEncryptedContent(tc.err); got != tc.want {
+				t.Fatalf("codexCompactShouldRetryWithoutEncryptedContent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

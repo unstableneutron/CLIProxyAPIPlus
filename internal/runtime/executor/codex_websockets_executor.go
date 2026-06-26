@@ -699,7 +699,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			eventType := gjson.GetBytes(payload, "type").String()
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
 			if !recordedTranscript && (eventType == "response.completed" || eventType == "response.done") && transcriptState != nil {
-				transcriptState.recordTranscriptTurn(wsReqBody, payload)
+				transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, payload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
 				recordedTranscript = true
 			}
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
@@ -760,7 +760,18 @@ func (e *CodexWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(c
 	if len(transcriptInput) == 0 {
 		return nil, false, nil
 	}
-	compactPayload, err := buildCodexWebsocketCompactionPayload(requestPayload, transcriptInput)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	_, baseURL := codexCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	currentProvenance := codexWebsocketTranscriptProvenance(auth, baseURL, baseModel)
+	stripEncryptedContent := false
+	if transcriptProvenance, ok := state.snapshotTranscriptProvenance(); ok && !transcriptProvenance.sameOrigin(currentProvenance) {
+		stripEncryptedContent = true
+		helps.LogWithRequestID(ctx).Debugf("codex websockets executor: stripping compact replay encrypted_content because transcript provenance changed or is mixed")
+	}
+	compactPayload, err := buildCodexWebsocketCompactionPayloadWithOptions(requestPayload, transcriptInput, codexWebsocketCompactionPayloadOptions{StripEncryptedContent: stripEncryptedContent})
 	if err != nil {
 		return nil, true, err
 	}
@@ -771,12 +782,12 @@ func (e *CodexWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(c
 	compactOpts.Alt = "responses/compact"
 	compactOpts.ResponseFormat = sdktranslator.FromString("openai-response")
 
-	resp, err := e.CodexExecutor.executeCompact(ctx, auth, compactReq, compactOpts)
+	resp, err := e.CodexExecutor.executeCompactWithEncryptedContentFallback(ctx, auth, compactReq, compactOpts)
 	if err != nil {
 		return nil, true, err
 	}
 	responseID := codexCompactionResponseID(resp.Payload)
-	state.replaceTranscriptWithItems(codexCompactionOutputItems(resp.Payload, responseID)...)
+	state.replaceTranscriptWithItemsAndProvenance(currentProvenance, codexCompactionOutputItems(resp.Payload, responseID)...)
 
 	chunks := codexBuildCompactionTriggerStreamChunks(resp.Payload, responseID)
 	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
@@ -793,6 +804,14 @@ func (e *CodexWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(c
 }
 
 func buildCodexWebsocketCompactionPayload(payload []byte, transcriptInput []byte) ([]byte, error) {
+	return buildCodexWebsocketCompactionPayloadWithOptions(payload, transcriptInput, codexWebsocketCompactionPayloadOptions{})
+}
+
+type codexWebsocketCompactionPayloadOptions struct {
+	StripEncryptedContent bool
+}
+
+func buildCodexWebsocketCompactionPayloadWithOptions(payload []byte, transcriptInput []byte, opts codexWebsocketCompactionPayloadOptions) ([]byte, error) {
 	if len(payload) == 0 {
 		payload = []byte(`{}`)
 	}
@@ -808,11 +827,19 @@ func buildCodexWebsocketCompactionPayload(payload []byte, transcriptInput []byte
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")
 	out, _ = sjson.DeleteBytes(out, "type")
 	out, _ = sjson.DeleteBytes(out, "generate")
-	out = sanitizeCodexWebsocketCompactionReplayPayload(out)
+	out = sanitizeCodexWebsocketCompactionReplayPayloadWithOptions(out, codexWebsocketCompactionReplaySanitizeOptions{StripEncryptedContent: opts.StripEncryptedContent})
 	return out, nil
 }
 
+type codexWebsocketCompactionReplaySanitizeOptions struct {
+	StripEncryptedContent bool
+}
+
 func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
+	return sanitizeCodexWebsocketCompactionReplayPayloadWithOptions(payload, codexWebsocketCompactionReplaySanitizeOptions{})
+}
+
+func sanitizeCodexWebsocketCompactionReplayPayloadWithOptions(payload []byte, opts codexWebsocketCompactionReplaySanitizeOptions) []byte {
 	if len(bytes.TrimSpace(payload)) == 0 || !json.Valid(payload) {
 		return payload
 	}
@@ -858,7 +885,11 @@ func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
 		return updated
 	}
 	for index := range input.Array() {
-		for _, field := range []string{"id"} {
+		fields := []string{"id"}
+		if opts.StripEncryptedContent {
+			fields = append(fields, "encrypted_content")
+		}
+		for _, field := range fields {
 			path := fmt.Sprintf("input.%d.%s", index, field)
 			if !gjson.GetBytes(updated, path).Exists() {
 				continue
@@ -869,6 +900,19 @@ func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
 		}
 	}
 	return updated
+}
+
+func codexWebsocketTranscriptProvenance(auth *cliproxyauth.Auth, baseURL string, model string) websocketTranscriptProvenance {
+	authID := ""
+	if auth != nil {
+		authID = strings.TrimSpace(auth.ID)
+	}
+	return websocketTranscriptProvenance{
+		Provider: "codex",
+		AuthID:   authID,
+		BaseURL:  strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		Model:    strings.TrimSpace(model),
+	}
 }
 
 func codexBuildCompactionTriggerStreamChunks(compactData []byte, responseID string) [][]byte {

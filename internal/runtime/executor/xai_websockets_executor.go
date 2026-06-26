@@ -53,6 +53,15 @@ type xaiWebsocketIDState struct {
 	downstreamToUpstream map[string]string
 	sequence             int
 	transcriptInput      []json.RawMessage
+	transcriptProvenance websocketTranscriptProvenance
+}
+
+type websocketTranscriptProvenance struct {
+	Provider string
+	AuthID   string
+	BaseURL  string
+	Model    string
+	Mixed    bool
 }
 
 type xaiWebsocketRequestIDMapper struct {
@@ -156,6 +165,18 @@ func (s *xaiWebsocketIDState) snapshotTranscriptInput() []byte {
 	return xaiMarshalRawMessages(s.transcriptInput)
 }
 
+func (s *xaiWebsocketIDState) snapshotTranscriptProvenance() (websocketTranscriptProvenance, bool) {
+	if s == nil {
+		return websocketTranscriptProvenance{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.transcriptInput) == 0 || s.transcriptProvenance.empty() {
+		return websocketTranscriptProvenance{}, false
+	}
+	return s.transcriptProvenance, true
+}
+
 func (s *xaiWebsocketIDState) prependTranscriptInput(payload []byte) []byte {
 	if s == nil || len(payload) == 0 {
 		return payload
@@ -179,6 +200,10 @@ func (s *xaiWebsocketIDState) prependTranscriptInput(payload []byte) []byte {
 }
 
 func (s *xaiWebsocketIDState) recordTranscriptTurn(requestPayload []byte, completedPayload []byte) {
+	s.recordTranscriptTurnWithProvenance(requestPayload, completedPayload, websocketTranscriptProvenance{})
+}
+
+func (s *xaiWebsocketIDState) recordTranscriptTurnWithProvenance(requestPayload []byte, completedPayload []byte, provenance websocketTranscriptProvenance) {
 	if s == nil || len(requestPayload) == 0 || len(completedPayload) == 0 {
 		return
 	}
@@ -192,12 +217,24 @@ func (s *xaiWebsocketIDState) recordTranscriptTurn(requestPayload []byte, comple
 	defer s.mu.Unlock()
 	if strings.TrimSpace(gjson.GetBytes(requestPayload, "previous_response_id").String()) == "" {
 		s.transcriptInput = nil
+		s.transcriptProvenance = websocketTranscriptProvenance{}
+	}
+	if !provenance.empty() {
+		if len(s.transcriptInput) == 0 || s.transcriptProvenance.empty() {
+			s.transcriptProvenance = provenance
+		} else if !s.transcriptProvenance.sameOrigin(provenance) {
+			s.transcriptProvenance = s.transcriptProvenance.markMixed(provenance)
+		}
 	}
 	s.transcriptInput = append(s.transcriptInput, inputItems...)
 	s.transcriptInput = append(s.transcriptInput, outputItems...)
 }
 
 func (s *xaiWebsocketIDState) replaceTranscriptWithItems(items ...[]byte) {
+	s.replaceTranscriptWithItemsAndProvenance(websocketTranscriptProvenance{}, items...)
+}
+
+func (s *xaiWebsocketIDState) replaceTranscriptWithItemsAndProvenance(provenance websocketTranscriptProvenance, items ...[]byte) {
 	if s == nil {
 		return
 	}
@@ -211,7 +248,33 @@ func (s *xaiWebsocketIDState) replaceTranscriptWithItems(items ...[]byte) {
 	}
 	s.mu.Lock()
 	s.transcriptInput = next
+	if len(next) == 0 || provenance.empty() {
+		s.transcriptProvenance = websocketTranscriptProvenance{}
+	} else {
+		s.transcriptProvenance = provenance
+	}
 	s.mu.Unlock()
+}
+
+func (p websocketTranscriptProvenance) empty() bool {
+	return strings.TrimSpace(p.Provider) == "" && strings.TrimSpace(p.AuthID) == "" && strings.TrimSpace(p.BaseURL) == "" && strings.TrimSpace(p.Model) == "" && !p.Mixed
+}
+
+func (p websocketTranscriptProvenance) sameOrigin(other websocketTranscriptProvenance) bool {
+	if p.Mixed || other.Mixed || p.empty() || other.empty() {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(p.Provider), strings.TrimSpace(other.Provider)) &&
+		strings.TrimSpace(p.AuthID) == strings.TrimSpace(other.AuthID) &&
+		strings.TrimRight(strings.TrimSpace(p.BaseURL), "/") == strings.TrimRight(strings.TrimSpace(other.BaseURL), "/")
+}
+
+func (p websocketTranscriptProvenance) markMixed(other websocketTranscriptProvenance) websocketTranscriptProvenance {
+	if p.empty() {
+		p = other
+	}
+	p.Mixed = true
+	return p
 }
 
 func xaiJSONRawMessages(result gjson.Result) []json.RawMessage {

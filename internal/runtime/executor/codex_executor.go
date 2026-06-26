@@ -1250,7 +1250,7 @@ func (e *CodexExecutor) executeCompactionTriggerStream(ctx context.Context, auth
 	compactOpts.Alt = "responses/compact"
 	compactOpts.ResponseFormat = sdktranslator.FromString("openai-response")
 
-	resp, err := e.executeCompact(ctx, auth, compactReq, compactOpts)
+	resp, err := e.executeCompactWithEncryptedContentFallback(ctx, auth, compactReq, compactOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -1283,6 +1283,57 @@ func buildCodexCompactionTriggerPayload(payload []byte) ([]byte, error) {
 	out, _ = sjson.DeleteBytes(out, "include")
 	out = sanitizeCodexWebsocketCompactionReplayPayload(out)
 	return out, nil
+}
+
+func (e *CodexExecutor) executeCompactWithEncryptedContentFallback(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	resp, err := e.executeCompact(ctx, auth, req, opts)
+	if err == nil || !codexCompactShouldRetryWithoutEncryptedContent(err) {
+		return resp, err
+	}
+
+	strippedPayload := sanitizeCodexWebsocketCompactionReplayPayloadWithOptions(req.Payload, codexWebsocketCompactionReplaySanitizeOptions{StripEncryptedContent: true})
+	if bytes.Equal(bytes.TrimSpace(strippedPayload), bytes.TrimSpace(req.Payload)) {
+		return resp, err
+	}
+
+	helps.LogWithRequestID(ctx).Debugf("codex executor: retrying compact request without encrypted_content after upstream rejected encrypted_content: %v", err)
+	retryReq := req
+	retryReq.Payload = strippedPayload
+	return e.executeCompact(ctx, auth, retryReq, opts)
+}
+
+func codexCompactShouldRetryWithoutEncryptedContent(err error) bool {
+	if err == nil {
+		return false
+	}
+	statusCode := 0
+	if statusErr, ok := err.(interface{ StatusCode() int }); ok {
+		statusCode = statusErr.StatusCode()
+	}
+	if statusCode != 0 && statusCode != http.StatusBadRequest && statusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if !strings.Contains(message, "encrypted_content") {
+		return false
+	}
+	if strings.Contains(message, "missing required parameter") || strings.Contains(message, "required parameter") || strings.Contains(message, "missing") {
+		return false
+	}
+	for _, marker := range []string{
+		"unknown",
+		"unrecognized",
+		"unsupported",
+		"not supported",
+		"extra",
+		"unexpected",
+		"invalid",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return statusCode == http.StatusBadRequest || statusCode == http.StatusUnprocessableEntity
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
