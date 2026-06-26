@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -807,7 +808,51 @@ func buildCodexWebsocketCompactionPayload(payload []byte, transcriptInput []byte
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")
 	out, _ = sjson.DeleteBytes(out, "type")
 	out, _ = sjson.DeleteBytes(out, "generate")
+	out = sanitizeCodexWebsocketCompactionReplayPayload(out)
 	return out, nil
+}
+
+func sanitizeCodexWebsocketCompactionReplayPayload(payload []byte) []byte {
+	if len(bytes.TrimSpace(payload)) == 0 || !json.Valid(payload) {
+		return payload
+	}
+	updated := bytes.Clone(payload)
+	if include := gjson.GetBytes(updated, "include"); include.Exists() && include.IsArray() {
+		kept := make([]string, 0, len(include.Array()))
+		changed := false
+		for _, item := range include.Array() {
+			if strings.TrimSpace(item.String()) == "reasoning.encrypted_content" {
+				changed = true
+				continue
+			}
+			kept = append(kept, item.Raw)
+		}
+		if changed {
+			if len(kept) == 0 {
+				if next, errDelete := sjson.DeleteBytes(updated, "include"); errDelete == nil {
+					updated = next
+				}
+			} else if next, errSet := sjson.SetRawBytes(updated, "include", []byte("["+strings.Join(kept, ",")+"]")); errSet == nil {
+				updated = next
+			}
+		}
+	}
+	input := gjson.GetBytes(updated, "input")
+	if !input.Exists() || !input.IsArray() {
+		return updated
+	}
+	for index := range input.Array() {
+		for _, field := range []string{"id", "encrypted_content"} {
+			path := fmt.Sprintf("input.%d.%s", index, field)
+			if !gjson.GetBytes(updated, path).Exists() {
+				continue
+			}
+			if next, errDelete := sjson.DeleteBytes(updated, path); errDelete == nil {
+				updated = next
+			}
+		}
+	}
+	return updated
 }
 
 func codexBuildCompactionTriggerStreamChunks(compactData []byte, responseID string) [][]byte {

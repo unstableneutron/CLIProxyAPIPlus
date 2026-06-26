@@ -429,7 +429,10 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 			t.Fatalf("compact fallback leaked previous_response_id: %s", body)
 		}
 		inputRaw := gjson.GetBytes(body, "input").Raw
-		for _, want := range []string{`"id":"msg-1"`, `"id":"out-1"`} {
+		if strings.Contains(inputRaw, `"id":`) {
+			t.Fatalf("compact fallback should strip non-portable item ids: %s", inputRaw)
+		}
+		for _, want := range []string{`"text":"first"`, `"role":"user"`, `"role":"assistant"`} {
 			if !strings.Contains(inputRaw, want) {
 				t.Fatalf("compact fallback input missing %s: %s", want, inputRaw)
 			}
