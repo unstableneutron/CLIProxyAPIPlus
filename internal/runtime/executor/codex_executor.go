@@ -1058,6 +1058,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
+	if xaiInputHasItemType(req.Payload, "compaction_trigger") {
+		return e.executeCompactionTriggerStream(ctx, auth, req, opts)
+	}
 	if isCodexOpenAIImageRequest(opts) {
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
@@ -1233,6 +1236,53 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *CodexExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	compactPayload, err := buildCodexCompactionTriggerPayload(req.Payload)
+	if err != nil {
+		return nil, err
+	}
+	compactReq := req
+	compactReq.Payload = compactPayload
+	compactOpts := opts
+	compactOpts.Stream = false
+	compactOpts.Alt = "responses/compact"
+	compactOpts.ResponseFormat = sdktranslator.FromString("openai-response")
+
+	resp, err := e.executeCompact(ctx, auth, compactReq, compactOpts)
+	if err != nil {
+		return nil, err
+	}
+	responseID := codexCompactionResponseID(resp.Payload)
+	chunks := codexBuildCompactionTriggerStreamChunks(resp.Payload, responseID)
+	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+	close(out)
+	headers := resp.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	headers.Set("Content-Type", "text/event-stream")
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+func buildCodexCompactionTriggerPayload(payload []byte) ([]byte, error) {
+	if len(payload) == 0 {
+		payload = []byte(`{}`)
+	}
+	out := xaiRemoveInputItemsByType(bytes.Clone(payload), "compaction_trigger")
+	out, _ = sjson.DeleteBytes(out, "previous_response_id")
+	out, _ = sjson.DeleteBytes(out, "type")
+	out, _ = sjson.DeleteBytes(out, "generate")
+	out, _ = sjson.DeleteBytes(out, "stream")
+	out, _ = sjson.DeleteBytes(out, "stream_options")
+	out, _ = sjson.DeleteBytes(out, "store")
+	out, _ = sjson.DeleteBytes(out, "include")
+	out = sanitizeCodexWebsocketCompactionReplayPayload(out)
+	return out, nil
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

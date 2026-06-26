@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -75,5 +76,98 @@ func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 				t.Fatalf("payload = %s", string(resp.Payload))
 			}
 		})
+	}
+}
+
+func TestCodexExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id": "resp_compact_1",
+  "object": "response.compaction",
+  "created_at": 1775555723,
+  "status": "completed",
+  "output": [
+    {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+    {"type":"compaction","encrypted_content":"opaque"}
+  ],
+  "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.5-aws",
+		Payload: []byte(`{
+  "model":"gpt-5.5-aws",
+  "previous_response_id":"resp-prev",
+  "stream":true,
+  "store":false,
+  "include":["reasoning.encrypted_content"],
+  "input":[
+    {"id":"msg-user","role":"user","content":[{"type":"input_text","text":"hello"}]},
+    {"id":"rs-prev","type":"reasoning","summary":[]},
+    {"id":"msg-prev","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]},
+    {"type":"compaction_trigger"}
+  ]
+}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream compaction trigger error: %v", err)
+	}
+	if gotPath != "/responses/compact" {
+		t.Fatalf("path = %q, want /responses/compact", gotPath)
+	}
+	if xaiInputHasItemType(gotBody, "compaction_trigger") {
+		t.Fatalf("compaction_trigger reached compact body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id reached compact body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "stream").Exists() {
+		t.Fatalf("stream reached compact body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "stream_options").Exists() {
+		t.Fatalf("stream_options reached compact body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "store").Exists() {
+		t.Fatalf("store reached compact body: %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "include").Exists() {
+		t.Fatalf("include reached compact body: %s", string(gotBody))
+	}
+	if got := len(gjson.GetBytes(gotBody, "input").Array()); got != 3 {
+		t.Fatalf("compact input length = %d, want 3; body=%s", got, string(gotBody))
+	}
+	if bytes.Contains(gotBody, []byte(`"id":`)) {
+		t.Fatalf("compact body should strip non-portable item ids: %s", string(gotBody))
+	}
+
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+	if !bytes.Contains(streamed.Bytes(), []byte("response.completed")) {
+		t.Fatalf("compact trigger stream missing response.completed: %s", streamed.String())
 	}
 }
