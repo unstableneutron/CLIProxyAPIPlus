@@ -124,6 +124,39 @@ func TestDirectResponsesStreamingStripsPreviousResponseIDForScopedUnsupportedRou
 	}
 }
 
+func TestDirectResponsesStreamingReplaysCachedStateForScopedUnsupportedRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, executor := newDirectResponsesStateModeTestHandler(t, map[string]string{
+		responsesStateAuthCapabilityKey: "false",
+		responsesStateAuthModelsKey:     `["gpt-5.5-aws"]`,
+	}, "gpt-5.5-aws")
+
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"gpt-5.5-aws","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"gpt-5.5-aws","stream":true,"previous_response_id":"resp-1","input":[{"role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("payload count = %d, want 2", len(payloads))
+	}
+	second := payloads[1]
+	if gjson.GetBytes(second, "previous_response_id").Exists() {
+		t.Fatalf("cached unsupported route replay should strip previous_response_id: %s", second)
+	}
+	input := gjson.GetBytes(second, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("second replay input length = %d, want 3; payload=%s", len(input), second)
+	}
+	if got := input[0].Get("content.0.text").String(); got != "first" {
+		t.Fatalf("first input text = %q, want first; payload=%s", got, second)
+	}
+	if got := input[1].Get("content.0.text").String(); got != "state-output-1" {
+		t.Fatalf("cached assistant output = %q, want state-output-1; payload=%s", got, second)
+	}
+	if got := input[2].Get("content.0.text").String(); got != "second" {
+		t.Fatalf("second input text = %q, want second; payload=%s", got, second)
+	}
+}
+
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 

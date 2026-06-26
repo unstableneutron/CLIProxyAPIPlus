@@ -659,12 +659,6 @@ func (t directResponsesStreamStateTracker) Complete(payload []byte) {
 func (h *OpenAIResponsesAPIHandler) prepareDirectResponsesStreamState(modelName string, rawJSON []byte) ([]byte, directResponsesStreamStateTracker) {
 	normalized := normalizeDirectResponsesStreamStateRequest(rawJSON)
 	tracker := directResponsesStreamStateTracker{cache: h.directResponsesStateCache()}
-	if h.responsesWebsocketResponsesStateUnsupportedForModel(modelName) {
-		stripped, _ := sjson.DeleteBytes(normalized, "previous_response_id")
-		tracker.request = bytes.Clone(stripped)
-		return stripped, tracker
-	}
-
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(normalized, "previous_response_id").String())
 	if previousResponseID == "" {
 		tracker.request = bytes.Clone(normalized)
