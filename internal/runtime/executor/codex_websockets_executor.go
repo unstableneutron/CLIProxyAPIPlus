@@ -903,7 +903,7 @@ func codexBuildCompactionTriggerStreamChunks(compactData []byte, responseID stri
 }
 
 func codexCompactionBaseResponse(compactData []byte, responseID string, createdAt int64, status string) []byte {
-	response := bytes.TrimSpace(compactData)
+	response := compactJSONBytes(bytes.TrimSpace(compactData))
 	if len(response) == 0 || !gjson.ParseBytes(response).IsObject() {
 		response = []byte(`{"object":"response","output":[]}`)
 	} else {
@@ -930,7 +930,10 @@ func codexCompactionOutputItems(compactData []byte, responseID string) [][]byte 
 	}
 	out := make([][]byte, 0, len(items))
 	for i, item := range items {
-		item = bytes.Clone(item)
+		item = compactJSONBytes(item)
+		if len(item) == 0 {
+			continue
+		}
 		if !gjson.GetBytes(item, "id").Exists() {
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("%s_%d", xaiCompactionItemID(responseID), i))
 		}
@@ -940,6 +943,18 @@ func codexCompactionOutputItems(compactData []byte, responseID string) [][]byte 
 		out = append(out, item)
 	}
 	return out
+}
+
+func compactJSONBytes(raw []byte) []byte {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || !json.Valid(raw) {
+		return raw
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return raw
+	}
+	return buf.Bytes()
 }
 
 func codexCompactionResponseID(compactData []byte) string {

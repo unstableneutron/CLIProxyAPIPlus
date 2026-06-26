@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -361,7 +362,20 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 			}
 			compactBody <- bytes.Clone(body)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","created_at":1775555723,"status":"completed","output":[{"type":"compaction","id":"cmp-1","summary":"compressed"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`))
+			_, _ = w.Write([]byte(`{
+  "id": "resp-compact",
+  "object": "response",
+  "created_at": 1775555723,
+  "status": "completed",
+  "output": [
+    {
+      "type": "compaction",
+      "id": "cmp-1",
+      "summary": "compressed"
+    }
+  ],
+  "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+}`))
 		default:
 			t.Errorf("request path = %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -414,6 +428,16 @@ func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *
 	for chunk := range compactResult.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("compact stream chunk error: %v", chunk.Err)
+		}
+		for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			data := bytes.TrimSpace(line[len("data:"):])
+			if len(data) > 0 && !json.Valid(data) {
+				t.Fatalf("compact stream emitted invalid data JSON: %q", data)
+			}
 		}
 		if strings.Contains(string(chunk.Payload), "response.completed") {
 			sawCompleted = true
