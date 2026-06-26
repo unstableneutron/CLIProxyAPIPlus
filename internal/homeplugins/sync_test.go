@@ -380,6 +380,43 @@ func TestDeleteWithReportRemovesCurrentPlatformPlugin(t *testing.T) {
 	}
 }
 
+func TestDeleteWithReportRemovesAllCurrentPlatformPluginVersions(t *testing.T) {
+	root := t.TempDir()
+	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	extension := pluginExtension(runtime.GOOS)
+	olderTarget := filepath.Join(targetDir, "sample-v0.2.0"+extension)
+	newerTarget := filepath.Join(targetDir, "sample-v0.3.0"+extension)
+	otherTarget := filepath.Join(targetDir, "other-v0.3.0"+extension)
+	for _, target := range []string{olderTarget, newerTarget, otherTarget} {
+		if errWrite := os.WriteFile(target, []byte("library-data"), 0o644); errWrite != nil {
+			t.Fatalf("WriteFile(%s) error = %v", target, errWrite)
+		}
+	}
+	runtimeHost := &fakePluginRuntime{busy: true}
+
+	report := DeleteWithReport(context.Background(), syncTestConfig(t, root), runtimeHost, 43, "sample")
+	if !report.OK {
+		t.Fatalf("report = %+v, want successful delete task", report)
+	}
+	if len(runtimeHost.unloaded) != 1 || runtimeHost.unloaded[0] != "sample" {
+		t.Fatalf("UnloadPlugin calls = %v, want sample", runtimeHost.unloaded)
+	}
+	if len(report.Plugins) != 1 || report.Plugins[0].InstallStatus != pluginInstallStatusDeleted || report.Plugins[0].Path != newerTarget {
+		t.Fatalf("plugin report = %+v, want deleted representative target %s", report.Plugins, newerTarget)
+	}
+	for _, target := range []string{olderTarget, newerTarget} {
+		if _, errStat := os.Stat(target); !os.IsNotExist(errStat) {
+			t.Fatalf("target %s stat error = %v, want not exist", target, errStat)
+		}
+	}
+	if _, errStat := os.Stat(otherTarget); errStat != nil {
+		t.Fatalf("other plugin stat error = %v, want retained", errStat)
+	}
+}
+
 func TestDeleteWithReportMissingPluginIsSuccess(t *testing.T) {
 	report := DeleteWithReport(context.Background(), syncTestConfig(t, t.TempDir()), nil, 7, "missing")
 	if !report.OK || report.Status != pluginTaskStatusOK {
