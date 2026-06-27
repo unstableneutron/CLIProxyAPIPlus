@@ -35,7 +35,8 @@ uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses
 4. **Parse JSON frames.** Avoid grepping huge websocket frames. Read JSON lines whose `type` is `response.output_text.done`, `response.completed`, `response.failed`, or error-like.
 5. **Dedupe mirrored events.** Logs can contain downstream and API/upstream timelines with duplicate output/completion events. Dedupe exact final texts and compare item ids/timestamps.
 6. **Interpret prewarm correctly.** `request_kind=prewarm`, `input=[]`, `generate=false`, `prompt_cache_key=<thread>`, and zero output means cache/model warmup, not a user turn.
-7. **Report raw status.** Say `status=completed`, `error=<none>`, `incomplete=<none>`, and `stop_field=absent` when no `stop` field exists. Do not invent `stop=true` or `stop=false`.
+7. **Classify compaction/replay before text.** Endpoint `/responses/compact`, input item `compaction_trigger`, replay provenance, or `reasoning.encrypted_content` means internal compaction/replay traffic until proven otherwise. Report endpoint, trigger marker, thread/session/parent ids, input count, usage, and replay provenance before treating any text as a user-visible answer.
+8. **Report raw status.** Say `status=completed`, `error=<none>`, `incomplete=<none>`, and `stop_field=absent` when no `stop` field exists. Do not invent `stop=true` or `stop=false`.
 
 ## Evidence To Report
 
@@ -45,6 +46,7 @@ uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses
 | What model/account? | requested/resolved model, account prefix only |
 | Same or new thread? | session id, thread id, parent id, first/last seen counts |
 | What kind of call? | request_kind, thread_source, input count, generate flag |
+| Compact/replay? | endpoint, `compaction_trigger`, replay provenance, encrypted-content presence |
 | Final answer? | last unique `response.output_text.done` text |
 | Finished cleanly? | last `response.completed` status/error/incomplete/usage |
 | Requester IP? | `main.log` id join, with proxy caveat |
@@ -56,6 +58,8 @@ uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses
 - Selecting the largest or nearest-mtime log instead of `request_id`.
 - Concatenating every `response.output_text.delta` and duplicating mirrored timelines.
 - Calling repeated ~11.6k-token prewarms user prompts; those are usually system prompt plus tool schemas.
+- Calling `/responses/compact`, `compaction_trigger`, or encrypted reasoning replay a normal user turn before classifying compaction/replay context. Its token usage can be internal thread compaction or replay cost.
+- Treating `encrypted_content` or replay provenance as user-visible final assistant text.
 - Publishing raw bearer tokens, auth file names, full account IDs, upstream host labels, or provider-specific backend URLs.
 
 ## Helper Validation

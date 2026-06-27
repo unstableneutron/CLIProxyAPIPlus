@@ -14,7 +14,8 @@ Never call upstream sync done from a green workflow alone. Prove actual `main`, 
 1. **Identify the sync target**
    - Confirm `original`, `plus`, and `fork` terms from `AGENTS.md`.
    - Run or inspect the planner output under `scratch/upstream-sync/`.
-   - Record original tag, Plus tag/head, sync ID, expected fork tag, and blocked state.
+   - Record original tag, Plus tag/head, sync ID, `has_changes`, `target_drift`, latest fork tag, next fork tag, and blocked state.
+   - If `blocked=false`, `target_drift=false`, and `has_changes=false`, this is a clean no-op only after verifying the existing latest fork tag and artifacts. Do not treat `next_fork_tag` as expected, trigger acceptance, or force rebuild unless the existing artifact chain is missing or intentionally superseded.
    - After PR resolution, rerun normal-mode acceptance; compare selected refs with PR-reviewed refs. If they changed, restart review.
    - Immediately before merging a resolved PR, rerun planning or `replay-plan`. If `target_drift=true` or replay reports new conflicts, update to the latest selected refs and rerun review.
 
@@ -54,11 +55,13 @@ Never call upstream sync done from a green workflow alone. Prove actual `main`, 
 5. **Verify artifacts, not just checks**
    Required success evidence:
    - `main` contains the expected commit, and local `main` is clean.
-   - Expected fork tag exists locally after fetch and remotely, e.g. `vX.Y.Z-unstableneutron.N`.
+   - Expected fork tag exists locally after fetch and remotely, e.g. `vX.Y.Z-unstableneutron.N`. For no-op plans, verify `latest_fork_tag`, not `next_fork_tag`.
+   - Compare annotated tags by their peeled commit (`git rev-parse <tag>^{}`); remote tag object SHA can differ from the commit SHA.
    - Upstream-sync, GoReleaser, and Docker workflows succeeded for that tag/main.
    - GitHub release exists; assets use `CLIProxyAPIPlus` branding.
    - Local fetched state proves tag/main/release chain, not just web UI status.
    - Docker multi-arch publish can finish much later than GoReleaser. Poll the Docker workflow to completion; do not rely on package-listing APIs because tokens may lack `read:packages`.
+   - Clean no-op classification requires current `main`, peeled `latest_fork_tag`, release, GoReleaser, and Docker to already line up. Report `clean / already released` or `clean / no-op`, not `released` or `auto-resolved`.
 
 ## Smoke Matrix Notes
 
@@ -80,6 +83,7 @@ If upstream-sync is green but no tag appears:
 ## Common Mistakes
 
 - Treating workflow-level success as release success.
+- Treating `next_fork_tag` as expected when `has_changes=false`; the represented artifact is `latest_fork_tag`.
 - Merging a resolved sync PR without running the normal-mode acceptance sync afterward.
 - Reporting blocked before attempting a reasonable local repair for conflict or gate failures.
 - Trusting a conflict-free merge without checking ownership clobbers and invariants.
