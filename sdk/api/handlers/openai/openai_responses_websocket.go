@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai/responsesreplay"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -566,20 +567,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			updatedLastRequest = bytes.Clone(requestJSON)
 		}
 		rollbackRequestJSON := responsesWebsocketRollbackRequest(fallbackRequestJSON, previousCheckpoint)
-		encryptedContentRetryRequestJSON := []byte(nil)
+		replayRetryBaseJSON := requestJSON
 		if len(fallbackRequestJSON) > 0 {
-			if sanitized, changed := stripResponsesWebsocketReasoningEncryptedContent(fallbackRequestJSON); changed {
-				encryptedContentRetryRequestJSON = sanitized
-			}
-		} else if sanitized, changed := stripResponsesWebsocketReasoningEncryptedContent(requestJSON); changed {
+			replayRetryBaseJSON = fallbackRequestJSON
+		}
+		encryptedContentRetryRequestJSON := []byte(nil)
+		if sanitized, changed := stripResponsesWebsocketReasoningEncryptedContent(replayRetryBaseJSON); changed {
 			encryptedContentRetryRequestJSON = sanitized
 		}
+		providerIdentifierRetryRequestJSON := []byte(nil)
+		if sanitized, changed := responsesreplay.Render(replayRetryBaseJSON, responsesreplay.AttemptWithoutProviderIdentifiers); changed {
+			providerIdentifierRetryRequestJSON = sanitized
+		}
 		portableReplayRequestJSON := []byte(nil)
-		if len(fallbackRequestJSON) > 0 {
-			if sanitized, changed := sanitizeResponsesWebsocketPortableReplay(fallbackRequestJSON); changed {
-				portableReplayRequestJSON = sanitized
-			}
-		} else if sanitized, changed := sanitizeResponsesWebsocketPortableReplay(requestJSON); changed {
+		if sanitized, changed := sanitizeResponsesWebsocketPortableReplay(replayRetryBaseJSON); changed {
 			portableReplayRequestJSON = sanitized
 		}
 
@@ -681,20 +682,29 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errForward == nil && forwardResult.interceptedForRetry && len(encryptedContentRetryRequestJSON) > 0 && responsesWebsocketInvalidEncryptedContent(forwardResult.errorMessage) {
 			clearPendingUpstreamDisconnectClose()
 			log.Infof("responses websocket: invalid encrypted content id=%s, retrying without reasoning encrypted_content", passthroughSessionID)
-			attempt = runUpstreamRequest(encryptedContentRetryRequestJSON, false, false, len(portableReplayRequestJSON) > 0)
+			attempt = runUpstreamRequest(encryptedContentRetryRequestJSON, len(fallbackRequestJSON) > 0, false, len(providerIdentifierRetryRequestJSON) > 0 || len(portableReplayRequestJSON) > 0)
 			forwardResult, errForward = attempt.forwardResult, attempt.err
-			usedEncryptedContentRetry = errForward == nil && !responsesWebsocketInvalidEncryptedContent(forwardResult.errorMessage)
+			usedEncryptedContentRetry = errForward == nil && forwardResult.errorMessage == nil
 			if usedEncryptedContentRetry {
 				lastRequest = bytes.Clone(encryptedContentRetryRequestJSON)
 			}
 		}
-		usedPortableReplayRetry := false
-		if errForward == nil && forwardResult.interceptedForRetry && len(portableReplayRequestJSON) > 0 && responsesWebsocketProviderItemNotFound(forwardResult.errorMessage) {
+		if errForward == nil && forwardResult.interceptedForRetry && len(providerIdentifierRetryRequestJSON) > 0 && responsesWebsocketProviderItemNotFound(forwardResult.errorMessage) && !usedEncryptedContentRetry {
 			clearPendingUpstreamDisconnectClose()
-			log.Infof("responses websocket: provider item id not found id=%s, retrying with portable replay", passthroughSessionID)
+			log.Infof("responses websocket: provider item id not found id=%s, retrying without provider identifiers", passthroughSessionID)
+			attempt = runUpstreamRequest(providerIdentifierRetryRequestJSON, false, len(encryptedContentRetryRequestJSON) > 0, len(portableReplayRequestJSON) > 0)
+			forwardResult, errForward = attempt.forwardResult, attempt.err
+			if errForward == nil && forwardResult.errorMessage == nil {
+				lastRequest = bytes.Clone(providerIdentifierRetryRequestJSON)
+			}
+		}
+		usedPortableReplayRetry := false
+		if errForward == nil && forwardResult.interceptedForRetry && len(portableReplayRequestJSON) > 0 && (responsesWebsocketProviderItemNotFound(forwardResult.errorMessage) || responsesWebsocketInvalidEncryptedContent(forwardResult.errorMessage)) {
+			clearPendingUpstreamDisconnectClose()
+			log.Infof("responses websocket: provider state not portable id=%s, retrying with portable replay", passthroughSessionID)
 			attempt = runUpstreamRequest(portableReplayRequestJSON, false, false, false)
 			forwardResult, errForward = attempt.forwardResult, attempt.err
-			usedPortableReplayRetry = errForward == nil && !responsesWebsocketProviderItemNotFound(forwardResult.errorMessage)
+			usedPortableReplayRetry = errForward == nil && forwardResult.errorMessage == nil
 			if usedPortableReplayRetry {
 				lastRequest = bytes.Clone(portableReplayRequestJSON)
 			}
@@ -2173,7 +2183,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 	}
 }
 
-func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
+func responsesErrorStatus(errMsg *interfaces.ErrorMessage) int {
 	if errMsg == nil {
 		return 0
 	}
@@ -2192,7 +2202,7 @@ func responsesWebsocketPreviousResponseNotFound(errMsg *interfaces.ErrorMessage)
 	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
-	status := responsesWebsocketErrorStatus(errMsg)
+	status := responsesErrorStatus(errMsg)
 	if status != 0 && status != http.StatusBadRequest && status != http.StatusNotFound && status < http.StatusInternalServerError {
 		return false
 	}
@@ -2225,78 +2235,38 @@ func responsesWebsocketInvalidEncryptedContent(errMsg *interfaces.ErrorMessage) 
 	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
-	status := responsesWebsocketErrorStatus(errMsg)
+	status := responsesErrorStatus(errMsg)
 	if status != 0 && status != http.StatusBadRequest && status < http.StatusInternalServerError {
 		return false
 	}
-	return responsesWebsocketPayloadInvalidEncryptedContent([]byte(strings.TrimSpace(errMsg.Error.Error())))
+	return responsesreplay.Classify(status, errMsg.Error.Error()) == responsesreplay.ErrorInvalidEncryptedContent
 }
 
 func responsesWebsocketPayloadInvalidEncryptedContent(payload []byte) bool {
-	if len(payload) == 0 {
-		return false
-	}
-	if gjson.ValidBytes(payload) {
-		for _, path := range []string{"error.code", "body.error.code", "code", "response.error.code"} {
-			if strings.TrimSpace(gjson.GetBytes(payload, path).String()) == "invalid_encrypted_content" {
-				return true
-			}
-		}
-		for _, path := range []string{"error.message", "body.error.message", "message", "response.error.message"} {
-			if responsesWebsocketInvalidEncryptedContentMessage(gjson.GetBytes(payload, path).String()) {
-				return true
-			}
-		}
-	}
-	return responsesWebsocketInvalidEncryptedContentMessage(string(payload))
+	return responsesreplay.Classify(http.StatusBadRequest, string(payload)) == responsesreplay.ErrorInvalidEncryptedContent
 }
 
 func responsesWebsocketInvalidEncryptedContentMessage(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	if !strings.Contains(lower, "encrypted content") {
-		return false
-	}
-	return strings.Contains(lower, "could not be verified") || strings.Contains(lower, "recognized prefix")
+	return responsesreplay.Classify(http.StatusBadRequest, message) == responsesreplay.ErrorInvalidEncryptedContent
 }
 
 func responsesWebsocketProviderItemNotFound(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
-	status := responsesWebsocketErrorStatus(errMsg)
+	status := responsesErrorStatus(errMsg)
 	if status != 0 && status != http.StatusBadRequest && status != http.StatusNotFound && status < http.StatusInternalServerError {
 		return false
 	}
-	return responsesWebsocketPayloadProviderItemNotFound([]byte(strings.TrimSpace(errMsg.Error.Error())))
+	return responsesreplay.Classify(status, errMsg.Error.Error()) == responsesreplay.ErrorProviderStateNotFound
 }
 
 func responsesWebsocketPayloadProviderItemNotFound(payload []byte) bool {
-	if len(payload) == 0 {
-		return false
-	}
-	if gjson.ValidBytes(payload) {
-		for _, path := range []string{"error.code", "body.error.code", "code", "response.error.code"} {
-			code := strings.TrimSpace(strings.ToLower(gjson.GetBytes(payload, path).String()))
-			switch code {
-			case "item_not_found", "missing_item", "input_item_not_found":
-				return true
-			}
-		}
-		for _, path := range []string{"error.message", "body.error.message", "message", "response.error.message"} {
-			if responsesWebsocketProviderItemNotFoundMessage(gjson.GetBytes(payload, path).String()) {
-				return true
-			}
-		}
-	}
-	return responsesWebsocketProviderItemNotFoundMessage(string(payload))
+	return responsesreplay.Classify(http.StatusBadRequest, string(payload)) == responsesreplay.ErrorProviderStateNotFound
 }
 
 func responsesWebsocketProviderItemNotFoundMessage(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	if !strings.Contains(lower, "item") || !strings.Contains(lower, "not found") {
-		return false
-	}
-	return strings.Contains(lower, "item with id") || strings.Contains(lower, "item id") || strings.Contains(lower, "input item") || strings.Contains(lower, "output item")
+	return responsesreplay.Classify(http.StatusBadRequest, message) == responsesreplay.ErrorProviderStateNotFound
 }
 
 func responsesWebsocketRetryErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
@@ -2311,68 +2281,11 @@ func responsesWebsocketRetryErrorMessageFromPayload(payload []byte) *interfaces.
 }
 
 func stripResponsesWebsocketReasoningEncryptedContent(payload []byte) ([]byte, bool) {
-	input := gjson.GetBytes(payload, "input")
-	if !input.Exists() || !input.IsArray() {
-		return payload, false
-	}
-
-	updated := payload
-	changed := false
-	for index, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
-			continue
-		}
-		path := fmt.Sprintf("input.%d.encrypted_content", index)
-		if !gjson.GetBytes(updated, path).Exists() {
-			continue
-		}
-		next, err := sjson.DeleteBytes(updated, path)
-		if err != nil {
-			continue
-		}
-		updated = next
-		changed = true
-	}
-	return updated, changed
+	return responsesreplay.Render(payload, responsesreplay.AttemptWithoutReasoningEncryptedContent)
 }
 
 func sanitizeResponsesWebsocketPortableReplay(payload []byte) ([]byte, bool) {
-	if len(bytes.TrimSpace(payload)) == 0 || !json.Valid(payload) {
-		return payload, false
-	}
-
-	updated := bytes.Clone(payload)
-	changed := false
-	if gjson.GetBytes(updated, "previous_response_id").Exists() {
-		if next, err := sjson.DeleteBytes(updated, "previous_response_id"); err == nil {
-			updated = next
-			changed = true
-		}
-	}
-	if next, includeChanged := stripResponsesWebsocketReasoningEncryptedInclude(updated); includeChanged {
-		updated = next
-		changed = true
-	}
-
-	input := gjson.GetBytes(updated, "input")
-	if !input.Exists() || !input.IsArray() {
-		return updated, changed
-	}
-	for index := range input.Array() {
-		for _, field := range []string{"id", "encrypted_content"} {
-			path := fmt.Sprintf("input.%d.%s", index, field)
-			if !gjson.GetBytes(updated, path).Exists() {
-				continue
-			}
-			next, err := sjson.DeleteBytes(updated, path)
-			if err != nil {
-				continue
-			}
-			updated = next
-			changed = true
-		}
-	}
-	return updated, changed
+	return responsesreplay.Render(payload, responsesreplay.AttemptPortableTranscript)
 }
 
 func stripResponsesWebsocketReasoningEncryptedInclude(payload []byte) ([]byte, bool) {
@@ -2486,7 +2399,7 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	if errMsg == nil {
 		return false
 	}
-	status := responsesWebsocketErrorStatus(errMsg)
+	status := responsesErrorStatus(errMsg)
 	switch status {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
 		return true

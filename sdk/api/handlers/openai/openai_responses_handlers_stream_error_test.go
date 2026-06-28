@@ -277,6 +277,7 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 					func() { c.Header("Content-Type", "text/event-stream") },
 					committed,
 					deadline,
+					nil,
 					func(chunk []byte) { framer.WriteChunk(c.Writer, chunk) },
 					func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 						h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)

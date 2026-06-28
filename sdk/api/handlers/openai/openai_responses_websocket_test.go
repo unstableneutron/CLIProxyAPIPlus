@@ -489,7 +489,7 @@ func (e *websocketProviderItemNotFoundRetryExecutor) ExecuteStream(_ context.Con
 	hasProviderScopedState := gjson.GetBytes(req.Payload, "previous_response_id").Exists() ||
 		bytes.Contains(req.Payload, []byte("reasoning.encrypted_content")) ||
 		responsesWebsocketInputHasField(req.Payload, "id") ||
-		responsesWebsocketInputHasField(req.Payload, "encrypted_content")
+		responsesWebsocketInputHasNonCompactionEncryptedContent(req.Payload)
 
 	e.mu.Lock()
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
@@ -543,6 +543,23 @@ func responsesWebsocketInputHasField(payload []byte, field string) bool {
 	}
 	for _, item := range input.Array() {
 		if item.Get(field).Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesWebsocketInputHasNonCompactionEncryptedContent(payload []byte) bool {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "compaction", "compaction_summary":
+			continue
+		}
+		if item.Get("encrypted_content").Exists() {
 			return true
 		}
 	}
@@ -2843,6 +2860,12 @@ func TestResponsesWebsocketRetriesPortableReplayForProviderItemNotFound(t *testi
 			{"type":"message","id":"msg_34ecb19dbe5c57b38266c2dc91746995","role":"assistant","content":[{"type":"output_text","text":"kept assistant text"}]},
 			{"type":"function_call","id":"fc_671de9872b7b5ea4b997c0a3436c1000","call_id":"call_portable_1","name":"exec_command","arguments":"{}"},
 			{"type":"function_call_output","id":"fco_azure_1","call_id":"call_portable_1","output":"kept tool output"},
+			{"type":"message","id":"msg_context_4","role":"assistant","content":[{"type":"output_text","text":"kept context 4"}]},
+			{"type":"message","id":"msg_context_5","role":"user","content":"kept context 5"},
+			{"type":"message","id":"msg_context_6","role":"assistant","content":[{"type":"output_text","text":"kept context 6"}]},
+			{"type":"message","id":"msg_context_7","role":"user","content":"kept context 7"},
+			{"type":"compaction","encrypted_content":"kept compacted transcript"},
+			{"type":"compaction_summary","encrypted_content":"kept compacted summary","summary":"compressed history"},
 			{"type":"message","id":"msg_user_1","role":"user","content":"next question"}
 		]
 	}`, modelName)
@@ -2858,8 +2881,8 @@ func TestResponsesWebsocketRetriesPortableReplayForProviderItemNotFound(t *testi
 	}
 
 	payloads := executor.Payloads()
-	if len(payloads) != 2 {
-		t.Fatalf("upstream payload count = %d, want first failure plus portable retry", len(payloads))
+	if len(payloads) != 3 {
+		t.Fatalf("upstream payload count = %d, want first failure plus identifier retry plus portable retry", len(payloads))
 	}
 	first := payloads[0]
 	if !gjson.GetBytes(first, "previous_response_id").Exists() || !responsesWebsocketInputHasField(first, "id") || !responsesWebsocketInputHasField(first, "encrypted_content") {
@@ -2867,31 +2890,50 @@ func TestResponsesWebsocketRetriesPortableReplayForProviderItemNotFound(t *testi
 	}
 	second := payloads[1]
 	if gjson.GetBytes(second, "previous_response_id").Exists() {
-		t.Fatalf("portable retry kept previous_response_id: %s", second)
+		t.Fatalf("identifier retry kept previous_response_id: %s", second)
 	}
 	if responsesWebsocketInputHasField(second, "id") {
-		t.Fatalf("portable retry kept provider item IDs: %s", second)
+		t.Fatalf("identifier retry kept provider item IDs: %s", second)
 	}
-	if responsesWebsocketInputHasField(second, "encrypted_content") {
-		t.Fatalf("portable retry kept encrypted content: %s", second)
+	if got := gjson.GetBytes(second, "input.0.encrypted_content").String(); got != "azure-sealed" {
+		t.Fatalf("identifier retry reasoning encrypted_content = %q, want preserved: %s", got, second)
 	}
-	if bytes.Contains(second, []byte("reasoning.encrypted_content")) {
-		t.Fatalf("portable retry kept reasoning encrypted include: %s", second)
+	if got := gjson.GetBytes(second, "include.0").String(); got != "reasoning.encrypted_content" {
+		t.Fatalf("identifier retry include.0 = %q, want reasoning.encrypted_content: %s", got, second)
 	}
-	if got := gjson.GetBytes(second, "include.0").String(); got != "web_search_call.results" {
-		t.Fatalf("portable retry include.0 = %q, want web_search_call.results: %s", got, second)
+	third := payloads[2]
+	if gjson.GetBytes(third, "previous_response_id").Exists() {
+		t.Fatalf("portable retry kept previous_response_id: %s", third)
 	}
-	if got := gjson.GetBytes(second, "input.2.call_id").String(); got != "call_portable_1" {
-		t.Fatalf("portable retry function_call call_id = %q, want call_portable_1: %s", got, second)
+	if responsesWebsocketInputHasField(third, "id") {
+		t.Fatalf("portable retry kept provider item IDs: %s", third)
 	}
-	if got := gjson.GetBytes(second, "input.3.call_id").String(); got != "call_portable_1" {
-		t.Fatalf("portable retry function_call_output call_id = %q, want call_portable_1: %s", got, second)
+	if gjson.GetBytes(third, "input.0.encrypted_content").Exists() {
+		t.Fatalf("portable retry kept reasoning encrypted content: %s", third)
 	}
-	if got := gjson.GetBytes(second, "input.0.summary.0.text").String(); got != "kept reasoning summary" {
-		t.Fatalf("portable retry reasoning summary = %q, want preserved: %s", got, second)
+	if got := gjson.GetBytes(third, "input.8.encrypted_content").String(); got != "kept compacted transcript" {
+		t.Fatalf("portable retry compaction encrypted_content = %q, want preserved: %s", got, third)
 	}
-	if got := gjson.GetBytes(second, "input.1.content.0.text").String(); got != "kept assistant text" {
-		t.Fatalf("portable retry assistant text = %q, want preserved: %s", got, second)
+	if got := gjson.GetBytes(third, "input.9.encrypted_content").String(); got != "kept compacted summary" {
+		t.Fatalf("portable retry compaction_summary encrypted_content = %q, want preserved: %s", got, third)
+	}
+	if bytes.Contains(third, []byte("reasoning.encrypted_content")) {
+		t.Fatalf("portable retry kept reasoning encrypted include: %s", third)
+	}
+	if got := gjson.GetBytes(third, "include.0").String(); got != "web_search_call.results" {
+		t.Fatalf("portable retry include.0 = %q, want web_search_call.results: %s", got, third)
+	}
+	if got := gjson.GetBytes(third, "input.2.call_id").String(); got != "call_portable_1" {
+		t.Fatalf("portable retry function_call call_id = %q, want call_portable_1: %s", got, third)
+	}
+	if got := gjson.GetBytes(third, "input.3.call_id").String(); got != "call_portable_1" {
+		t.Fatalf("portable retry function_call_output call_id = %q, want call_portable_1: %s", got, third)
+	}
+	if got := gjson.GetBytes(third, "input.0.summary.0.text").String(); got != "kept reasoning summary" {
+		t.Fatalf("portable retry reasoning summary = %q, want preserved: %s", got, third)
+	}
+	if got := gjson.GetBytes(third, "input.1.content.0.text").String(); got != "kept assistant text" {
+		t.Fatalf("portable retry assistant text = %q, want preserved: %s", got, third)
 	}
 }
 

@@ -567,7 +567,12 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
+	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
+		ctx:       cliCtx,
+		modelName: modelName,
+		payload:   rawJSON,
+		alt:       "responses/compact",
+	})
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -590,7 +595,12 @@ func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Cont
 
 	c.Header("Content-Type", "application/json")
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, compactJSON, "responses/compact")
+	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
+		ctx:       cliCtx,
+		modelName: modelName,
+		payload:   compactJSON,
+		alt:       "responses/compact",
+	})
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -645,7 +655,11 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
+		ctx:       cliCtx,
+		modelName: modelName,
+		payload:   rawJSON,
+	})
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -793,6 +807,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	rawJSON, stateTracker := h.prepareDirectResponsesStreamState(modelName, rawJSON)
+	replayPayload := bytes.Clone(rawJSON)
+	replayState := responsesReplayPlannerState{}
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
 	setSSEHeaders := func() {
@@ -802,16 +818,25 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 	framer := &responsesSSEFramer{onCompleted: stateTracker.Complete}
+	startResponsesStream := func(ctx context.Context) responsesStreamBootstrapResult {
+		data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, h.HandlerType(), modelName, replayPayload, "")
+		return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
+	}
+	retryResponsesStream := func(errMsg *interfaces.ErrorMessage) (responsesStreamBootstrapResult, bool) {
+		nextPayload, ok := replayState.nextPayload(rawJSON, errMsg)
+		if !ok {
+			return responsesStreamBootstrapResult{}, false
+		}
+		replayPayload = nextPayload
+		return startResponsesStream(cliCtx), true
+	}
 
 	h.handleResponsesStreamBootstrap(
 		c,
 		flusher,
 		cliCtx,
 		cliCancel,
-		func(ctx context.Context) responsesStreamBootstrapResult {
-			data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, h.HandlerType(), modelName, rawJSON, "")
-			return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
-		},
+		startResponsesStream,
 		setSSEHeaders,
 		func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time) {
 			h.forwardStreamAfterBootstrap(
@@ -824,6 +849,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				setSSEHeaders,
 				committed,
 				deadline,
+				retryResponsesStream,
 				func(chunk []byte) { framer.WriteChunk(c.Writer, chunk) },
 				func(data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 					h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, data, errs, framer)
@@ -926,6 +952,7 @@ func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
 	setSSEHeaders func(),
 	committed bool,
 	bootstrapDeadline time.Time,
+	retryBeforeCommit func(*interfaces.ErrorMessage) (responsesStreamBootstrapResult, bool),
 	writeFirstChunk func([]byte),
 	forwardRest func(<-chan []byte, <-chan *interfaces.ErrorMessage),
 ) {
@@ -995,6 +1022,14 @@ func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
 					return
 				}
 				continue
+			}
+			if !committed && retryBeforeCommit != nil {
+				if retryResult, retried := retryBeforeCommit(errMsg); retried {
+					data = retryResult.data
+					upstreamHeaders = retryResult.upstreamHeaders
+					errs = retryResult.errs
+					continue
+				}
 			}
 			if committed {
 				writeResponsesStreamErrorMessage(c.Writer, errMsg)
@@ -1106,6 +1141,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 				setSSEHeaders,
 				committed,
 				deadline,
+				nil,
 				func(chunk []byte) {
 					writeChatAsResponsesChunk(c, cliCtx, modelName, originalResponsesJSON, chunk, &param)
 				},
