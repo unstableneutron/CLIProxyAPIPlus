@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sys/cpu"
 )
 
 type InstallOptions struct {
@@ -483,7 +484,7 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 	if root == "" {
 		root = "plugins"
 	}
-	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH)
+	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
 	extension := pluginExtension(runtime.GOOS)
 	selectedByID := make(map[string]pluginFileInfo)
 	order := make([]string, 0)
@@ -528,8 +529,11 @@ func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
 	return selected, nil
 }
 
-func pluginCandidateDirs(root string, goos string, goarch string) []string {
-	dirs := make([]string, 0, 2)
+func pluginCandidateDirs(root string, goos string, goarch string, variant string) []string {
+	dirs := make([]string, 0, 3)
+	if variant != "" {
+		dirs = append(dirs, filepath.Join(root, goos, goarch+"-"+variant))
+	}
 	dirs = append(dirs, filepath.Join(root, goos, goarch))
 	dirs = append(dirs, root)
 	return dirs
@@ -646,6 +650,22 @@ func pluginExtension(goos string) string {
 	default:
 		return ".so"
 	}
+}
+
+func cpuVariant() string {
+	if runtime.GOARCH != "amd64" {
+		return ""
+	}
+	if cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512CD && cpu.X86.HasAVX512DQ && cpu.X86.HasAVX512VL {
+		return "v4"
+	}
+	if cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasFMA {
+		return "v3"
+	}
+	if cpu.X86.HasSSE3 && cpu.X86.HasSSSE3 && cpu.X86.HasSSE41 && cpu.X86.HasSSE42 && cpu.X86.HasPOPCNT {
+		return "v2"
+	}
+	return "v1"
 }
 
 func writeFileAtomic(targetPath string, data []byte, mode os.FileMode) error {

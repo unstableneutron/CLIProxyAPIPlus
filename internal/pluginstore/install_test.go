@@ -74,6 +74,36 @@ func TestInstallArchiveBlocksLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveBlocksLoadedLegacyWindowsPluginBeforeCleanup(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	legacyPath := filepath.Join(targetDir, "sample-provider.dll")
+	if errWrite := os.WriteFile(legacyPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	versionedPath := filepath.Join(targetDir, "sample-provider-v0.1.0.dll")
+
+	_, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider.dll": "library-data",
+	}), testPlugin(), InstallOptions{
+		PluginsDir:   root,
+		GOOS:         "windows",
+		GOARCH:       "amd64",
+		PluginLoaded: func() bool { return true },
+	})
+	if !errors.Is(errInstall, ErrLoadedPluginLocked) {
+		t.Fatalf("InstallArchive() error = %v, want ErrLoadedPluginLocked", errInstall)
+	}
+	if _, errStat := os.Stat(versionedPath); !os.IsNotExist(errStat) {
+		t.Fatalf("versioned target stat error = %v, want not exist", errStat)
+	}
+}
+
 func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +243,40 @@ func TestInstallArchiveReportsOverwrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveMigratesLegacyRuntimePlugin(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	existingPath := filepath.Join(root, "sample-provider"+pluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(existingPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	wantPath := filepath.Join(root, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+pluginExtension(runtime.GOOS))
+
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider" + pluginExtension(runtime.GOOS): "new",
+	}), testPlugin(), InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if result.Path != wantPath {
+		t.Fatalf("Path = %q, want versioned runtime plugin %q", result.Path, wantPath)
+	}
+	if result.Overwritten {
+		t.Fatal("Overwritten = true, want false")
+	}
+	data, errRead := os.ReadFile(wantPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if string(data) != "new" {
+		t.Fatalf("installed data = %q, want new", data)
+	}
+	if _, errStat := os.Stat(existingPath); !os.IsNotExist(errStat) {
+		t.Fatalf("legacy target stat error = %v, want not exist", errStat)
+	}
+}
+
 func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -243,6 +307,51 @@ func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 	}
 	if string(data) != "new" {
 		t.Fatalf("installed data = %q, want new", data)
+	}
+}
+
+func TestInstallArchiveOverwritesPreferredRuntimeVersion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	extension := pluginExtension(runtime.GOOS)
+	stalePath := filepath.Join(targetDir, "sample-provider-v0.1.0"+extension)
+	preferredPath := filepath.Join(targetDir, "sample-provider-v0.2.0"+extension)
+	if errWrite := os.WriteFile(stalePath, []byte("stale"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", stalePath, errWrite)
+	}
+	if errWrite := os.WriteFile(preferredPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", preferredPath, errWrite)
+	}
+
+	plugin := testPlugin()
+	plugin.Version = "0.2.0"
+	result, errInstall := InstallArchive(makeZip(t, map[string]string{
+		"sample-provider" + extension: "new",
+	}), plugin, InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if result.Path != preferredPath {
+		t.Fatalf("Path = %q, want preferred runtime plugin %q", result.Path, preferredPath)
+	}
+	data, errRead := os.ReadFile(preferredPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", preferredPath, errRead)
+	}
+	if string(data) != "new" {
+		t.Fatalf("preferred plugin data = %q, want new", data)
+	}
+	data, errRead = os.ReadFile(stalePath)
+	if errRead != nil {
+		t.Fatalf("ReadFile(%s) error = %v", stalePath, errRead)
+	}
+	if string(data) != "stale" {
+		t.Fatalf("stale plugin data = %q, want stale", data)
 	}
 }
 
