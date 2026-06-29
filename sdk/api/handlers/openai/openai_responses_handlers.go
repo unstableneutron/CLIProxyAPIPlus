@@ -433,7 +433,8 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
-	directResponsesState *directResponsesStateCache
+	directResponsesState     *directResponsesStateCache
+	responsesTurnCoordinator *responsesTurnCoordinator
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -446,8 +447,9 @@ type OpenAIResponsesAPIHandler struct {
 //   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
-		BaseAPIHandler:       apiHandlers,
-		directResponsesState: newDirectResponsesStateCache(),
+		BaseAPIHandler:           apiHandlers,
+		directResponsesState:     newDirectResponsesStateCache(),
+		responsesTurnCoordinator: newResponsesTurnCoordinator(),
 	}
 }
 
@@ -508,6 +510,10 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		h.handleNativeCheckpointCompaction(c, rawJSON, stream)
 		return
 	}
+	if responsesTurnMetadataIsCompaction(c) {
+		finishCompaction := h.beginResponsesTurnCompaction(c)
+		defer finishCompaction()
+	}
 	if overrideEndpoint, ok := resolveEndpointOverride(modelName, openAIResponsesEndpoint); ok && overrideEndpoint == openAIChatEndpoint {
 		chatJSON := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(chatJSON, "stream").Bool()
@@ -561,6 +567,8 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 			rawJSON = updated
 		}
 	}
+	finishCompaction := h.beginResponsesTurnCompaction(c)
+	defer finishCompaction()
 	rawJSON = sanitizeOpenAIResponsesCompactRequest(rawJSON)
 
 	c.Header("Content-Type", "application/json")
@@ -585,6 +593,8 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Context, rawJSON []byte, stream bool) {
+	finishCompaction := h.beginResponsesTurnCompaction(c)
+	defer finishCompaction()
 	compactJSON := sanitizeOpenAIResponsesCompactRequest(rawJSON)
 	modelName := gjson.GetBytes(compactJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())

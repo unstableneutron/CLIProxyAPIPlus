@@ -40,6 +40,20 @@ type websocketCompactionCaptureExecutor struct {
 	compactPayload []byte
 }
 
+type websocketTurnCoordinatorExecutor struct {
+	mu             sync.Mutex
+	streamPayloads [][]byte
+	compactPayload []byte
+
+	streamStarted  chan struct{}
+	streamCanceled chan struct{}
+	releaseStream  chan struct{}
+
+	streamStartedOnce  sync.Once
+	streamCanceledOnce sync.Once
+	releaseStreamOnce  sync.Once
+}
+
 type orderedWebsocketSelector struct {
 	mu     sync.Mutex
 	order  []string
@@ -860,6 +874,66 @@ func (e *websocketCompactionCaptureExecutor) CountTokens(context.Context, *corea
 
 func (e *websocketCompactionCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
+}
+
+func newWebsocketTurnCoordinatorExecutor() *websocketTurnCoordinatorExecutor {
+	return &websocketTurnCoordinatorExecutor{
+		streamStarted:  make(chan struct{}),
+		streamCanceled: make(chan struct{}),
+		releaseStream:  make(chan struct{}),
+	}
+}
+
+func (e *websocketTurnCoordinatorExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketTurnCoordinatorExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.mu.Lock()
+	e.compactPayload = bytes.Clone(req.Payload)
+	e.mu.Unlock()
+	if opts.Alt != "responses/compact" {
+		return coreexecutor.Response{}, fmt.Errorf("unexpected non-compact execute alt: %q", opts.Alt)
+	}
+	return coreexecutor.Response{Payload: []byte(`{"id":"cmp-1","object":"response.compaction"}`)}, nil
+}
+
+func (e *websocketTurnCoordinatorExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.streamPayloads = append(e.streamPayloads, bytes.Clone(req.Payload))
+	e.mu.Unlock()
+	e.streamStartedOnce.Do(func() {
+		close(e.streamStarted)
+	})
+
+	select {
+	case <-ctx.Done():
+		e.streamCanceledOnce.Do(func() {
+			close(e.streamCanceled)
+		})
+		return nil, ctx.Err()
+	case <-e.releaseStream:
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
+}
+
+func (e *websocketTurnCoordinatorExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketTurnCoordinatorExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketTurnCoordinatorExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketTurnCoordinatorExecutor) ReleaseStream() {
+	e.releaseStreamOnce.Do(func() {
+		close(e.releaseStream)
+	})
 }
 
 func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
@@ -4643,6 +4717,111 @@ func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplac
 	}
 	if items[0].Get("call_id").String() != "call-1" {
 		t.Fatalf("post-compact custom tool call id = %s, want call-1", items[0].Get("call_id").String())
+	}
+}
+
+func TestResponsesWebsocketCompactionCancelsActiveSameTurnStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := newWebsocketTurnCoordinatorExecutor()
+	t.Cleanup(executor.ReleaseStream)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-sse", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("accessProvider", "test-access")
+		c.Set("userApiKey", "test-principal")
+		c.Next()
+	})
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	router.POST("/v1/responses/compact", h.Compact)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	turnMetadata := `{"installation_id":"install-1","session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","window_id":"session-1:1","request_kind":"turn"}`
+	compactMetadata := `{"installation_id":"install-1","session_id":"session-1","thread_id":"thread-1","turn_id":"turn-1","window_id":"session-1:1","request_kind":"compaction"}`
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-Metadata", turnMetadata)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		status := ""
+		if dialResp != nil {
+			status = dialResp.Status
+		}
+		t.Fatalf("dial websocket: %v status=%s", err, status)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	firstRequest := []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, firstRequest); errWrite != nil {
+		t.Fatalf("write websocket message: %v", errWrite)
+	}
+	select {
+	case <-executor.streamStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket stream to start")
+	}
+
+	compactReq, errNewRequest := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v1/responses/compact",
+		strings.NewReader(`{"model":"test-model","input":[{"type":"message","id":"summary-1"}]}`),
+	)
+	if errNewRequest != nil {
+		t.Fatalf("new compact request: %v", errNewRequest)
+	}
+	compactReq.Header.Set("Content-Type", "application/json")
+	compactReq.Header.Set("X-Codex-Turn-Metadata", compactMetadata)
+	compactResp, errDo := server.Client().Do(compactReq)
+	if errDo != nil {
+		t.Fatalf("compact request failed: %v", errDo)
+	}
+	if errClose := compactResp.Body.Close(); errClose != nil {
+		t.Fatalf("close compact response body: %v", errClose)
+	}
+	if compactResp.StatusCode != http.StatusOK {
+		t.Fatalf("compact status = %d, want %d", compactResp.StatusCode, http.StatusOK)
+	}
+
+	select {
+	case <-executor.streamCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compaction to cancel active websocket stream")
+	}
+	if errSetDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errSetDeadline != nil {
+		t.Fatalf("set websocket read deadline: %v", errSetDeadline)
+	}
+	_, _, errRead := conn.ReadMessage()
+	if errRead == nil {
+		t.Fatal("expected websocket to close after compaction canceled the active stream")
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(errRead, &closeErr) || closeErr.Code != websocket.CloseNormalClosure {
+		t.Fatalf("websocket close error = %v, want normal close after compaction", errRead)
+	}
+
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.streamPayloads) != 1 {
+		t.Fatalf("stream payload count = %d, want 1", len(executor.streamPayloads))
+	}
+	if executor.compactPayload == nil {
+		t.Fatal("compact payload was not captured")
 	}
 }
 

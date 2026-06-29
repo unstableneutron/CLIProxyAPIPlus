@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,8 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+var errResponsesWebsocketTurnCompacted = errors.New("responses websocket main turn superseded by compaction")
 
 const (
 	wsRequestTypeCreate  = "response.create"
@@ -237,6 +240,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	turnKey, turnMetadata, hasTurnKey := responsesTurnCoordinationKeyFromContext(c)
+	coordinateMainTurn := hasTurnKey && turnMetadata.IsMainTurn()
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
@@ -604,6 +609,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		runUpstreamRequest := func(upstreamPayload []byte, interceptPreviousResponseNotFound bool, interceptInvalidEncryptedContent bool, interceptProviderItemNotFound bool) responsesWebsocketUpstreamAttempt {
 			modelName := gjson.GetBytes(upstreamPayload, "model").String()
 			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+			turnCanceledByCompaction := func() bool { return false }
+			if coordinateMainTurn {
+				finishMainTurn := func() {}
+				cliCtx, finishMainTurn, turnCanceledByCompaction = h.beginResponsesMainTurn(cliCtx, turnKey)
+				defer finishMainTurn()
+			}
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
 			if !useUpstreamWebsocketPassthrough {
@@ -638,6 +649,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				interceptInvalidEncryptedContent:  interceptInvalidEncryptedContent,
 				interceptProviderItemNotFound:     interceptProviderItemNotFound,
 				logicalPreviousResponseID:         logicalPreviousResponseID,
+				turnCanceledByCompaction:          turnCanceledByCompaction,
 			})
 			return responsesWebsocketUpstreamAttempt{
 				forwardResult:  forwardResult,
@@ -711,6 +723,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		endUpstreamForward()
 		if errForward != nil {
+			if errors.Is(errForward, errResponsesWebsocketTurnCompacted) {
+				wsTerminateErr = errForward
+				log.Infof("responses websocket: main turn compacted id=%s", passthroughSessionID)
+				return
+			}
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
@@ -1773,6 +1790,7 @@ type responsesWebsocketForwardOptions struct {
 	interceptInvalidEncryptedContent  bool
 	interceptProviderItemNotFound     bool
 	logicalPreviousResponseID         string
+	turnCanceledByCompaction          func() bool
 }
 
 type responsesWebsocketForwardResult struct {
@@ -1924,6 +1942,18 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 			interceptedForRetry: interceptedForRetry,
 		}
 	}
+	turnCanceledByCompaction := func() bool {
+		return options.turnCanceledByCompaction != nil && options.turnCanceledByCompaction()
+	}
+	closeForTurnCompaction := func() (responsesWebsocketForwardResult, error) {
+		startupBuffer.Reset()
+		if conn != nil {
+			deadline := time.Now().Add(time.Second)
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "compacted"), deadline)
+		}
+		cancel(context.Canceled)
+		return result(nil, false), errResponsesWebsocketTurnCompacted
+	}
 	flushStartupBuffer := func() (bool, error) {
 		payloads := startupBuffer.Drain()
 		if len(payloads) == 0 {
@@ -1938,6 +1968,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 		return true, nil
 	}
 	handleStreamError := func(errMsg *interfaces.ErrorMessage) (responsesWebsocketForwardResult, error) {
+		if errMsg != nil && turnCanceledByCompaction() {
+			return closeForTurnCompaction()
+		}
 		if errMsg != nil && !downstreamCommitted {
 			if options.interceptPreviousResponseNotFound && responsesWebsocketPreviousResponseNotFound(errMsg) {
 				cancel(errMsg.Error)
@@ -2011,6 +2044,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocketWithOptions(
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
+					if turnCanceledByCompaction() {
+						return closeForTurnCompaction()
+					}
 					if errs != nil {
 						select {
 						case errMsg, ok := <-errs:
