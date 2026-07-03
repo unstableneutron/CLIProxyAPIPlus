@@ -150,6 +150,7 @@ func (e *BedrockExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	}
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, bodyForTranslation, claudeSSE, &param)
+	out = helps.ApplyBedrockStructuredOutputResponse(out, opts.OriginalRequest)
 	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -310,6 +311,7 @@ func (e *BedrockExecutor) translateRequest(ctx context.Context, req cliproxyexec
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	body = helps.ApplyBedrockStructuredOutputFormat(body, originalPayloadSource)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())

@@ -90,6 +90,27 @@ func BedrockPayloadForAPI(api, model string, claudeBody []byte, stream bool) []b
 	}
 }
 
+func ApplyBedrockStructuredOutputFormat(claudeBody, originalBody []byte) []byte {
+	if len(claudeBody) == 0 || len(originalBody) == 0 {
+		return claudeBody
+	}
+	instruction := bedrockStructuredOutputInstruction(bedrockStructuredOutputFormat(gjson.ParseBytes(originalBody)))
+	if instruction == "" {
+		return claudeBody
+	}
+	return addBedrockSystemInstruction(claudeBody, instruction)
+}
+
+func ApplyBedrockStructuredOutputResponse(responseBody, originalBody []byte) []byte {
+	if len(responseBody) == 0 || len(originalBody) == 0 {
+		return responseBody
+	}
+	if !bedrockStructuredOutputFormat(gjson.ParseBytes(originalBody)).Exists() {
+		return responseBody
+	}
+	return normalizeBedrockStructuredOutputInResponse(responseBody)
+}
+
 func ClaudeMessagesToBedrockConverse(body []byte) []byte {
 	root := gjson.ParseBytes(body)
 	out := []byte(`{"messages":[]}`)
@@ -316,6 +337,48 @@ func (n *BedrockStreamNormalizer) Finish() [][]byte {
 	})))
 	out = append(out, claudeDataLine([]byte(`{"type":"message_stop"}`)))
 	return out
+}
+
+func normalizeBedrockStructuredOutputInResponse(body []byte) []byte {
+	for _, path := range []string{"choices.0.message.content", "output.0.content.0.text"} {
+		text := gjson.GetBytes(body, path)
+		if text.Type != gjson.String {
+			continue
+		}
+		cleaned, ok := bedrockRawJSONString(text.String())
+		if !ok {
+			continue
+		}
+		out, _ := sjson.SetBytes(body, path, cleaned)
+		return out
+	}
+	return body
+}
+
+func bedrockRawJSONString(text string) (string, bool) {
+	cleaned := strings.TrimSpace(text)
+	if json.Valid([]byte(cleaned)) {
+		return cleaned, true
+	}
+	unfenced, ok := bedrockUnfencedJSON(cleaned)
+	if !ok || !json.Valid([]byte(unfenced)) {
+		return "", false
+	}
+	return unfenced, true
+}
+
+func bedrockUnfencedJSON(text string) (string, bool) {
+	if !strings.HasPrefix(text, "```") {
+		return "", false
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) < 3 {
+		return "", false
+	}
+	if !strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n")), true
 }
 
 func bedrockSystemBlocks(system gjson.Result) []map[string]string {
@@ -564,11 +627,6 @@ func bedrockToolConfig(root gjson.Result) map[string]any {
 
 func bedrockAdditionalModelRequestFields(root gjson.Result) map[string]any {
 	fields := make(map[string]any)
-	if format := root.Get("response_format"); format.Exists() {
-		fields["response_format"] = format.Value()
-	} else if format := root.Get("text.format"); format.Exists() {
-		fields["response_format"] = format.Value()
-	}
 	if outputConfig := root.Get("output_config"); outputConfig.Exists() {
 		fields["output_config"] = outputConfig.Value()
 	}
@@ -576,6 +634,57 @@ func bedrockAdditionalModelRequestFields(root gjson.Result) map[string]any {
 		return nil
 	}
 	return fields
+}
+
+func bedrockStructuredOutputFormat(root gjson.Result) gjson.Result {
+	if format := root.Get("response_format"); format.Exists() {
+		return format
+	}
+	if format := root.Get("text.format"); format.Exists() {
+		return format
+	}
+	return gjson.Result{}
+}
+
+func bedrockStructuredOutputInstruction(format gjson.Result) string {
+	if !format.Exists() {
+		return ""
+	}
+	switch format.Get("type").String() {
+	case "json_object":
+		return "Return only one valid JSON object. Do not include markdown fences, prose, or extra text."
+	case "json_schema":
+		schema := format.Get("json_schema.schema")
+		if !schema.Exists() {
+			schema = format.Get("schema")
+		}
+		if schema.Exists() {
+			return "Return only one valid JSON object matching this JSON Schema. Do not include markdown fences, prose, or extra text. JSON Schema: " + schema.Raw
+		}
+		return "Return only one valid JSON object. Do not include markdown fences, prose, or extra text."
+	default:
+		return ""
+	}
+}
+
+func addBedrockSystemInstruction(body []byte, instruction string) []byte {
+	system := gjson.GetBytes(body, "system")
+	switch {
+	case !system.Exists():
+		out, _ := sjson.SetBytes(body, "system", []map[string]string{{"text": instruction}})
+		return out
+	case system.Type == gjson.String:
+		existing := system.String()
+		out, _ := sjson.DeleteBytes(body, "system")
+		out, _ = sjson.SetBytes(out, "system", []map[string]string{{"text": existing}, {"text": instruction}})
+		return out
+	case system.IsArray():
+		block := mustJSON(map[string]string{"text": instruction})
+		out, _ := sjson.SetRawBytes(body, "system.-1", block)
+		return out
+	default:
+		return body
+	}
 }
 
 func claudeMessageToSSE(data []byte) []byte {

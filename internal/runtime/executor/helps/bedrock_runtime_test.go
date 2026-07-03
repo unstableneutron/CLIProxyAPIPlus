@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -66,11 +67,74 @@ func TestClaudeMessagesToBedrockConverse_mapsStructuredOutputConfig(t *testing.T
 
 	out := ClaudeMessagesToBedrockConverse(body)
 
-	if got := gjson.GetBytes(out, "additionalModelRequestFields.response_format.type").String(); got != "json_schema" {
-		t.Fatalf("response_format type = %q, want json_schema; output=%s", got, out)
+	if gjson.GetBytes(out, "additionalModelRequestFields.response_format").Exists() {
+		t.Fatalf("Converse payload should not include unsupported response_format field; output=%s", out)
 	}
-	if got := gjson.GetBytes(out, "additionalModelRequestFields.response_format.json_schema.schema.properties.answer.type").String(); got != "string" {
-		t.Fatalf("json schema answer type = %q, want string; output=%s", got, out)
+}
+
+func TestApplyBedrockStructuredOutputFormatAddsSchemaInstruction(t *testing.T) {
+	t.Parallel()
+
+	claudeBody := []byte(`{"messages":[{"role":"user","content":"return json"}]}`)
+	original := []byte(`{
+		"model":"sonnet-5",
+		"messages":[{"role":"user","content":"return json"}],
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}}}
+	}`)
+
+	out := ApplyBedrockStructuredOutputFormat(claudeBody, original)
+
+	system := gjson.GetBytes(out, "system.0.text").String()
+	if !strings.Contains(system, "JSON Schema") || !strings.Contains(system, `"answer"`) {
+		t.Fatalf("system instruction missing schema guidance: %s", out)
+	}
+}
+
+func TestApplyBedrockStructuredOutputFormatAddsResponsesTextFormatInstruction(t *testing.T) {
+	t.Parallel()
+
+	claudeBody := []byte(`{"messages":[{"role":"user","content":"return json"}]}`)
+	original := []byte(`{
+		"model":"sonnet-5",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"return json"}]}],
+		"text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}}}
+	}`)
+
+	out := ApplyBedrockStructuredOutputFormat(claudeBody, original)
+
+	system := gjson.GetBytes(out, "system.0.text").String()
+	if !strings.Contains(system, "JSON Schema") || !strings.Contains(system, `"answer"`) {
+		t.Fatalf("system instruction missing responses text format guidance: %s", out)
+	}
+}
+
+func TestApplyBedrockStructuredOutputResponseRemovesMarkdownFence(t *testing.T) {
+	t.Parallel()
+
+	original := []byte(`{"response_format":{"type":"json_object"}}`)
+	chatResponse := []byte(`{"choices":[{"message":{"content":"` + "```json\\n{\\\"status\\\":\\\"ok\\\"}\\n```" + `"}}]}`)
+	responsesResponse := []byte(`{"output":[{"content":[{"type":"output_text","text":"` + "```json\\n{\\\"status\\\":\\\"ok\\\"}\\n```" + `"}]}]}`)
+
+	chatOut := ApplyBedrockStructuredOutputResponse(chatResponse, original)
+	if got := gjson.GetBytes(chatOut, "choices.0.message.content").String(); got != `{"status":"ok"}` {
+		t.Fatalf("chat structured content = %q, want raw JSON; output=%s", got, chatOut)
+	}
+
+	responsesOut := ApplyBedrockStructuredOutputResponse(responsesResponse, original)
+	if got := gjson.GetBytes(responsesOut, "output.0.content.0.text").String(); got != `{"status":"ok"}` {
+		t.Fatalf("responses structured content = %q, want raw JSON; output=%s", got, responsesOut)
+	}
+}
+
+func TestApplyBedrockStructuredOutputResponseLeavesPlainTextAlone(t *testing.T) {
+	t.Parallel()
+
+	original := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	response := []byte(`{"choices":[{"message":{"content":"plain text"}}]}`)
+
+	out := ApplyBedrockStructuredOutputResponse(response, original)
+	if !bytes.Equal(out, response) {
+		t.Fatalf("response changed without structured format: got=%s want=%s", out, response)
 	}
 }
 
