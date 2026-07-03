@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +21,10 @@ type BedrockStreamNormalizer struct {
 	textBlockOpen   bool
 	textBlockClosed bool
 	textBlockIndex  int64
+	thinkingOpen    bool
+	thinkingClosed  bool
+	thinkingIndex   int64
+	thinkingSig     string
 	toolBlockOpen   bool
 	toolBlockClosed bool
 	toolBlockIndex  int64
@@ -29,9 +34,16 @@ type BedrockStreamNormalizer struct {
 }
 
 type bedrockUsage struct {
-	InputTokens  int64
-	OutputTokens int64
-	TotalTokens  int64
+	InputTokens               int64
+	OutputTokens              int64
+	TotalTokens               int64
+	CacheReadInputTokens      int64
+	CacheCreationInputTokens  int64
+	CacheWriteInputTokens     int64
+	ReasoningTokens           int64
+	CacheReadInputTokensSet   bool
+	CacheCreateInputTokensSet bool
+	ReasoningTokensSet        bool
 }
 
 func NormalizeBedrockAPI(value string, stream bool) string {
@@ -127,14 +139,15 @@ func ClaudeMessagesToBedrockConverse(body []byte) []byte {
 	if toolConfig := bedrockToolConfig(root); toolConfig != nil {
 		out, _ = sjson.SetBytes(out, "toolConfig", toolConfig)
 	}
+	if fields := bedrockAdditionalModelRequestFields(root); fields != nil {
+		out, _ = sjson.SetBytes(out, "additionalModelRequestFields", fields)
+	}
 	return out
 }
 
-func ClaudeMessagesToBedrockInvoke(model string, body []byte, stream bool) []byte {
+func ClaudeMessagesToBedrockInvoke(_ string, body []byte, _ bool) []byte {
 	out := bytes.Clone(body)
-	out, _ = sjson.SetBytes(out, "model", model)
 	out, _ = sjson.SetBytes(out, "anthropic_version", "bedrock-2023-05-31")
-	out, _ = sjson.SetBytes(out, "stream", stream)
 	return out
 }
 
@@ -166,6 +179,15 @@ func BedrockResponseToClaudeMessage(model string, data []byte) []byte {
 				"name":  tool.Get("name").String(),
 				"input": input,
 			})
+		} else if reasoning := part.Get("reasoningContent.reasoningText"); reasoning.Exists() {
+			block := map[string]any{
+				"type":     "thinking",
+				"thinking": reasoning.Get("text").String(),
+			}
+			if signature := reasoning.Get("signature").String(); signature != "" {
+				block["signature"] = signature
+			}
+			content = append(content, block)
 		}
 		return true
 	})
@@ -209,6 +231,10 @@ func (n *BedrockStreamNormalizer) ConvertLine(line []byte) [][]byte {
 		index := root.Get("contentBlockStart.contentBlockIndex")
 		out = append(out, n.openToolBlock(index.Int(), toolStart.Get("toolUseId").String(), toolStart.Get("name").String())...)
 	}
+	if reasoningStart := root.Get("contentBlockStart.start.reasoningContent.reasoningText"); reasoningStart.Exists() || root.Get("contentBlockStart.start.reasoningContent").Exists() {
+		index := root.Get("contentBlockStart.contentBlockIndex")
+		out = append(out, n.openThinkingBlock(index.Int(), reasoningStart.Get("signature").String())...)
+	}
 	delta := root.Get("contentBlockDelta.delta.text")
 	index := root.Get("contentBlockDelta.contentBlockIndex")
 	if !delta.Exists() {
@@ -232,6 +258,15 @@ func (n *BedrockStreamNormalizer) ConvertLine(line []byte) [][]byte {
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": toolDelta.String()},
 		})))
 	}
+	if reasoningDelta := root.Get("contentBlockDelta.delta.reasoningContent.text"); reasoningDelta.Exists() {
+		index := root.Get("contentBlockDelta.contentBlockIndex")
+		out = append(out, n.openThinkingBlock(index.Int(), "")...)
+		out = append(out, claudeDataLine(mustJSON(map[string]any{
+			"type":  "content_block_delta",
+			"index": index.Int(),
+			"delta": map[string]any{"type": "thinking_delta", "thinking": reasoningDelta.String()},
+		})))
+	}
 	if stopIndex := root.Get("contentBlockStop.contentBlockIndex"); stopIndex.Exists() {
 		out = append(out, n.closeBlock(stopIndex.Int())...)
 	}
@@ -247,11 +282,7 @@ func (n *BedrockStreamNormalizer) ConvertLine(line []byte) [][]byte {
 		usage = root.Get("usage")
 	}
 	if usage.Exists() {
-		n.usage = bedrockUsage{
-			InputTokens:  usage.Get("inputTokens").Int(),
-			OutputTokens: usage.Get("outputTokens").Int(),
-			TotalTokens:  usage.Get("totalTokens").Int(),
-		}
+		n.usage = bedrockUsageFromResult(usage)
 	}
 	if root.Get("type").String() != "" {
 		return [][]byte{append([]byte("data: "), payload...)}
@@ -269,6 +300,9 @@ func (n *BedrockStreamNormalizer) Finish() [][]byte {
 	if n.textBlockOpen && !n.textBlockClosed {
 		out = append(out, n.closeBlock(n.textBlockIndex)...)
 	}
+	if n.thinkingOpen && !n.thinkingClosed {
+		out = append(out, n.closeBlock(n.thinkingIndex)...)
+	}
 	if n.toolBlockOpen && !n.toolBlockClosed {
 		out = append(out, n.closeBlock(n.toolBlockIndex)...)
 	}
@@ -278,7 +312,7 @@ func (n *BedrockStreamNormalizer) Finish() [][]byte {
 	out = append(out, claudeDataLine(mustJSON(map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": n.stopReason, "stop_sequence": nil},
-		"usage": map[string]any{"input_tokens": n.usage.InputTokens, "output_tokens": n.usage.OutputTokens},
+		"usage": n.usage.claudeUsageMap(),
 	})))
 	out = append(out, claudeDataLine([]byte(`{"type":"message_stop"}`)))
 	return out
@@ -336,6 +370,12 @@ func bedrockContentBlock(part gjson.Result) []byte {
 		block := []byte(`{"text":""}`)
 		block, _ = sjson.SetBytes(block, "text", text)
 		return block
+	case "image":
+		return bedrockImageContentBlock(part)
+	case "document":
+		return bedrockDocumentContentBlock(part)
+	case "thinking":
+		return bedrockReasoningContentBlock(part)
 	case "tool_use":
 		block := []byte(`{"toolUse":{"toolUseId":"","name":"","input":{}}}`)
 		block, _ = sjson.SetBytes(block, "toolUse.toolUseId", part.Get("id").String())
@@ -359,6 +399,112 @@ func bedrockContentBlock(part gjson.Result) []byte {
 	}
 }
 
+func bedrockImageContentBlock(part gjson.Result) []byte {
+	source := part.Get("source")
+	if source.Get("type").String() != "base64" {
+		return nil
+	}
+	data := source.Get("data").String()
+	if data == "" {
+		return nil
+	}
+	format := bedrockMediaFormat(source.Get("media_type").String())
+	if format == "" {
+		return nil
+	}
+	block := []byte(`{"image":{"format":"","source":{"bytes":""}}}`)
+	block, _ = sjson.SetBytes(block, "image.format", format)
+	block, _ = sjson.SetBytes(block, "image.source.bytes", data)
+	return block
+}
+
+func bedrockDocumentContentBlock(part gjson.Result) []byte {
+	source := part.Get("source")
+	if source.Get("type").String() != "base64" {
+		return nil
+	}
+	data := source.Get("data").String()
+	if data == "" {
+		return nil
+	}
+	format := bedrockMediaFormat(source.Get("media_type").String())
+	if format == "" {
+		return nil
+	}
+	name := strings.TrimSpace(part.Get("title").String())
+	if name == "" {
+		name = strings.TrimSpace(part.Get("name").String())
+	}
+	if name == "" {
+		name = "document " + format
+	}
+	name = bedrockDocumentName(name)
+	block := []byte(`{"document":{"format":"","name":"","source":{"bytes":""}}}`)
+	block, _ = sjson.SetBytes(block, "document.format", format)
+	block, _ = sjson.SetBytes(block, "document.name", name)
+	block, _ = sjson.SetBytes(block, "document.source.bytes", data)
+	return block
+}
+
+var bedrockDocumentNameDisallowed = regexp.MustCompile(`[^A-Za-z0-9 \-\[\]\(\)]`)
+var bedrockDocumentNameSpaces = regexp.MustCompile(`\s+`)
+
+func bedrockDocumentName(name string) string {
+	name = bedrockDocumentNameDisallowed.ReplaceAllString(name, " ")
+	name = bedrockDocumentNameSpaces.ReplaceAllString(strings.TrimSpace(name), " ")
+	if name == "" {
+		return "document"
+	}
+	return name
+}
+
+func bedrockReasoningContentBlock(part gjson.Result) []byte {
+	thinking := part.Get("thinking").String()
+	signature := part.Get("signature").String()
+	if thinking == "" && signature == "" {
+		return nil
+	}
+	block := []byte(`{"reasoningContent":{"reasoningText":{"text":""}}}`)
+	block, _ = sjson.SetBytes(block, "reasoningContent.reasoningText.text", thinking)
+	if signature != "" {
+		block, _ = sjson.SetBytes(block, "reasoningContent.reasoningText.signature", signature)
+	}
+	return block
+}
+
+func bedrockMediaFormat(mediaType string) string {
+	mediaType = strings.ToLower(strings.TrimSpace(strings.Split(mediaType, ";")[0]))
+	switch mediaType {
+	case "image/jpeg", "image/jpg":
+		return "jpeg"
+	case "image/png":
+		return "png"
+	case "image/gif":
+		return "gif"
+	case "image/webp":
+		return "webp"
+	case "application/pdf":
+		return "pdf"
+	case "text/csv":
+		return "csv"
+	case "text/html":
+		return "html"
+	case "text/plain":
+		return "txt"
+	case "text/markdown":
+		return "md"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return "docx"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return "xlsx"
+	default:
+		if slash := strings.LastIndex(mediaType, "/"); slash >= 0 && slash+1 < len(mediaType) {
+			return strings.TrimPrefix(mediaType[slash+1:], "x-")
+		}
+		return ""
+	}
+}
+
 func bedrockToolConfig(root gjson.Result) map[string]any {
 	tools := root.Get("tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -367,11 +513,22 @@ func bedrockToolConfig(root gjson.Result) map[string]any {
 	out := map[string]any{"tools": []any{}}
 	values := make([]any, 0, len(tools.Array()))
 	tools.ForEach(func(_, tool gjson.Result) bool {
+		if tool.Get("type").String() == "function" {
+			tool = tool.Get("function")
+		}
+		name := tool.Get("name").String()
+		if name == "" {
+			return true
+		}
 		spec := map[string]any{
-			"name":        tool.Get("name").String(),
+			"name":        name,
 			"description": tool.Get("description").String(),
 		}
 		if schema := tool.Get("input_schema"); schema.Exists() {
+			spec["inputSchema"] = map[string]any{"json": schema.Value()}
+		} else if schema := tool.Get("parameters"); schema.Exists() {
+			spec["inputSchema"] = map[string]any{"json": schema.Value()}
+		} else if schema := tool.Get("parametersJsonSchema"); schema.Exists() {
 			spec["inputSchema"] = map[string]any{"json": schema.Value()}
 		}
 		values = append(values, map[string]any{"toolSpec": spec})
@@ -389,9 +546,36 @@ func bedrockToolConfig(root gjson.Result) map[string]any {
 			out["toolChoice"] = map[string]any{"any": map[string]any{}}
 		case "tool":
 			out["toolChoice"] = map[string]any{"tool": map[string]any{"name": choice.Get("name").String()}}
+		case "function":
+			if name := choice.Get("function.name").String(); name != "" {
+				out["toolChoice"] = map[string]any{"tool": map[string]any{"name": name}}
+			}
+		}
+	} else if choice.Type == gjson.String {
+		switch choice.String() {
+		case "auto":
+			out["toolChoice"] = map[string]any{"auto": map[string]any{}}
+		case "required":
+			out["toolChoice"] = map[string]any{"any": map[string]any{}}
 		}
 	}
 	return out
+}
+
+func bedrockAdditionalModelRequestFields(root gjson.Result) map[string]any {
+	fields := make(map[string]any)
+	if format := root.Get("response_format"); format.Exists() {
+		fields["response_format"] = format.Value()
+	} else if format := root.Get("text.format"); format.Exists() {
+		fields["response_format"] = format.Value()
+	}
+	if outputConfig := root.Get("output_config"); outputConfig.Exists() {
+		fields["output_config"] = outputConfig.Value()
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 func claudeMessageToSSE(data []byte) []byte {
@@ -458,14 +642,69 @@ func bedrockContentPartToClaudeEvents(index int, part gjson.Result) [][]byte {
 			mustJSON(map[string]any{"type": "content_block_stop", "index": index}),
 		}
 	}
+	if part.Get("type").String() == "tool_use" {
+		input := "{}"
+		if v := part.Get("input"); v.Exists() {
+			input = v.Raw
+		}
+		return [][]byte{
+			mustJSON(map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": part.Get("id").String(), "name": part.Get("name").String(), "input": map[string]any{}}}),
+			mustJSON(map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": input}}),
+			mustJSON(map[string]any{"type": "content_block_stop", "index": index}),
+		}
+	}
 	return nil
 }
 
 func claudeUsageFromBedrock(usage gjson.Result) map[string]any {
-	return map[string]any{
-		"input_tokens":  usage.Get("inputTokens").Int(),
-		"output_tokens": usage.Get("outputTokens").Int(),
+	return bedrockUsageFromResult(usage).claudeUsageMap()
+}
+
+func bedrockUsageFromResult(usage gjson.Result) bedrockUsage {
+	out := bedrockUsage{
+		InputTokens:  usage.Get("inputTokens").Int(),
+		OutputTokens: usage.Get("outputTokens").Int(),
+		TotalTokens:  usage.Get("totalTokens").Int(),
 	}
+	if v := usage.Get("cacheReadInputTokens"); v.Exists() {
+		out.CacheReadInputTokens = v.Int()
+		out.CacheReadInputTokensSet = true
+	}
+	if v := usage.Get("cacheWriteInputTokens"); v.Exists() {
+		out.CacheWriteInputTokens = v.Int()
+		out.CacheCreationInputTokens = v.Int()
+		out.CacheCreateInputTokensSet = true
+	}
+	if v := usage.Get("cacheCreationInputTokens"); v.Exists() {
+		out.CacheCreationInputTokens = v.Int()
+		out.CacheCreateInputTokensSet = true
+	}
+	if v := usage.Get("reasoningTokens"); v.Exists() {
+		out.ReasoningTokens = v.Int()
+		out.ReasoningTokensSet = true
+	}
+	if v := usage.Get("thinkingTokens"); v.Exists() {
+		out.ReasoningTokens = v.Int()
+		out.ReasoningTokensSet = true
+	}
+	return out
+}
+
+func (u bedrockUsage) claudeUsageMap() map[string]any {
+	out := map[string]any{
+		"input_tokens":  u.InputTokens,
+		"output_tokens": u.OutputTokens,
+	}
+	if u.CacheReadInputTokensSet {
+		out["cache_read_input_tokens"] = u.CacheReadInputTokens
+	}
+	if u.CacheCreateInputTokensSet {
+		out["cache_creation_input_tokens"] = u.CacheCreationInputTokens
+	}
+	if u.ReasoningTokensSet {
+		out["thinking_tokens"] = u.ReasoningTokens
+	}
+	return out
 }
 
 func mapBedrockStopReason(reason string) string {
@@ -502,10 +741,11 @@ func (n *BedrockStreamNormalizer) start() [][]byte {
 }
 
 func (n *BedrockStreamNormalizer) openTextBlock(index int64) [][]byte {
-	if n.textBlockOpen {
+	if n.textBlockOpen && !n.textBlockClosed && n.textBlockIndex == index {
 		return nil
 	}
 	n.textBlockOpen = true
+	n.textBlockClosed = false
 	n.textBlockIndex = index
 	return [][]byte{claudeDataLine(mustJSON(map[string]any{
 		"type":          "content_block_start",
@@ -514,11 +754,33 @@ func (n *BedrockStreamNormalizer) openTextBlock(index int64) [][]byte {
 	}))}
 }
 
+func (n *BedrockStreamNormalizer) openThinkingBlock(index int64, signature string) [][]byte {
+	if n.thinkingOpen && !n.thinkingClosed && n.thinkingIndex == index {
+		return nil
+	}
+	n.thinkingOpen = true
+	n.thinkingClosed = false
+	n.thinkingIndex = index
+	if signature != "" {
+		n.thinkingSig = signature
+	}
+	contentBlock := map[string]any{"type": "thinking", "thinking": ""}
+	if n.thinkingSig != "" {
+		contentBlock["signature"] = n.thinkingSig
+	}
+	return [][]byte{claudeDataLine(mustJSON(map[string]any{
+		"type":          "content_block_start",
+		"index":         index,
+		"content_block": contentBlock,
+	}))}
+}
+
 func (n *BedrockStreamNormalizer) openToolBlock(index int64, id, name string) [][]byte {
-	if n.toolBlockOpen {
+	if n.toolBlockOpen && !n.toolBlockClosed && n.toolBlockIndex == index {
 		return nil
 	}
 	n.toolBlockOpen = true
+	n.toolBlockClosed = false
 	n.toolBlockIndex = index
 	contentBlock := map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}}
 	return [][]byte{claudeDataLine(mustJSON(map[string]any{
@@ -531,6 +793,10 @@ func (n *BedrockStreamNormalizer) openToolBlock(index int64, id, name string) []
 func (n *BedrockStreamNormalizer) closeBlock(index int64) [][]byte {
 	if n.textBlockOpen && !n.textBlockClosed && n.textBlockIndex == index {
 		n.textBlockClosed = true
+		return [][]byte{claudeDataLine(mustJSON(map[string]any{"type": "content_block_stop", "index": index}))}
+	}
+	if n.thinkingOpen && !n.thinkingClosed && n.thinkingIndex == index {
+		n.thinkingClosed = true
 		return [][]byte{claudeDataLine(mustJSON(map[string]any{"type": "content_block_stop", "index": index}))}
 	}
 	if n.toolBlockOpen && !n.toolBlockClosed && n.toolBlockIndex == index {

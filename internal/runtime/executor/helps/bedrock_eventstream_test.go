@@ -120,6 +120,36 @@ func TestForEachBedrockEventStreamMessageReturnsHeaders(t *testing.T) {
 	}
 }
 
+func TestForEachBedrockEventStreamPayloadRejectsBadPreludeCRC(t *testing.T) {
+	t.Parallel()
+
+	frame := bedrockEventStreamFrameForTest([]byte(`{"messageStart":{"role":"assistant"}}`))
+	frame[11] ^= 0xff
+
+	err := ForEachBedrockEventStreamPayload(bytes.NewReader(frame), func([]byte) bool {
+		t.Fatal("bad prelude CRC must not emit payload")
+		return true
+	})
+	if err == nil || !strings.Contains(err.Error(), "prelude checksum") {
+		t.Fatalf("error = %v, want prelude checksum error", err)
+	}
+}
+
+func TestForEachBedrockEventStreamPayloadRejectsBadMessageCRC(t *testing.T) {
+	t.Parallel()
+
+	frame := bedrockEventStreamFrameForTest([]byte(`{"messageStart":{"role":"assistant"}}`))
+	frame[len(frame)-1] ^= 0xff
+
+	err := ForEachBedrockEventStreamPayload(bytes.NewReader(frame), func([]byte) bool {
+		t.Fatal("bad message CRC must not emit payload")
+		return true
+	})
+	if err == nil || !strings.Contains(err.Error(), "message checksum") {
+		t.Fatalf("error = %v, want message checksum error", err)
+	}
+}
+
 func bedrockEventStreamFrameForTest(payload []byte) []byte {
 	return bedrockEventStreamFrameWithHeadersForTest(nil, payload)
 }

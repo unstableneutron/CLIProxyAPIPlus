@@ -3,6 +3,7 @@ package helps
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 )
 
@@ -73,10 +74,19 @@ func readBedrockEventStreamMessage(r io.Reader) (BedrockEventStreamMessage, erro
 	if headersLen > totalLen-minBedrockEventStreamFrameSize {
 		return BedrockEventStreamMessage{}, fmt.Errorf("bedrock event stream headers too long: %d", headersLen)
 	}
+	if got, want := binary.BigEndian.Uint32(prelude[8:12]), crc32.ChecksumIEEE(prelude[0:8]); got != want {
+		return BedrockEventStreamMessage{}, fmt.Errorf("bedrock event stream prelude checksum mismatch")
+	}
 	restLen := int(totalLen) - len(prelude)
 	rest := make([]byte, restLen)
 	if _, err := io.ReadFull(r, rest); err != nil {
 		return BedrockEventStreamMessage{}, err
+	}
+	message := make([]byte, 0, len(prelude)+len(rest)-4)
+	message = append(message, prelude[:]...)
+	message = append(message, rest[:len(rest)-4]...)
+	if got, want := binary.BigEndian.Uint32(rest[len(rest)-4:]), crc32.ChecksumIEEE(message); got != want {
+		return BedrockEventStreamMessage{}, fmt.Errorf("bedrock event stream message checksum mismatch")
 	}
 	payloadLen := int(totalLen) - minBedrockEventStreamFrameSize - int(headersLen)
 	if payloadLen <= 0 {
