@@ -336,6 +336,41 @@ openai-compatibility:
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompatUsesAPIKeyEnv(t *testing.T) {
+	t.Setenv("MANTLE_TEST_KEY", "mantle-token")
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:      "bedrock-mantle",
+					BaseURL:   "https://bedrock-mantle.example/v1",
+					APIKeyEnv: "MANTLE_TEST_KEY",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if got := auths[0].Attributes["api_key"]; got != "mantle-token" {
+		t.Fatalf("api_key = %q, want mantle-token", got)
+	}
+	if got := auths[0].Label; got != "MANTLE_TEST_KEY" {
+		t.Fatalf("label = %q, want env var label", got)
+	}
+	if got := auths[0].Attributes["provider_key"]; got != "openai-compatible-bedrock-mantle" {
+		t.Fatalf("provider_key = %q, want namespaced mantle provider", got)
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

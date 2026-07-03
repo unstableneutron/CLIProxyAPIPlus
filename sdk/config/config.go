@@ -29,6 +29,9 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type BedrockProvider = internalconfig.BedrockProvider
+type BedrockAuth = internalconfig.BedrockAuth
+type BedrockModel = internalconfig.BedrockModel
 type KiroRateLimitConfig = internalconfig.KiroRateLimitConfig
 
 type TLS = internalconfig.TLSConfig

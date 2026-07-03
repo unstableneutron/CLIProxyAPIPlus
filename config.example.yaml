@@ -316,6 +316,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     api-key-env: "OPENAI_COMPAT_API_KEY" # optional: add one API key from this environment variable.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -341,6 +342,37 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+
+# Bedrock Runtime providers
+# Bedrock requests are translated from OpenAI Chat, OpenAI Responses, and Anthropic Messages
+# into Converse, ConverseStream, Invoke, or InvokeStream shapes based on per-model config.
+# Invoke/InvokeStream currently use Anthropic Messages-style Bedrock payloads; use Converse
+# for non-Anthropic Bedrock models unless a model-specific invoke adapter is added.
+# bedrock:
+#   - name: "llm-fusion-bedrock"
+#     disabled: false
+#     prefix: "bedrock"
+#     base-url: "https://llm-fusion-hub.example/api/v2/proxy/aws/bedrock"
+#     auth:
+#       type: "bearer" # bearer -> Authorization: Bearer <key>; raw -> Authorization: <key>; none -> custom headers only.
+#       api-key-env: "BEDROCK_RUNTIME_API_KEY"
+#       headers:
+#         X-Custom-Auth-Header: "custom-value"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     query-params:
+#       trace: "1"
+#     models:
+#       - name: "global.anthropic.claude-sonnet-5"
+#         alias: "sonnet-5"
+#         api: "converse"
+#         stream-api: "converse-stream"
+#       - name: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+#         alias: "sonnet-legacy"
+#         api: "invoke"
+#         stream-api: "invoke-stream"
+#     excluded-models:
+#       - "disabled-model-*"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

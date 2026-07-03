@@ -3,6 +3,7 @@ package synthesizer
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,7 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCommandCodeKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	out = append(out, s.synthesizeBedrock(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -346,11 +348,16 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		internalProviderKey := util.OpenAICompatibleProviderKey(providerName)
 		base := strings.TrimSpace(compat.BaseURL)
 		disableCooling := compat.DisableCooling
+		envKeyEntry := openAICompatEnvKeyEntry(compat)
 
 		// Handle new APIKeyEntries format (preferred)
 		createdEntries := 0
-		for j := range compat.APIKeyEntries {
-			entry := &compat.APIKeyEntries[j]
+		keyEntries := compat.APIKeyEntries
+		if envKeyEntry.APIKey != "" {
+			keyEntries = append(keyEntries, envKeyEntry)
+		}
+		for j := range keyEntries {
+			entry := &keyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
@@ -434,6 +441,158 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		}
 	}
 	return out
+}
+
+func openAICompatEnvKeyEntry(compat *config.OpenAICompatibility) config.OpenAICompatibilityAPIKey {
+	if compat == nil {
+		return config.OpenAICompatibilityAPIKey{}
+	}
+	envName := strings.TrimSpace(compat.APIKeyEnv)
+	if envName == "" {
+		return config.OpenAICompatibilityAPIKey{}
+	}
+	key := strings.TrimSpace(os.Getenv(envName))
+	if key == "" {
+		return config.OpenAICompatibilityAPIKey{}
+	}
+	return config.OpenAICompatibilityAPIKey{APIKey: key, Label: envName}
+}
+
+func (s *ConfigSynthesizer) synthesizeBedrock(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.Bedrock))
+	for i := range cfg.Bedrock {
+		entry := cfg.Bedrock[i]
+		if entry.Disabled {
+			continue
+		}
+		base := strings.TrimSpace(entry.BaseURL)
+		if base == "" {
+			continue
+		}
+		key := entry.ResolvedAPIKey()
+		authType := entry.ResolvedAuthType()
+		if authType == "" {
+			continue
+		}
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("bedrock:apikey", key, base, entry.Name, proxyURL)
+		attrs := map[string]string{
+			"source":             fmt.Sprintf("config:bedrock[%s]", token),
+			"base_url":           base,
+			"auth_type":          authType,
+			"bedrock_name":       strings.TrimSpace(entry.Name),
+			"bedrock_model_map":  bedrockModelMapAttr(entry.Models),
+			"bedrock_api_map":    bedrockAPIMapAttr(entry.Models, false),
+			"bedrock_stream_map": bedrockAPIMapAttr(entry.Models, true),
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if hash := diff.ComputeBedrockModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Auth.Headers, attrs)
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		addConfigQueryParamsToAttrs(entry.QueryParams, attrs)
+		metadata := map[string]any{}
+		if entry.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "bedrock",
+			Label:      configLabel(entry.Label, configLabel(entry.Name, "bedrock-apikey")),
+			Prefix:     strings.TrimSpace(entry.Prefix),
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func bedrockModelMapAttr(models []config.BedrockModel) string {
+	values := make(map[string]string, len(models)*2)
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if name == "" && alias == "" {
+			continue
+		}
+		if name == "" {
+			name = alias
+		}
+		if alias == "" {
+			alias = name
+		}
+		values[name] = name
+		values[alias] = name
+	}
+	if len(values) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func bedrockAPIMapAttr(models []config.BedrockModel, stream bool) string {
+	values := make(map[string]string, len(models)*2)
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if name == "" && alias == "" {
+			continue
+		}
+		keyName := name
+		if keyName == "" {
+			keyName = alias
+		}
+		keyAlias := alias
+		if keyAlias == "" {
+			keyAlias = keyName
+		}
+		api := model.API
+		if stream {
+			api = model.StreamAPI
+		}
+		if strings.TrimSpace(api) == "" {
+			if stream && strings.TrimSpace(model.API) == "invoke" {
+				api = "invoke-stream"
+			} else if stream {
+				api = "converse-stream"
+			} else {
+				api = "converse"
+			}
+		}
+		values[keyName] = strings.TrimSpace(api)
+		values[keyAlias] = strings.TrimSpace(api)
+	}
+	if len(values) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 // synthesizeVertexCompat creates Auth entries for Vertex-compatible providers.
