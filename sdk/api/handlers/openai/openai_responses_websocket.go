@@ -428,6 +428,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		dynamicResponsesStateProbe := false
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
+				if !useUpstreamWebsocketPassthrough && h.responsesWebsocketAuthUsesUpstreamWebsocketPassthrough(pinnedAuth) {
+					useUpstreamWebsocketPassthrough = true
+				}
 				if useUpstreamWebsocketPassthrough {
 					allowIncrementalInputWithPreviousResponseID = responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth)
 				}
@@ -1353,6 +1356,20 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesCodexWebsocketPassthrough(modelName string) bool {
 	return h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName)
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketAuthUsesUpstreamWebsocketPassthrough(auth *coreauth.Auth) bool {
+	if h == nil || h.AuthManager == nil || auth == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider != "codex" && provider != "xai" {
+		return false
+	}
+	if _, ok := h.AuthManager.Executor(provider); !ok {
+		return false
+	}
+	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 }
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName string) bool {

@@ -3942,6 +3942,96 @@ func TestResponsesWebsocketResponsesStateFalseIsScopedToSelectedSSEAuth(t *testi
 	}
 }
 
+func TestResponsesWebsocketPinnedNativeAuthPreservesPreviousResponseIDInMixedPool(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	modelName := "mixed-pinned-native-model"
+	selector := &orderedWebsocketSelector{order: []string{"auth-codex"}}
+	codexExecutor := &websocketProviderCaptureExecutor{provider: "codex"}
+	nonNativeExecutor := &websocketProviderCaptureExecutor{provider: "test-provider"}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(codexExecutor)
+	manager.RegisterExecutor(nonNativeExecutor)
+	codexAuth := &coreauth.Auth{
+		ID:         "auth-codex",
+		Provider:   codexExecutor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	nonNativeAuth := &coreauth.Auth{
+		ID:       "auth-non-native",
+		Provider: nonNativeExecutor.Identifier(),
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), nonNativeAuth); err != nil {
+		t.Fatalf("Register non-native auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	registry.GetGlobalRegistry().RegisterClient(nonNativeAuth.ID, nonNativeAuth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(nonNativeAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	if h.responsesWebsocketUsesUpstreamWebsocketPassthrough(modelName) {
+		t.Fatalf("model-wide passthrough should be disabled for mixed pool")
+	}
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"}]}`, modelName),
+		`{"type":"response.create","previous_response_id":"resp-upstream","input":[{"type":"message","id":"msg-2"}]}`,
+	}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wsEventTypeCompleted, payload)
+		}
+	}
+
+	if len(nonNativeExecutor.payloads) != 0 {
+		t.Fatalf("non-native executor payload count = %d, want 0", len(nonNativeExecutor.payloads))
+	}
+	payloads := codexExecutor.payloads
+	if len(payloads) != 2 {
+		t.Fatalf("codex upstream payload count = %d, want 2", len(payloads))
+	}
+	secondPayload := payloads[1]
+	if got := gjson.GetBytes(secondPayload, "previous_response_id").String(); got != "resp-upstream" {
+		t.Fatalf("second upstream previous_response_id = %q, want resp-upstream: %s", got, secondPayload)
+	}
+	input := gjson.GetBytes(secondPayload, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-2" {
+		t.Fatalf("second upstream input should remain incremental, got %s", secondPayload)
+	}
+}
+
 func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
