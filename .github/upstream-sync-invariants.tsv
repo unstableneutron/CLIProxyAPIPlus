@@ -16,3 +16,7 @@ contains	internal/api/server.go	mgmt.GET("/codex-api-key"	Codex management route
 contains	internal/api/server.go	mgmt.GET("/auth-files"	management auth-file route registration remains present
 contains	internal/registry/model_definitions_test.go	TestAntigravityWebSearchModelForRequiresRequestedModelCapability	Antigravity web-search regression test remains present
 contains	internal/registry/model_definitions_test.go	TestGetKiroModelsReturnsStaticFallbackSet	Kiro fallback model regression test remains present
+contains	internal/runtime/executor/codex_websockets_executor.go	patchCodexCompletedOutput	Codex websocket executor patches empty completed output before transcript recording
+contains	internal/runtime/executor/codex_websockets_executor_test.go	TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction	Codex websocket compaction transcript regression test remains
+contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
+contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
