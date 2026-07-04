@@ -500,7 +500,10 @@ test_original_merge_writes_overlay_at_risk_report() {
   run_git -C "${original}" tag v7.1.67
   run_git -C "${fork}" fetch -q original-upstream main --tags
 
-  UPSTREAM_SYNC_REPORT_DIR="${report_dir}" GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_REPORT_DIR="${report_dir}" GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
+  )
 
   assert_contains "${out}" "conflicts=true"
   assert_contains "${out}" "overlay_at_risk_report=${report_dir}/overlay-at-risk-original.diff"
