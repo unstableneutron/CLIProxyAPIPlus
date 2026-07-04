@@ -486,6 +486,72 @@ test_replay_plan_fails_when_gate_fails() {
   assert_contains "${out}" "Build status: failed"
 }
 
+test_original_merge_writes_overlay_at_risk_report() {
+  local root=${TMPDIR:-/tmp}/upstream-sync-test-risk-$$
+  rm -rf "${root}"
+  setup_base_graph "${root}"
+
+  local original=${root}/original
+  local fork=${root}/fork
+  local out=${root}/merge.out
+  local report_dir=${root}/reports
+
+  commit_file "${original}" internal/runtime/executor/fork.go $'package executor\nfunc UpstreamFork() {}' "original adds shared fork path"
+  run_git -C "${original}" tag v7.1.67
+  run_git -C "${fork}" fetch -q original-upstream main --tags
+
+  UPSTREAM_SYNC_REPORT_DIR="${report_dir}" GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 >/dev/null
+
+  assert_contains "${out}" "conflicts=true"
+  assert_contains "${out}" "overlay_at_risk_report=${report_dir}/overlay-at-risk-original.diff"
+  assert_contains "${out}" '| `internal/runtime/executor/fork.go` | `1` |'
+  assert_contains "${report_dir}/overlay-at-risk-original.diff" "## internal/runtime/executor/fork.go"
+  assert_contains "${report_dir}/overlay-at-risk-original.diff" "fork-change"
+}
+
+test_check_symbol_survival_detects_deleted_overlay_symbols() {
+  local root=${TMPDIR:-/tmp}/upstream-sync-test-symbols-$$
+  rm -rf "${root}"
+  mkdir -p "${root}"
+
+  local original=${root}/original
+  local fork=${root}/fork
+  local out=${root}/symbols.out
+  new_repo "${original}"
+  commit_file "${original}" internal/runtime/executor/shared.go $'package executor\nfunc UpstreamOnly() {}' "original shared symbol"
+  clone_for_fork "${original}" "${fork}"
+
+  commit_file "${fork}" internal/runtime/executor/shared.go $'package executor\nfunc UpstreamOnly() {}\nfunc ForkOnly() {}' "fork shared symbol"
+  commit_file "${fork}" internal/runtime/executor/shared_test.go $'package executor\nimport "testing"\nfunc TestForkOnly(t *testing.T) {}' "fork shared test"
+  local baseline upstream_ref
+  baseline=$(run_git -C "${fork}" rev-parse HEAD)
+  upstream_ref=$(run_git -C "${original}" rev-parse HEAD)
+
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
+  assert_contains "${out}" "[OK] symbol-survival gate passed."
+
+  printf '%s\n' 'package executor' 'func UpstreamOnly() {}' > "${fork}/internal/runtime/executor/shared.go"
+  rm -f "${fork}/internal/runtime/executor/shared_test.go"
+
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
+  local exit_code=$?
+  set -e
+  if [ ${exit_code} -eq 0 ]; then
+    fail "check-symbol-survival passed despite deleted fork-only symbols"
+  fi
+  assert_contains "${out}" "[FAIL] missing overlay symbol: ForkOnly"
+  assert_contains "${out}" "DELETED FORK TESTS"
+  assert_contains "${out}" "[FAIL] deleted fork test: TestForkOnly"
+
+  mkdir -p "${fork}/.github"
+  printf '%s\n' '# symbol	reason' $'ForkOnly\tintentionally superseded in test' $'TestForkOnly\tintentionally superseded in test' > "${fork}/.github/upstream-sync-dropped-symbols.tsv"
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
+  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: ForkOnly"
+  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: TestForkOnly"
+  assert_contains "${out}" "[OK] symbol-survival gate passed with allowlisted removals."
+}
+
 main() {
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
@@ -497,8 +563,10 @@ main() {
   test_pending_overlay_branch_name_is_stable
   test_manifest_classifies_fork_surfaces
   test_original_merge_reports_owned_clobber_without_text_conflict
+  test_original_merge_writes_overlay_at_risk_report
   test_original_merge_skips_identical_owned_path_touch
   test_check_invariants_detects_missing_pattern
+  test_check_symbol_survival_detects_deleted_overlay_symbols
   test_plan_reports_target_drift_from_recorded_state
   test_replay_plan_reports_all_phase_conflicts_and_gates
   test_replay_plan_fails_when_gate_fails

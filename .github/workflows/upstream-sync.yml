@@ -178,6 +178,21 @@ jobs:
         id: merge_plus_head
         run: .github/scripts/upstream-sync.sh merge-ref plus-head "${{ steps.plan.outputs.plus_head }}"
 
+      - name: Upload overlay-at-risk reports
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          (steps.merge_original.outputs.overlay_at_risk_report != '' ||
+           steps.merge_plus_tag.outputs.overlay_at_risk_report != '' ||
+           steps.merge_plus_head.outputs.overlay_at_risk_report != '')
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-overlay-at-risk
+          if-no-files-found: ignore
+          path: |
+            ${{ steps.merge_original.outputs.overlay_at_risk_report }}
+            ${{ steps.merge_plus_tag.outputs.overlay_at_risk_report }}
+            ${{ steps.merge_plus_head.outputs.overlay_at_risk_report }}
+
       - name: Set up Go
         if: |
           steps.plan.outputs.has_changes == 'true' &&
@@ -213,13 +228,40 @@ jobs:
           } >> "$GITHUB_ENV"
           set -e
 
+      - name: Symbol-survival gate
+        if: |
+          steps.plan.outputs.has_changes == 'true' &&
+          steps.plan.outputs.blocked != 'true' &&
+          steps.merge_original.outputs.conflicts != 'true' &&
+          steps.merge_plus_tag.outputs.conflicts != 'true' &&
+          steps.merge_plus_head.outputs.conflicts != 'true'
+        id: symbol_survival
+        continue-on-error: true
+        run: |
+          set +e
+          SYMBOL_LOG=$(mktemp)
+          .github/scripts/upstream-sync.sh check-symbol-survival "${{ steps.plan.outputs.pre_sync_head }}" "${{ steps.plan.outputs.original_head }}" 2>&1 | tee "${SYMBOL_LOG}"
+          SYMBOL_EXIT=${PIPESTATUS[0]}
+          if [ "${SYMBOL_EXIT}" -ne 0 ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo 'SYMBOL_SURVIVAL_TAIL<<EOF'
+            tail -n 80 "${SYMBOL_LOG}"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+          set -e
+
       - name: Record synced upstream versions
         if: |
           steps.plan.outputs.has_changes == 'true' &&
           steps.merge_original.outputs.conflicts != 'true' &&
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
           steps.merge_plus_head.outputs.conflicts != 'true' &&
-          steps.invariants.outputs.passed == 'true'
+          steps.invariants.outputs.passed == 'true' &&
+          steps.symbol_survival.outputs.passed == 'true'
         env:
           ORIGINAL_TAG: ${{ steps.plan.outputs.original_tag }}
           ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
@@ -239,7 +281,8 @@ jobs:
           steps.merge_original.outputs.conflicts != 'true' &&
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
           steps.merge_plus_head.outputs.conflicts != 'true' &&
-          steps.invariants.outputs.passed == 'true'
+          steps.invariants.outputs.passed == 'true' &&
+          steps.symbol_survival.outputs.passed == 'true'
         id: build
         continue-on-error: true
         run: |
@@ -348,6 +391,7 @@ jobs:
           steps.merge_plus_tag.outputs.conflicts != 'true' &&
           steps.merge_plus_head.outputs.conflicts != 'true' &&
           steps.invariants.outputs.passed == 'true' &&
+          steps.symbol_survival.outputs.passed == 'true' &&
           steps.build.outputs.passed == 'true' &&
           steps.test.outputs.passed == 'true' &&
           github.event.inputs.force_pr != 'true'
@@ -430,6 +474,18 @@ jobs:
             --json number \
             --jq '.[0].number' 2>/dev/null || true)
           if [ -n "${PR_NUM}" ]; then
+            OVERLAY_AT_RISK_SECTION=$(printf '## Overlay-at-risk report\n\nThese shared-hotspot fork overlay hunks were present before the blocked merge and must be reviewed before resolving the preview commit. Full diffs are uploaded as the `upstream-sync-overlay-at-risk` artifact when present.\n\n### Original merge\n%s\n\n### Plus release overlay\n%s\n\n### Plus head delta\n%s\n' \
+              "${ORIGINAL_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+              "${PLUS_TAG_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+              "${PLUS_HEAD_OVERLAY_AT_RISK_SUMMARY:-<none>}")
+            BODY="${BODY}
+
+            ## Symbol-survival gate
+
+            ${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
+
+            ${OVERLAY_AT_RISK_SECTION}"
+
             gh pr edit "${PR_NUM}" \
               --repo "${{ github.repository }}" \
               --title "${TITLE}" \
@@ -437,6 +493,18 @@ jobs:
               --add-label "${PR_LABEL}" 2>&1
             PR_EXIT=$?
           else
+            OVERLAY_AT_RISK_SECTION=$(printf '## Overlay-at-risk report\n\nThese shared-hotspot fork overlay hunks were present before the blocked merge and must be reviewed before resolving the preview commit. Full diffs are uploaded as the `upstream-sync-overlay-at-risk` artifact when present.\n\n### Original merge\n%s\n\n### Plus release overlay\n%s\n\n### Plus head delta\n%s\n' \
+              "${ORIGINAL_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+              "${PLUS_TAG_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+              "${PLUS_HEAD_OVERLAY_AT_RISK_SUMMARY:-<none>}")
+            BODY="${BODY}
+
+          ## Symbol-survival gate
+
+          ${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
+
+          ${OVERLAY_AT_RISK_SECTION}"
+
             PR_URL=$(gh pr create \
               --repo "${{ github.repository }}" \
               --base main \
@@ -462,6 +530,7 @@ jobs:
            steps.merge_plus_tag.outputs.conflicts == 'true' ||
            steps.merge_plus_head.outputs.conflicts == 'true' ||
            steps.invariants.outputs.passed == 'false' ||
+           steps.symbol_survival.outputs.passed == 'false' ||
            steps.build.outputs.passed == 'false' ||
            steps.test.outputs.passed == 'false')
         env:
@@ -515,6 +584,18 @@ jobs:
             "${INVARIANT_TAIL:-<no invariant log captured>}" \
             "${BUILD_TAIL:-<no build log captured>}" \
             "${TEST_TAIL:-<no test log captured>}")
+          # shellcheck disable=SC2016
+          OVERLAY_AT_RISK_SECTION=$(printf '## Overlay-at-risk report\n\nThese shared-hotspot fork overlay hunks were present before the blocked merge and must be reviewed before resolving the preview commit. Full diffs are uploaded as the `upstream-sync-overlay-at-risk` artifact when present.\n\n### Original merge\n%s\n\n### Plus release overlay\n%s\n\n### Plus head delta\n%s\n' \
+            "${ORIGINAL_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+            "${PLUS_TAG_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
+            "${PLUS_HEAD_OVERLAY_AT_RISK_SUMMARY:-<none>}")
+          COMMENT_BODY="${COMMENT_BODY}
+
+## Symbol-survival gate
+
+${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
+
+${OVERLAY_AT_RISK_SECTION}"
 
           ISSUE_TITLE="upstream-sync pending overlay: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }}"
           # shellcheck disable=SC2016
@@ -620,6 +701,7 @@ jobs:
            steps.merge_plus_tag.outputs.conflicts == 'true' ||
            steps.merge_plus_head.outputs.conflicts == 'true' ||
            steps.invariants.outputs.passed == 'false' ||
+           steps.symbol_survival.outputs.passed == 'false' ||
            steps.build.outputs.passed == 'false' ||
            steps.test.outputs.passed == 'false')
         run: |

@@ -10,6 +10,7 @@ TRACKING_ISSUE_LABEL=${TRACKING_ISSUE_LABEL:-upstream-sync-blocked}
 PENDING_OVERLAY_BRANCH=${PENDING_OVERLAY_BRANCH:-upstream-sync/pending-overlay}
 OWNERSHIP_FILE=${UPSTREAM_SYNC_OWNERSHIP_FILE:-.github/upstream-sync-ownership.tsv}
 INVARIANTS_FILE=${UPSTREAM_SYNC_INVARIANTS_FILE:-.github/upstream-sync-invariants.tsv}
+DROPPED_SYMBOLS_FILE=${UPSTREAM_SYNC_DROPPED_SYMBOLS_FILE:-.github/upstream-sync-dropped-symbols.tsv}
 
 PLUS_OWNED_PREFIXES=(
   internal/auth/codebuddy/
@@ -479,6 +480,56 @@ owned_clobber_paths() {
     | sort -u
 }
 
+overlay_at_risk_report_path() {
+  local phase=$1
+  local report_dir=${UPSTREAM_SYNC_REPORT_DIR:-/tmp}
+
+  mkdir -p "${report_dir}"
+  printf '%s/overlay-at-risk-%s.diff\n' "${report_dir%/}" "$(safe_ref_component "${phase}")"
+}
+
+write_overlay_at_risk_report() {
+  local phase=$1
+  local pre_merge_head=$2
+  local ref=$3
+  local conflict_paths=$4
+  local upstream_base path class report tmp hunk_count summary wrote
+
+  upstream_base=$(git merge-base "${pre_merge_head}" "${ref}")
+  report=$(overlay_at_risk_report_path "${phase}")
+  tmp=$(mktemp)
+  summary=""
+  wrote=false
+  : > "${report}"
+
+  while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    class=$(classify_path "${path}")
+    [ "${class}" = shared-hotspot ] || continue
+
+    git diff "${upstream_base}" "${pre_merge_head}" -- "${path}" > "${tmp}" || true
+    [ -s "${tmp}" ] || continue
+    hunk_count=$(grep -c '^@@ ' "${tmp}" || true)
+    {
+      printf '## %s (%s hunk%s)\n\n' "${path}" "${hunk_count}" "$([ "${hunk_count}" = 1 ] || printf s)"
+      cat "${tmp}"
+      printf '\n'
+    } >> "${report}"
+    # shellcheck disable=SC2016
+    summary="${summary}| \`${path}\` | \`${hunk_count}\` |"$'\n'
+    wrote=true
+  done <<< "${conflict_paths}"
+
+  rm -f "${tmp}"
+  if [ "${wrote}" != true ]; then
+    rm -f "${report}"
+    report=""
+    summary=""
+  fi
+
+  printf '%s\t%s\n' "${report}" "${summary}"
+}
+
 merge_lines() {
   awk 'NF && !seen[$0]++ { print }'
 }
@@ -543,6 +594,8 @@ cmd_plan() {
   require_ownership_manifest
 
   local force_rebuild=${FORCE_REBUILD:-false}
+  local pre_sync_head
+  pre_sync_head=$(git rev-parse HEAD)
 
   fetch_branch "${ORIGINAL_REMOTE}" main
   fetch_branch "${PLUS_REMOTE}" main
@@ -553,6 +606,7 @@ cmd_plan() {
 
   write_kv original_tag "${original_tag}"
   write_kv plus_tag "${plus_tag}"
+  write_kv pre_sync_head "${pre_sync_head}"
 
   if [ -z "${original_tag}" ] || [ -z "${plus_tag}" ]; then
     write_kv has_changes false
@@ -708,18 +762,34 @@ cmd_merge_ref() {
     fi
     write_kv conflicts false
     write_kv ownership_clobber_files ""
+    write_kv overlay_at_risk_report ""
+    write_kv overlay_at_risk_summary ""
     write_env "${key}_CONFLICT_FILES" ""
     write_env "${key}_CONFLICT_TABLE" ""
+    write_env "${key}_OVERLAY_AT_RISK_REPORT" ""
+    write_env "${key}_OVERLAY_AT_RISK_SUMMARY" ""
     echo "[OK] ${phase} merge completed without conflicts."
     return 0
+  fi
+
+  local overlay_at_risk overlay_at_risk_report overlay_at_risk_summary
+  overlay_at_risk=$(write_overlay_at_risk_report "${phase}" "${pre_merge_head}" "${ref}" "${conflict_paths}")
+  overlay_at_risk_report=${overlay_at_risk%%$'\t'*}
+  overlay_at_risk_summary=${overlay_at_risk#*$'\t'}
+  if [ "${overlay_at_risk_report}" = "${overlay_at_risk}" ]; then
+    overlay_at_risk_summary=""
   fi
 
   write_kv conflicts true
   write_kv conflict_files "${conflict_paths}"
   write_kv conflict_table "$(classify_paths_table "${conflict_paths}")"
   write_kv ownership_clobber_files "${ownership_clobbers}"
+  write_kv overlay_at_risk_report "${overlay_at_risk_report}"
+  write_kv overlay_at_risk_summary "${overlay_at_risk_summary}"
   write_env "${key}_CONFLICT_FILES" "${conflict_paths}"
   write_env "${key}_CONFLICT_TABLE" "$(classify_paths_table "${conflict_paths}")"
+  write_env "${key}_OVERLAY_AT_RISK_REPORT" "${overlay_at_risk_report}"
+  write_env "${key}_OVERLAY_AT_RISK_SUMMARY" "${overlay_at_risk_summary}"
 
   if [ -z "${conflict_paths}" ]; then
     echo "[!] ${phase} merge failed without conflict paths; leaving branch for inspection."
@@ -791,14 +861,16 @@ cmd_replay_plan() {
 
   (
     cd "${replay_dir}"
-    local plan_out original_out plus_tag_out plus_head_out invariant_log build_log test_log
+    local plan_out original_out plus_tag_out plus_head_out invariant_log symbol_log build_log test_log pre_sync_head
     plan_out="${root}/plan.out"
     original_out="${root}/original.out"
     plus_tag_out="${root}/plus-tag.out"
     plus_head_out="${root}/plus-head.out"
     invariant_log="${root}/invariants.log"
+    symbol_log="${root}/symbol-survival.log"
     build_log="${root}/build.log"
     test_log="${root}/test.log"
+    pre_sync_head=$(git rev-parse HEAD)
 
     FORCE_REBUILD="${FORCE_REBUILD:-false}" GITHUB_OUTPUT="${plan_out}" "${BASH_SOURCE[0]}" plan >/dev/null
 
@@ -828,6 +900,7 @@ cmd_replay_plan() {
 
     local gate_failed=false
     run_replay_gate "Invariant" "${invariant_log}" "${BASH_SOURCE[0]}" check-invariants || gate_failed=true
+    run_replay_gate "Symbol survival" "${symbol_log}" "${BASH_SOURCE[0]}" check-symbol-survival "${pre_sync_head}" "${original_head}" || gate_failed=true
     run_replay_gate "Build" "${build_log}" bash -c "${UPSTREAM_SYNC_REPLAY_BUILD_CMD:-go build -o test-output ./cmd/server && rm test-output}" || gate_failed=true
     run_replay_gate "Test" "${test_log}" bash -c "${UPSTREAM_SYNC_REPLAY_TEST_CMD:-go test ./...}" || gate_failed=true
     if [ "${gate_failed}" = true ]; then
@@ -845,6 +918,213 @@ cmd_classify_paths() {
   else
     classify_paths_table "$(cat)"
   fi
+}
+
+shared_hotspot_go_paths_at_ref() {
+  local ref=$1
+  local path class
+
+  git ls-tree -r --name-only "${ref}" -- internal sdk cmd 2>/dev/null \
+    | while IFS= read -r path; do
+        [ -n "${path}" ] || continue
+        [[ "${path}" == *.go ]] || continue
+        class=$(classify_path "${path}")
+        case "${class}" in
+          plus-owned|fork-owned) ;;
+          *) printf '%s\n' "${path}" ;;
+        esac
+      done
+}
+
+extract_go_symbols_from_stream() {
+  awk '
+    /^func[[:space:]]+\(/ {
+      line = $0
+      sub(/^func[[:space:]]*\(/, "", line)
+      recv = line
+      sub(/\).*/, "", recv)
+      n = split(recv, recv_parts, /[[:space:]]+/)
+      receiver = recv_parts[n]
+      sub(/^\*/, "", receiver)
+
+      name = $0
+      sub(/^func[[:space:]]*\([^)]*\)[[:space:]]*/, "", name)
+      sub(/\(.*/, "", name)
+      if (receiver != "" && name != "") {
+        print receiver "." name
+      }
+      next
+    }
+    /^func[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+      name = $0
+      sub(/^func[[:space:]]+/, "", name)
+      sub(/[[:space:]\[\(].*/, "", name)
+      if (name != "") {
+        print name
+      }
+      next
+    }
+    /^type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+      name = $0
+      sub(/^type[[:space:]]+/, "", name)
+      split(name, parts, /[[:space:]]+/)
+      sub(/\[.*/, "", parts[1])
+      if (parts[1] != "" && parts[1] != "(") {
+        print parts[1]
+      }
+    }
+  '
+}
+
+extract_shared_hotspot_symbols_from_ref() {
+  local ref=$1
+  local path
+
+  shared_hotspot_go_paths_at_ref "${ref}" \
+    | while IFS= read -r path; do
+        [ -n "${path}" ] || continue
+        git show "${ref}:${path}" 2>/dev/null || true
+        printf '\n'
+      done \
+    | extract_go_symbols_from_stream \
+    | sort -u
+}
+
+extract_shared_hotspot_test_symbols_from_ref() {
+  local ref=$1
+  local path
+
+  shared_hotspot_go_paths_at_ref "${ref}" \
+    | while IFS= read -r path; do
+        [ -n "${path}" ] || continue
+        [[ "${path}" == *_test.go ]] || continue
+        git show "${ref}:${path}" 2>/dev/null || true
+        printf '\n'
+      done \
+    | extract_go_symbols_from_stream \
+    | awk '/^Test[A-Za-z0-9_]*$/ { print }' \
+    | sort -u
+}
+
+extract_worktree_go_symbols() {
+  local path
+
+  git ls-files -- internal sdk cmd 2>/dev/null \
+    | while IFS= read -r path; do
+        [ -f "${path}" ] || continue
+        [[ "${path}" == *.go ]] || continue
+        cat "${path}"
+        printf '\n'
+      done \
+    | extract_go_symbols_from_stream \
+    | sort -u
+}
+
+allowlisted_dropped_symbol_reason() {
+  local symbol=$1
+  local configured_file=${DROPPED_SYMBOLS_FILE}
+  local resolved_file=""
+  local reason
+
+  if [ -f "${configured_file}" ]; then
+    resolved_file=${configured_file}
+  elif [ -f "$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")" ]; then
+    resolved_file="$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")"
+  fi
+  [ -n "${resolved_file}" ] || return 1
+
+  reason=$(awk -F'\t' -v symbol="${symbol}" '
+    $1 == symbol { sub(/^[^\t]*\t?/, ""); print; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "${resolved_file}") || return 1
+  printf '%s\n' "${reason:-allowlisted}"
+}
+
+default_symbol_survival_upstream_ref() {
+  local recorded
+  recorded=$(recorded_state_value ORIGINAL_COMMIT)
+  if [ -n "${recorded}" ]; then
+    printf '%s\n' "${recorded}"
+  else
+    printf 'refs/remotes/%s/main\n' "${ORIGINAL_REMOTE}"
+  fi
+}
+
+cmd_check_symbol_survival() {
+  require_ownership_manifest
+
+  local baseline_ref=${1:-}
+  local upstream_ref=${2:-}
+  [ -n "${baseline_ref}" ] || die "check-symbol-survival requires baseline-ref"
+  if [ -z "${upstream_ref}" ]; then
+    upstream_ref=$(default_symbol_survival_upstream_ref)
+  fi
+
+  local root baseline_symbols upstream_symbols overlay_symbols current_symbols
+  local baseline_tests upstream_tests overlay_tests missing_symbol missing_tests
+  local symbol reason failed skipped
+  root=$(mktemp -d)
+  baseline_symbols="${root}/baseline-symbols.txt"
+  upstream_symbols="${root}/upstream-symbols.txt"
+  overlay_symbols="${root}/overlay-symbols.txt"
+  current_symbols="${root}/current-symbols.txt"
+  baseline_tests="${root}/baseline-tests.txt"
+  upstream_tests="${root}/upstream-tests.txt"
+  overlay_tests="${root}/overlay-tests.txt"
+  missing_tests="${root}/missing-tests.txt"
+
+  extract_shared_hotspot_symbols_from_ref "${baseline_ref}" > "${baseline_symbols}"
+  extract_shared_hotspot_symbols_from_ref "${upstream_ref}" > "${upstream_symbols}"
+  comm -23 "${baseline_symbols}" "${upstream_symbols}" > "${overlay_symbols}"
+  extract_worktree_go_symbols > "${current_symbols}"
+
+  extract_shared_hotspot_test_symbols_from_ref "${baseline_ref}" > "${baseline_tests}"
+  extract_shared_hotspot_test_symbols_from_ref "${upstream_ref}" > "${upstream_tests}"
+  comm -23 "${baseline_tests}" "${upstream_tests}" > "${overlay_tests}"
+
+  failed=false
+  skipped=false
+  : > "${missing_tests}"
+
+  while IFS= read -r symbol; do
+    [ -n "${symbol}" ] || continue
+    if grep -Fxq -- "${symbol}" "${current_symbols}"; then
+      continue
+    fi
+    if reason=$(allowlisted_dropped_symbol_reason "${symbol}"); then
+      printf '[SKIP] dropped overlay symbol allowlisted: %s — %s\n' "${symbol}" "${reason}"
+      skipped=true
+      continue
+    fi
+    printf '[FAIL] missing overlay symbol: %s\n' "${symbol}"
+    failed=true
+  done < "${overlay_symbols}"
+
+  while IFS= read -r symbol; do
+    [ -n "${symbol}" ] || continue
+    grep -Fxq -- "${symbol}" "${current_symbols}" && continue
+    allowlisted_dropped_symbol_reason "${symbol}" >/dev/null && continue
+    printf '%s\n' "${symbol}" >> "${missing_tests}"
+  done < "${overlay_tests}"
+
+  if [ -s "${missing_tests}" ]; then
+    printf '\nDELETED FORK TESTS\n'
+    while IFS= read -r symbol; do
+      [ -n "${symbol}" ] || continue
+      printf '[FAIL] deleted fork test: %s\n' "${symbol}"
+    done < "${missing_tests}"
+  fi
+
+  if [ "${failed}" = true ]; then
+    rm -rf "${root}"
+    return 1
+  fi
+  if [ "${skipped}" = true ]; then
+    printf '[OK] symbol-survival gate passed with allowlisted removals.\n'
+  else
+    printf '[OK] symbol-survival gate passed.\n'
+  fi
+  rm -rf "${root}"
 }
 
 cmd_pending_overlay_branch() {
@@ -890,9 +1170,10 @@ main() {
     replay-plan) cmd_replay_plan "$@" ;;
     record-state) cmd_record_state "$@" ;;
     classify-paths) cmd_classify_paths "$@" ;;
+    check-symbol-survival) cmd_check_symbol_survival "$@" ;;
     check-invariants) cmd_check_invariants "$@" ;;
     pending-overlay-branch) cmd_pending_overlay_branch "$@" ;;
-    *) die "usage: $0 {plan|merge-ref|replay-plan|record-state|classify-paths|check-invariants|pending-overlay-branch}" ;;
+    *) die "usage: $0 {plan|merge-ref|replay-plan|record-state|classify-paths|check-symbol-survival|check-invariants|pending-overlay-branch}" ;;
   esac
 }
 

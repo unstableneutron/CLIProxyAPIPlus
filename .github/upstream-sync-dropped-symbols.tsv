@@ -1,0 +1,4 @@
+# symbol	reason
+# Add intentional shared-hotspot overlay symbol removals here when resolving
+# upstream-sync PRs. Keep this empty by default; each entry must explain why
+# the fork-only symbol or test no longer needs to survive the merge.
