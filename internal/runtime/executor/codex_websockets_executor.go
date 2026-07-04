@@ -326,6 +326,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		sess.setActive(readCh)
 		defer sess.clearActive(readCh)
 	}
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
+	transcriptState := getXAIWebsocketIDState(e.idStore, executionSessionID)
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		if sess != nil {
@@ -406,9 +409,17 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, wsErr
 		}
 
-		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
+		if eventType == "response.output_item.done" {
+			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+		}
+		payload = normalizeCodexWebsocketCompletion(payload)
+		eventType = gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
+			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+			if transcriptState != nil {
+				transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, payload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
+			}
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -638,6 +649,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		var param any
 		transcriptState := getXAIWebsocketIDState(e.idStore, executionSessionID)
 		recordedTranscript := false
+		outputItemsByIndex := make(map[int64][]byte)
+		var outputItemsFallback [][]byte
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -698,6 +711,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			eventType := gjson.GetBytes(payload, "type").String()
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			switch eventType {
+			case "response.output_item.done":
+				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.done":
+				payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+			}
 			if !recordedTranscript && (eventType == "response.completed" || eventType == "response.done") && transcriptState != nil {
 				transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, payload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
 				recordedTranscript = true

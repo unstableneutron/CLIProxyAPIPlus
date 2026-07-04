@@ -333,6 +333,298 @@ func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDow
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	const sessionID = "codex-streamed-tool-compaction-session"
+	const callID = "call_streamed_tool"
+	wsPayloads := make(chan []byte, 2)
+	compactBody := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade websocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			for turn := 0; turn < 2; turn++ {
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
+					t.Errorf("read upstream websocket message %d: %v", turn+1, errRead)
+					return
+				}
+				wsPayloads <- bytes.Clone(payload)
+				switch turn {
+				case 0:
+					added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc-streamed","call_id":"call_streamed_tool","name":"create_goal","arguments":"{}","status":"in_progress"}}`)
+					if errWrite := conn.WriteMessage(websocket.TextMessage, added); errWrite != nil {
+						t.Errorf("write output_item.added websocket message: %v", errWrite)
+						return
+					}
+					done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc-streamed","call_id":"call_streamed_tool","name":"create_goal","arguments":"{}","status":"completed"}}`)
+					if errWrite := conn.WriteMessage(websocket.TextMessage, done); errWrite != nil {
+						t.Errorf("write output_item.done websocket message: %v", errWrite)
+						return
+					}
+					completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+						t.Errorf("write first completed websocket message: %v", errWrite)
+						return
+					}
+				case 1:
+					completed := []byte(`{"type":"response.completed","response":{"id":"resp-2","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`)
+					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+						t.Errorf("write second completed websocket message: %v", errWrite)
+						return
+					}
+				}
+			}
+		case "/responses/compact":
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+			}
+			compactBody <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","created_at":1775555723,"status":"completed","output":[{"type":"compaction","id":"cmp-1","summary":"compressed"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`))
+		default:
+			t.Errorf("request path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	t.Cleanup(func() { deleteXAIWebsocketIDState(exec.idStore, sessionID) })
+	auth := &cliproxyauth.Auth{ID: "auth-streamed-tool", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	firstResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"start"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first ExecuteStream error: %v", err)
+	}
+	drainCodexWebsocketStreamResult(t, firstResult)
+
+	state := getXAIWebsocketIDState(exec.idStore, sessionID)
+	transcriptAfterCall := state.snapshotTranscriptInput()
+	if !transcriptHasItem(transcriptAfterCall, "function_call", callID) {
+		t.Fatalf("transcript missing streamed function_call %s after first turn: %s", callID, transcriptAfterCall)
+	}
+
+	secondResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call_streamed_tool","output":"{\"ok\":true}"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("second ExecuteStream error: %v", err)
+	}
+	drainCodexWebsocketStreamResult(t, secondResult)
+
+	transcriptAfterOutput := state.snapshotTranscriptInput()
+	if !transcriptHasItem(transcriptAfterOutput, "function_call", callID) || !transcriptHasItem(transcriptAfterOutput, "function_call_output", callID) {
+		t.Fatalf("transcript missing paired tool items for %s after second turn: %s", callID, transcriptAfterOutput)
+	}
+
+	compactResult, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-2","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("compact ExecuteStream error: %v", err)
+	}
+	drainCodexWebsocketStreamResult(t, compactResult)
+
+	select {
+	case body := <-compactBody:
+		input := gjson.GetBytes(body, "input")
+		if !transcriptHasItem([]byte(input.Raw), "function_call", callID) {
+			t.Fatalf("compact replay missing function_call %s: %s", callID, body)
+		}
+		if !transcriptHasItem([]byte(input.Raw), "function_call_output", callID) {
+			t.Fatalf("compact replay missing function_call_output %s: %s", callID, body)
+		}
+		assertNoOrphanFunctionCallOutputs(t, input)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compact request body")
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-wsPayloads:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for websocket payload %d", i+1)
+		}
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamPatchesCompletedOutputForDownstreamWebsocket(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		events := [][]byte{
+			[]byte(`{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"idx-1","role":"assistant","content":[{"type":"output_text","text":"second"}]}}`),
+			[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"idx-0","call_id":"call-ordered","name":"lookup","arguments":"{}","status":"completed"}}`),
+			[]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"fallback-1","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp-ordered","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+		}
+		for _, event := range events {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-downstream-patch", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"order"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	completedPayload := readCodexWebsocketCompletedPayload(t, result)
+	output := gjson.GetBytes(completedPayload, "response.output").Array()
+	if len(output) != 3 {
+		t.Fatalf("completed output len = %d, want 3: %s", len(output), completedPayload)
+	}
+	for i, wantID := range []string{"idx-0", "idx-1", "fallback-1"} {
+		if got := output[i].Get("id").String(); got != wantID {
+			t.Fatalf("completed output[%d].id = %q, want %q: %s", i, got, wantID, completedPayload)
+		}
+	}
+}
+
+func TestCodexWebsocketsExecutePatchesCompletedOutputFromStreamedItems(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-out","role":"assistant","content":[{"type":"output_text","text":"patched"}]}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, done); errWrite != nil {
+			t.Errorf("write output_item.done websocket message: %v", errWrite)
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-nonstream","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+			return
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-nonstream-patch", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":[{"type":"message","id":"msg-1","role":"user","content":"nonstream"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.id").String(); got != "msg-out" {
+		t.Fatalf("translated non-stream response missing patched output item, id=%q payload=%s", got, resp.Payload)
+	}
+}
+
+func drainCodexWebsocketStreamResult(t *testing.T, result *cliproxyexecutor.StreamResult) {
+	t.Helper()
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+}
+
+func readCodexWebsocketCompletedPayload(t *testing.T, result *cliproxyexecutor.StreamResult) []byte {
+	t.Helper()
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		payload := bytes.TrimSpace(chunk.Payload)
+		if gjson.GetBytes(payload, "type").String() == "response.completed" {
+			return bytes.Clone(payload)
+		}
+	}
+	t.Fatal("stream closed before response.completed")
+	return nil
+}
+
+func transcriptHasItem(input []byte, itemType string, callID string) bool {
+	for _, item := range gjson.ParseBytes(input).Array() {
+		if item.Get("type").String() == itemType && item.Get("call_id").String() == callID {
+			return true
+		}
+	}
+	return false
+}
+
+func assertNoOrphanFunctionCallOutputs(t *testing.T, input gjson.Result) {
+	t.Helper()
+	calls := make(map[string]struct{})
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "function_call" {
+			callID := item.Get("call_id").String()
+			if callID != "" {
+				calls[callID] = struct{}{}
+			}
+		}
+	}
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "function_call_output" {
+			continue
+		}
+		callID := item.Get("call_id").String()
+		if _, ok := calls[callID]; !ok {
+			t.Fatalf("function_call_output %s has no matching function_call in compact replay input: %s", callID, input.Raw)
+		}
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamCompactionTriggerUsesTranscriptFallback(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	wsPayloads := make(chan []byte, 2)
