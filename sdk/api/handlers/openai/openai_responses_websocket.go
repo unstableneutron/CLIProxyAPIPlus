@@ -859,8 +859,33 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 			Error:      fmt.Errorf("missing model in response.create request"),
 		}
 	}
+	normalized = finalizeResponsesWebsocketRequest(normalized, nil)
 	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return normalized, bytes.Clone(normalized), nil
+}
+
+func finalizeResponsesWebsocketRequest(normalized []byte, lastRequest []byte) []byte {
+	normalized = normalizeCodexFastSpeedTierRequest(normalized)
+	if gjson.GetBytes(normalized, "service_tier").Exists() {
+		return normalized
+	}
+	if len(lastRequest) == 0 {
+		return normalized
+	}
+	lastServiceTier := gjson.GetBytes(lastRequest, "service_tier")
+	if !lastServiceTier.Exists() {
+		return normalized
+	}
+	modelName := strings.TrimSpace(gjson.GetBytes(normalized, "model").String())
+	lastModelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+	if modelName == "" || modelName != lastModelName {
+		return normalized
+	}
+	updated, err := sjson.SetRawBytes(normalized, "service_tier", []byte(lastServiceTier.Raw))
+	if err != nil {
+		return normalized
+	}
+	return updated
 }
 
 func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -918,6 +943,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
+			normalized = finalizeResponsesWebsocketRequest(normalized, lastRequest)
 			normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 			return normalized, bytes.Clone(normalized), nil
 		}
@@ -991,6 +1017,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = finalizeResponsesWebsocketRequest(normalized, lastRequest)
 	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
 	return normalized, bytes.Clone(normalized), nil
 }
