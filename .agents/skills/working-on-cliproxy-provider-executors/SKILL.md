@@ -30,8 +30,14 @@ and translator paths. Validate the full route, not just the executor helper.
    - Normalize provider events into stable OpenAI-compatible chunks before downstream translation.
    - Test text deltas, reasoning deltas, tool start/delta/end, final tool-call dedupe by count, finish reasons, usage, cache tokens, reasoning tokens, and terminal `[DONE]` / `response.completed`.
    - Do not double-count cache tokens when the provider supplies `totalTokens`.
+   - Codex/XAI Responses streams may leave `response.completed.response.output` empty and carry real items only in `response.output_item.added/done`. Any consumer of completed output (transcript recording, compaction replay, downstream state, non-stream translation) must reconstruct output from streamed items first. Reuse the existing `collectCodexOutputItemDone`/`patchCodexCompletedOutput` (or `xaiCollectOutputItemDone`/`xaiPatchCompletedOutput`) helpers — do not write new variants.
 
-4. **Validation rule**
+4. **Fork-overlay rule**
+   - Before changing a shared-hotspot file (large fork diff vs original upstream, e.g. `openai_responses_websocket.go`, `openai_responses_handlers.go`, `codex_websockets_executor.go`), check whether upstream already solved the problem elsewhere in the package and mirror that pattern exactly; identical dupes that exist upstream stay duplicated to keep merge conflicts small.
+   - Prefer putting fork-only additions in a fork-owned sibling file with minimal one-line call sites in the hotspot file; separate files survive upstream-sync merges, inline hunks often do not.
+   - When landing a fork-critical behavior in a shared hotspot, add a `contains` entry for its call site and its regression test name to `.github/upstream-sync-invariants.tsv` in the same change.
+
+5. **Validation rule**
    - Add focused tests at the layer that owns the behavior, then integration coverage through service registration when models/auth are involved.
    - Run:
      ```bash

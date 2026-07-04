@@ -21,10 +21,13 @@ Never call upstream sync done from a green workflow alone. Prove actual `main`, 
 
 2. **Resolve the sync PR as an overlay**
    - Treat sync PRs as preview branches until local validation passes.
+   - Blocked previews resolve shared hotspots to the upstream side, deleting fork overlay code and its tests together. Never restore overlay behavior from memory: pull the `upstream-sync-overlay-at-risk` workflow artifact (or the hunk summary in the PR/issue body) and walk every listed hunk explicitly.
    - If `replay-plan` reports conflicts or failing gates during maintenance, attempt a local repair before declaring the sync blocked. Create or reuse a resolution branch from current fork `main`, reproduce the phase with `merge-ref`, make the smallest overlay fix, and rerun `replay-plan`.
    - Preserve owner intent from `.github/upstream-sync-ownership.tsv`; no side wins by default on shared hotspots.
    - Mechanical owner-class conflicts can use the owner policy as a starting point; shared hotspots must be manually composed. Never blanket `ours` or `theirs`.
    - Check `.github/upstream-sync-invariants.tsv` after conflicts. Non-conflicting Git auto-merges can still clobber owned behavior.
+   - Run `check-symbol-survival <pre-sync-head>` after composing shared hotspots. Every missing fork-only symbol or `Test*` function must be either restored or added to `.github/upstream-sync-dropped-symbols.tsv` with a reason; deleted fork tests are the canary for silently dropped features (see the v7.1.68 merge, which dropped the websocket output accumulator and fast-tier wiring with their tests).
+   - When resolution intentionally drops overlay code, record it in `.github/upstream-sync-dropped-symbols.tsv` in the same commit. Do not pre-populate the allowlist with historical noise.
    - When a conflict also exposes test or replay failures, fix the behavioral root cause in the same cycle before acceptance. Recent example: `sdk/cliproxy/auth/conductor.go` needed bootstrap-marker, CommandCode, proxy-selection, `NextRefreshAfter`, and force-mapped stream behavior composed together; the replay then exposed the Codex image edit endpoint drift in `internal/runtime/executor/codex_openai_images.go`.
    - Re-check hotspots: fallback/`NoRoute`, executor sanitization, selected-auth/proxy-status, CommandCode, Gemini CLI, live model catalog, aliases, release branding, and CGO/plugin settings.
    - Also re-check hotspots seen in recent overlays: model registry `SupportedEndpoints`; server module/route registration for Amp, usage, GitLab PAT, management CORS, and ChatGPT backend fallback; auth-file callback host, GitLab PAT metadata, Kiro token persistence, `excluded_models`, and post-auth persistence; Gemini OpenAI Responses thought-only handling; watcher synthesis for CommandCode auth and Gemini virtual auths; Codex websocket executor tests when upstream adds raw-payload passthrough coverage.
@@ -34,12 +37,14 @@ Never call upstream sync done from a green workflow alone. Prove actual `main`, 
    .github/scripts/upstream-sync.sh replay-plan
    .github/scripts/test-upstream-sync.sh
    .github/scripts/upstream-sync.sh check-invariants
+   .github/scripts/upstream-sync.sh check-symbol-survival <pre-sync-head>
    shellcheck .github/scripts/upstream-sync.sh .github/scripts/test-upstream-sync.sh
    go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/upstream-sync.yml
    go build -o test-output ./cmd/server && rm test-output
    go test ./...
    ```
    If a gate fails, capture the diagnostic tail, fix root cause, and rerun the full gate set.
+   Never run `merge-ref` or harness experiments with the real repository as the working directory; use a scratch clone. `merge-ref` fetches tags and restores fork-owned paths, which reverts uncommitted work in the live worktree.
 
 4. **Merge, then run normal-mode sync**
    Fast-forward the validated result into `main`, then trigger acceptance:
@@ -87,5 +92,7 @@ If upstream-sync is green but no tag appears:
 - Merging a resolved sync PR without running the normal-mode acceptance sync afterward.
 - Reporting blocked before attempting a reasonable local repair for conflict or gate failures.
 - Trusting a conflict-free merge without checking ownership clobbers and invariants.
+- Resolving a blocked preview by recalling overlay behavior instead of replaying the overlay-at-risk hunks, then missing features whose tests were deleted in the same preview commit.
+- Accepting a resolution where `check-symbol-survival` failures are neither restored nor allowlisted with reasons.
 - Letting original or Plus overwrite fork-owned workflow, Gemini CLI, CommandCode, or release behavior.
 - Declaring Docker/release complete before checking the follow-up runs.

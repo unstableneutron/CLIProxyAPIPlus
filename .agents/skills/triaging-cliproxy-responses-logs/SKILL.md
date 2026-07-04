@@ -36,7 +36,8 @@ uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses
 5. **Dedupe mirrored events.** Logs can contain downstream and API/upstream timelines with duplicate output/completion events. Dedupe exact final texts and compare item ids/timestamps.
 6. **Interpret prewarm correctly.** `request_kind=prewarm`, `input=[]`, `generate=false`, `prompt_cache_key=<thread>`, and zero output means cache/model warmup, not a user turn.
 7. **Classify compaction/replay before text.** Endpoint `/responses/compact`, input item `compaction_trigger`, replay provenance, or `reasoning.encrypted_content` means internal compaction/replay traffic until proven otherwise. Report endpoint, trigger marker, thread/session/parent ids, input count, usage, and replay provenance before treating any text as a user-visible answer.
-8. **Report raw status.** Say `status=completed`, `error=<none>`, `incomplete=<none>`, and `stop_field=absent` when no `stop` field exists. Do not invent `stop=true` or `stop=false`.
+8. **Check tool-call pairing on compaction 400s.** For `No tool call found for function call output with call_id ...`, parse the compact/replay request `input` array and list every `function_call_output` whose `call_id` has no matching `function_call` (orphans). Then trace each orphaned call_id backward: if the model's call arrived only via `response.output_item.added/done` while `response.completed` had `"output": []`, the transcript/state recorder missed it — an executor-side recording bug, not a provider error. Count empty-output completed events across the session; a systematic pattern (all empty) implicates the recorder, not one bad turn.
+9. **Report raw status.** Say `status=completed`, `error=<none>`, `incomplete=<none>`, and `stop_field=absent` when no `stop` field exists. Do not invent `stop=true` or `stop=false`.
 
 ## Evidence To Report
 
@@ -47,6 +48,7 @@ uv run --script .agents/skills/triaging-cliproxy-responses-logs/triage_responses
 | Same or new thread? | session id, thread id, parent id, first/last seen counts |
 | What kind of call? | request_kind, thread_source, input count, generate flag |
 | Compact/replay? | endpoint, `compaction_trigger`, replay provenance, encrypted-content presence |
+| Orphaned tool outputs? | orphan call_ids in compact input, matching `output_item.done` frames, empty-vs-populated `response.completed.output` counts |
 | Final answer? | last unique `response.output_text.done` text |
 | Finished cleanly? | last `response.completed` status/error/incomplete/usage |
 | Requester IP? | `main.log` id join, with proxy caveat |
