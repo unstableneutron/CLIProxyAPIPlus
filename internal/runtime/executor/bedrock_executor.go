@@ -323,7 +323,7 @@ func (e *BedrockExecutor) translateRequest(ctx context.Context, req cliproxyexec
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "bedrock", from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeSamplingForThinking(body)
+	body = normalizeClaudeSamplingForUpstream(body)
 	return body, body, nil
 }
 

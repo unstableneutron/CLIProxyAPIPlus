@@ -153,6 +153,34 @@ func TestBedrockExecutorExecute_translatesClaudeMessagesToConverse_whenConfigure
 	}
 }
 
+func TestBedrockExecutorExecute_removesTemperatureBeforeConverse(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = readBedrockTestBody(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn"}`))
+	}))
+	defer server.Close()
+	exec := NewBedrockExecutor(&config.Config{})
+	auth := bedrockTestAuth(server.URL)
+	req := cliproxyexecutor.Request{
+		Model:   "sonnet-5",
+		Payload: []byte(`{"model":"sonnet-5","temperature":0,"top_p":0.9,"max_tokens":64,"messages":[{"role":"user","content":"say ok"}]}`),
+	}
+
+	if _, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gjson.GetBytes(gotBody, "inferenceConfig.temperature").Exists() {
+		t.Fatalf("temperature should be removed before Bedrock Converse; body=%s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "inferenceConfig.topP").Float(); got != 0.9 {
+		t.Fatalf("topP = %v, want 0.9; body=%s", got, string(gotBody))
+	}
+}
+
 func TestBedrockExecutorExecuteStream_translatesConverseStreamToOpenAIChat_whenConfigured(t *testing.T) {
 	// Given
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
