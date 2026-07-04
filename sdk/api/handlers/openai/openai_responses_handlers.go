@@ -732,7 +732,7 @@ func (t directResponsesStreamStateTracker) Complete(payload []byte) {
 	t.cache.put(responseID, directResponsesStateEntry{
 		request:            t.request,
 		output:             output,
-		pendingToolCallIDs: responsesWebsocketPendingToolCallIDs(output),
+		pendingToolCallIDs: responsesPendingToolCallIDsFromOutput(output),
 		createdAt:          time.Now(),
 	})
 }

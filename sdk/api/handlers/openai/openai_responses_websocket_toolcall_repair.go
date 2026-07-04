@@ -222,60 +222,7 @@ func repairResponsesWebsocketToolCalls(sessionKey string, payload []byte) []byte
 	return repairResponsesWebsocketToolCallsWithCaches(defaultWebsocketToolOutputCache, defaultWebsocketToolCallCache, sessionKey, payload)
 }
 
-func responsesWebsocketShouldBufferPartialToolOutputs(cache *websocketToolOutputCache, sessionKey string, payload []byte, lastResponseOutput []byte) bool {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" || cache == nil || len(payload) == 0 || len(lastResponseOutput) == 0 {
-		return false
-	}
-
-	pendingIDs := responsesWebsocketPendingToolCallIDs(lastResponseOutput)
-	if len(pendingIDs) == 0 {
-		return false
-	}
-	pendingSet := make(map[string]struct{}, len(pendingIDs))
-	for _, callID := range pendingIDs {
-		pendingSet[callID] = struct{}{}
-	}
-
-	input := gjson.GetBytes(payload, "input")
-	if !input.Exists() || !input.IsArray() {
-		return false
-	}
-
-	currentOutputs := make(map[string]struct{}, len(pendingIDs))
-	hasRelevantOutput := false
-	for _, item := range input.Array() {
-		if !isResponsesToolCallOutputType(item.Get("type").String()) {
-			continue
-		}
-		callID := strings.TrimSpace(item.Get("call_id").String())
-		if callID == "" {
-			continue
-		}
-		if _, ok := pendingSet[callID]; !ok {
-			continue
-		}
-		hasRelevantOutput = true
-		currentOutputs[callID] = struct{}{}
-		cache.record(sessionKey, callID, json.RawMessage(item.Raw))
-	}
-	if !hasRelevantOutput {
-		return false
-	}
-
-	for _, callID := range pendingIDs {
-		if _, ok := currentOutputs[callID]; ok {
-			continue
-		}
-		if _, ok := cache.get(sessionKey, callID); ok {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func responsesWebsocketPendingToolCallIDs(lastResponseOutput []byte) []string {
+func responsesPendingToolCallIDsFromOutput(lastResponseOutput []byte) []string {
 	output := gjson.ParseBytes(lastResponseOutput)
 	if !output.Exists() || !output.IsArray() {
 		return nil
