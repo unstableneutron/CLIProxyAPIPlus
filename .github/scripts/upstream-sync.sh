@@ -1061,7 +1061,7 @@ cmd_check_symbol_survival() {
   fi
 
   local root baseline_symbols upstream_symbols overlay_symbols current_symbols
-  local baseline_tests upstream_tests overlay_tests missing_symbol missing_tests
+  local baseline_tests upstream_tests overlay_tests missing_tests
   local symbol reason failed skipped
   root=$(mktemp -d)
   baseline_symbols="${root}/baseline-symbols.txt"

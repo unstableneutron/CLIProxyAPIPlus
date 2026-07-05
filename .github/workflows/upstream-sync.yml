@@ -447,25 +447,18 @@ jobs:
             --repo "${{ github.repository }}" 2>/dev/null || true
 
           TITLE="chore(upstream-sync): pending overlay for original ${{ steps.plan.outputs.original_tag }} and Plus ${{ steps.plan.outputs.plus_tag }}"
-          BODY=$(cat <<'EOF'
-          ## Upstream sync pending overlay
-
-          - Original repository: `${{ steps.plan.outputs.original_repository }}`
-          - Original tag: `${{ steps.plan.outputs.original_tag }}`
-          - Original commit: `${{ steps.plan.outputs.original_head }}`
-          - Plus repository: `${{ steps.plan.outputs.plus_repository }}`
-          - Plus tag: `${{ steps.plan.outputs.plus_tag }}`
-          - Plus tag commit: `${{ steps.plan.outputs.plus_tag_head }}`
-          - Plus head commit: `${{ steps.plan.outputs.plus_head }}`
-          - Plus head included: `${{ steps.plan.outputs.plus_head_included }}`
-          - Unsafe Plus head paths: `${{ steps.plan.outputs.unsafe_plus_head_delta_paths }}`
-          - Next fork tag after merge: `${{ steps.plan.outputs.next_fork_tag }}`
-
-          ### Conflict guidance
-
-          Do not resolve by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Plus untagged head deltas only auto-land when they touch Plus-owned paths.
-          EOF
-          )
+          # shellcheck disable=SC2016
+          BODY=$(printf '## Upstream sync pending overlay\n\n- Original repository: `%s`\n- Original tag: `%s`\n- Original commit: `%s`\n- Plus repository: `%s`\n- Plus tag: `%s`\n- Plus tag commit: `%s`\n- Plus head commit: `%s`\n- Plus head included: `%s`\n- Unsafe Plus head paths: `%s`\n- Next fork tag after merge: `%s`\n\n### Conflict guidance\n\nDo not resolve by blanket `ours` or `theirs`. Preserve the newer original base, then reapply Plus/fork behavior intentionally. Plus untagged head deltas only auto-land when they touch Plus-owned paths.\n' \
+            "${{ steps.plan.outputs.original_repository }}" \
+            "${{ steps.plan.outputs.original_tag }}" \
+            "${{ steps.plan.outputs.original_head }}" \
+            "${{ steps.plan.outputs.plus_repository }}" \
+            "${{ steps.plan.outputs.plus_tag }}" \
+            "${{ steps.plan.outputs.plus_tag_head }}" \
+            "${{ steps.plan.outputs.plus_head }}" \
+            "${{ steps.plan.outputs.plus_head_included }}" \
+            "${{ steps.plan.outputs.unsafe_plus_head_delta_paths }}" \
+            "${{ steps.plan.outputs.next_fork_tag }}")
           set +e
           PR_NUM=$(gh pr list \
             --repo "${{ github.repository }}" \
@@ -474,17 +467,18 @@ jobs:
             --json number \
             --jq '.[0].number' 2>/dev/null || true)
           if [ -n "${PR_NUM}" ]; then
+            # shellcheck disable=SC2016
             OVERLAY_AT_RISK_SECTION=$(printf '## Overlay-at-risk report\n\nThese shared-hotspot fork overlay hunks were present before the blocked merge and must be reviewed before resolving the preview commit. Full diffs are uploaded as the `upstream-sync-overlay-at-risk` artifact when present.\n\n### Original merge\n%s\n\n### Plus release overlay\n%s\n\n### Plus head delta\n%s\n' \
               "${ORIGINAL_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
               "${PLUS_TAG_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
               "${PLUS_HEAD_OVERLAY_AT_RISK_SUMMARY:-<none>}")
             BODY="${BODY}
 
-            ## Symbol-survival gate
+          ## Symbol-survival gate
 
-            ${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
+          ${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
 
-            ${OVERLAY_AT_RISK_SECTION}"
+          ${OVERLAY_AT_RISK_SECTION}"
 
             gh pr edit "${PR_NUM}" \
               --repo "${{ github.repository }}" \
@@ -493,6 +487,7 @@ jobs:
               --add-label "${PR_LABEL}" 2>&1
             PR_EXIT=$?
           else
+            # shellcheck disable=SC2016
             OVERLAY_AT_RISK_SECTION=$(printf '## Overlay-at-risk report\n\nThese shared-hotspot fork overlay hunks were present before the blocked merge and must be reviewed before resolving the preview commit. Full diffs are uploaded as the `upstream-sync-overlay-at-risk` artifact when present.\n\n### Original merge\n%s\n\n### Plus release overlay\n%s\n\n### Plus head delta\n%s\n' \
               "${ORIGINAL_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
               "${PLUS_TAG_OVERLAY_AT_RISK_SUMMARY:-<none>}" \
@@ -591,11 +586,11 @@ jobs:
             "${PLUS_HEAD_OVERLAY_AT_RISK_SUMMARY:-<none>}")
           COMMENT_BODY="${COMMENT_BODY}
 
-## Symbol-survival gate
+          ## Symbol-survival gate
 
-${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
+          ${SYMBOL_SURVIVAL_TAIL:-<no symbol-survival log captured>}
 
-${OVERLAY_AT_RISK_SECTION}"
+          ${OVERLAY_AT_RISK_SECTION}"
 
           ISSUE_TITLE="upstream-sync pending overlay: original ${{ steps.plan.outputs.original_tag }} / Plus ${{ steps.plan.outputs.plus_tag }}"
           # shellcheck disable=SC2016

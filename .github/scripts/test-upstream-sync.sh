@@ -507,7 +507,7 @@ test_original_merge_writes_overlay_at_risk_report() {
 
   assert_contains "${out}" "conflicts=true"
   assert_contains "${out}" "overlay_at_risk_report=${report_dir}/overlay-at-risk-original.diff"
-  assert_contains "${out}" '| `internal/runtime/executor/fork.go` | `1` |'
+  assert_contains "${out}" "| \`internal/runtime/executor/fork.go\` | \`1\` |"
   assert_contains "${report_dir}/overlay-at-risk-original.diff" "## internal/runtime/executor/fork.go"
   assert_contains "${report_dir}/overlay-at-risk-original.diff" "fork-change"
 }
