@@ -317,6 +317,7 @@ func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) c
 
 	shouldContinue, stoppedReason := f.shouldContinue(eventData)
 	if shouldContinue {
+		log.Infof("codex continue-thinking: round %d truncated (reasoning_tokens=%d tier=%d) -> continuing", f.round, usage.ReasoningTokens, (usage.ReasoningTokens+2)/int64(f.cfg.TruncationStep))
 		f.retainedDraft = codexContinueCloneBufferedItems(f.buffered)
 		f.retainedTerminal = bytes.Clone(eventData)
 		f.retainedUsage = usage
@@ -325,6 +326,11 @@ func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) c
 		f.everContinued = true
 		f.resetRound()
 		return codexContinueEventResult{PublishUsage: [][]byte{eventData}, Continue: true, Handled: true}
+	}
+	if stoppedReason != "" {
+		log.Infof("codex continue-thinking: round %d still truncated (reasoning_tokens=%d) but stopping: %s", f.round, usage.ReasoningTokens, stoppedReason)
+	} else if f.everContinued {
+		log.Infof("codex continue-thinking: round %d finished clean after %d continuation(s) (reasoning_tokens=%d total_reasoning=%d)", f.round, f.continuedRounds, usage.ReasoningTokens, f.totalUsage.ReasoningTokens)
 	}
 
 	f.stoppedReason = stoppedReason
@@ -407,6 +413,7 @@ func (f *codexContinueFold) NoteContinuationSent(strategy string) {
 	f.awaitingContinuation = true
 	f.currentRoundHasItem = false
 	f.continuationStrategy = strings.TrimSpace(strategy)
+	log.Infof("codex continue-thinking: continuation round %d sent (strategy=%s)", f.round, f.continuationStrategy)
 }
 
 func (f *codexContinueFold) ShouldFallbackContinuation(err error) bool {
@@ -428,6 +435,7 @@ func (f *codexContinueFold) FinalizeAfterContinuationFailure() [][]byte {
 	if f == nil || len(f.retainedTerminal) == 0 {
 		return nil
 	}
+	log.Warnf("codex continue-thinking: continuation round %d failed (strategy=%s); flushing retained draft from truncated round", f.round, f.continuationStrategy)
 	f.finalRoundUsage = f.retainedUsage
 	emit := f.flushBuffered(f.retainedDraft, true, true)
 	terminal := f.reconstructTerminal(f.retainedTerminal, true)
