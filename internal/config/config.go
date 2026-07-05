@@ -373,8 +373,21 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool                  `yaml:"identity-confuse" json:"identity-confuse"`
-	TLSProfile      CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
+	IdentityConfuse  bool                  `yaml:"identity-confuse" json:"identity-confuse"`
+	TLSProfile       CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
+	ContinueThinking CodexContinueThinking `yaml:"continue-thinking" json:"continue-thinking"`
+}
+
+// CodexContinueThinking configures optional Codex reasoning truncation folding.
+type CodexContinueThinking struct {
+	Enabled              bool   `yaml:"enabled" json:"enabled"`
+	Method               string `yaml:"method" json:"method"`
+	TruncationStep       int    `yaml:"truncation-step" json:"truncation-step"`
+	MaxRounds            int    `yaml:"max-rounds" json:"max-rounds"`
+	MinTier              int    `yaml:"min-tier" json:"min-tier"`
+	MaxTier              int    `yaml:"max-tier" json:"max-tier"`
+	MaxTotalOutputTokens int64  `yaml:"max-total-output-tokens" json:"max-total-output-tokens"`
+	MarkerText           string `yaml:"marker-text" json:"marker-text"`
 }
 
 // CodexTLSProfileConfig configures transport-specific Codex uTLS profiles.

@@ -1164,6 +1164,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
+	if streamResult, handled, errFold := e.executeCodexContinueFoldHTTPStream(ctx, auth, req, responseFormat, to, originalPayload, body, upstreamBody, httpReq, httpResp, httpClient, reporter, replayScope, identityState, authID, authLabel, authType, authValue); handled || errFold != nil {
+		return streamResult, errFold
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)

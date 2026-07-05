@@ -184,6 +184,16 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
+  # Optional Codex reasoning truncation folding. Default is disabled.
+  continue-thinking:
+    enabled: false
+    method: rewind # rewind | replay
+    truncation-step: 518
+    max-rounds: 8
+    min-tier: 1
+    max-tier: 0
+    max-total-output-tokens: 0
+    marker-text: "Continue thinking..."
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true

@@ -614,6 +614,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
+	if streamResult, handled := e.executeCodexContinueFoldWebsocketStream(ctx, auth, req, responseFormat, to, clientBody, clientBody, upstreamBody, identityState, reporter, executionSessionID, sess, readCh, conn, wsReqBody, wsURL, wsHeaders, upstreamHeaders, authID, baseURL, baseModel); handled {
+		return streamResult, nil
+	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
