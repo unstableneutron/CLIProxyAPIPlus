@@ -2111,8 +2111,6 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if entry := s.resolveConfigCommandCodeKey(a); entry != nil && authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
-			models = applyExcludedModels(models, excluded)
-			models = withCommandCodeShortAliases(models)
 		}
 		models = applyExcludedModels(models, excluded)
 	case "qoder":
@@ -2587,64 +2585,6 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		addModel(&clone)
 	}
 	return out
-}
-
-func withCommandCodeShortAliases(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return models
-	}
-
-	out := make([]*ModelInfo, 0, len(models)*2)
-	seen := make(map[string]struct{}, len(models)*2)
-	addModel := func(model *ModelInfo) {
-		if model == nil {
-			return
-		}
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			return
-		}
-		key := strings.ToLower(id)
-		if _, exists := seen[key]; exists {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, model)
-	}
-
-	for _, model := range models {
-		addModel(model)
-		for _, alias := range commandCodeShortAliasesForModelID(model.ID) {
-			clone := *model
-			clone.ID = alias
-			addModel(&clone)
-		}
-	}
-	return out
-}
-
-func commandCodeShortAliasesForModelID(modelID string) []string {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return nil
-	}
-	explicit := map[string][]string{
-		"deepseek/deepseek-v4-flash": {"deepseek-v4-flash", "ds4-flash"},
-		"deepseek/deepseek-v4-pro":   {"deepseek-v4-pro", "ds4-pro"},
-	}
-	if aliases := explicit[modelID]; len(aliases) > 0 {
-		return aliases
-	}
-
-	slash := strings.LastIndex(modelID, "/")
-	if slash < 0 || slash == len(modelID)-1 {
-		return nil
-	}
-	alias := strings.ToLower(strings.TrimSpace(modelID[slash+1:]))
-	if alias == "" || strings.EqualFold(alias, modelID) {
-		return nil
-	}
-	return []string{alias}
 }
 
 // matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
