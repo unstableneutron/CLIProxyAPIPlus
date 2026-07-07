@@ -1026,6 +1026,49 @@ func TestCodexWebsocketsCompactionProvenanceChangeStripsEncryptedContent(t *test
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamRejectsCompactionTriggerWithoutTranscript(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		http.Error(w, "unexpected upstream websocket call", http.StatusTeapot)
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{ID: "auth-compact-missing-context", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+	}
+
+	result, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+	}, opts)
+	if err == nil {
+		if result != nil {
+			for range result.Chunks {
+			}
+		}
+		t.Fatalf("ExecuteStream error = nil, want missing compaction context status error")
+	}
+
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) {
+		t.Fatalf("ExecuteStream error type = %T, want StatusCode", err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("StatusCode = %d, want %d; err=%v", got, http.StatusBadRequest, err)
+	}
+	if got := gjson.Get(err.Error(), "error.code").String(); got != "missing_compaction_context" {
+		t.Fatalf("error.code = %q, want missing_compaction_context; err=%v", got, err)
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("upstream calls = %d, want 0", got)
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
