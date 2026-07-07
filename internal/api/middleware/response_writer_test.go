@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -151,6 +152,35 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 	if !streamWriter.closed {
 		t.Fatal("expected stream writer to be closed")
+	}
+}
+
+func TestStreamingWriteBuffersWhenChunkChannelUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: c.Writer,
+		body:           &bytes.Buffer{},
+		logger:         &testRequestLogger{enabled: true},
+		requestInfo: &RequestInfo{
+			URL:       "/v1/responses",
+			Method:    http.MethodPost,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}},
+			RequestID: "req-stream-fallback",
+			Timestamp: time.Date(2026, time.July, 8, 9, 0, 0, 0, time.UTC),
+		},
+		isStreaming:  true,
+		chunkChannel: nil,
+	}
+
+	if _, errWrite := wrapper.Write([]byte("data: keepalive\n\n")); errWrite != nil {
+		t.Fatalf("Write() error = %v", errWrite)
+	}
+	if got := wrapper.body.String(); got != "data: keepalive\n\n" {
+		t.Fatalf("buffered body = %q, want streaming chunk fallback", got)
 	}
 }
 

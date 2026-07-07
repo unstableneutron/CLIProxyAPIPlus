@@ -415,6 +415,9 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	requestEventsMu sync.RWMutex
+	requestEvents   *AsyncRequestEventLogger
 }
 
 type homeRequestLogPayload struct {

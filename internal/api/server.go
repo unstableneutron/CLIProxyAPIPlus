@@ -94,8 +94,27 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
+}
+
+func requestEventConfigFromConfig(cfg *config.Config) logging.FileRequestEventConfig {
+	if cfg == nil {
+		return logging.FileRequestEventConfig{}
+	}
+	requestEvents := cfg.RequestEvents.Normalized()
+	enabled := requestEvents.IsEnabled() && !cfg.CommercialMode
+	return logging.FileRequestEventConfig{
+		LoggerOptions: logging.RequestEventLoggerOptions{
+			Enabled:              enabled,
+			QueueSize:            requestEvents.QueueSize,
+			MaxQueuedPayloadSize: int64(requestEvents.MaxQueuedPayloadMB) * 1024 * 1024,
+			FlushInterval:        time.Duration(requestEvents.FlushIntervalMS) * time.Millisecond,
+		},
+		MaxFileSize:     int64(requestEvents.MaxFileSizeMB) * 1024 * 1024,
+		WriteBufferSize: requestEvents.WriteBufferSizeKB * 1024,
+	}
 }
 
 func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
@@ -105,6 +124,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 	sdkCfg := cfg.SDKConfig
 	if cfg.CommercialMode {
 		sdkCfg.RequestLog = false
+		sdkCfg.RequestEvents.Enabled = false
 	}
 	return &sdkCfg
 }
@@ -1695,6 +1715,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
+	if closer, ok := s.requestLogger.(interface{ Close(context.Context) error }); ok {
+		if errClose := closer.Close(context.Background()); errClose != nil {
+			log.WithError(errClose).Warn("failed to close request logger")
+		}
+	}
 
 	log.Debug("API server stopped")
 	return nil
@@ -1764,6 +1789,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {
 		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
 			setter.SetHomeEnabled(cfg.Home.Enabled)
+		}
+	}
+
+	if oldCfg == nil || oldCfg.CommercialMode != cfg.CommercialMode || oldCfg.RequestEvents.Normalized() != cfg.RequestEvents.Normalized() {
+		if setter, ok := s.requestLogger.(interface {
+			ConfigureRequestEvents(logging.FileRequestEventConfig)
+		}); ok {
+			setter.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 		}
 	}
 

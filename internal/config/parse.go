@@ -64,6 +64,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.ErrorLogsMaxFiles = 10
 	}
 
+	cfg.RequestEvents.Normalize()
+
 	if cfg.RedisUsageQueueRetentionSeconds <= 0 {
 		cfg.RedisUsageQueueRetentionSeconds = 60
 	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {

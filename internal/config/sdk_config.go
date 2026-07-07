@@ -46,6 +46,9 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// RequestEvents controls line-oriented JSONL request event logging.
+	RequestEvents RequestEventsConfig `yaml:"request-events,omitempty" json:"request-events,omitempty"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

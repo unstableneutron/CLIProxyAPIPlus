@@ -69,9 +69,11 @@ const responsesStateAuthCapabilityKey = "responses_state"
 const responsesStateAuthModelsKey = "responses_state_models"
 
 type websocketTimelineLog struct {
-	enabled bool
-	source  *requestlogging.FileBodySource
-	builder *strings.Builder
+	enabled      bool
+	source       *requestlogging.FileBodySource
+	builder      *strings.Builder
+	eventContext *gin.Context
+	eventLogger  *requestlogging.AsyncRequestEventLogger
 
 	currentPart       io.WriteCloser
 	currentPartHasLog bool
@@ -127,7 +129,11 @@ func (l *websocketTimelineLog) BeginRequest() {
 }
 
 func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestamp time.Time) {
-	if l == nil || !l.enabled {
+	if l == nil {
+		return
+	}
+	l.emitRequestEvent(eventType, payload, timestamp)
+	if !l.enabled {
 		return
 	}
 	data := formatWebsocketTimelineEvent(eventType, payload, timestamp)
@@ -151,6 +157,47 @@ func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestam
 	if l.builder != nil {
 		writeWebsocketTimelineBuilder(l.builder, data)
 	}
+}
+
+func (l *websocketTimelineLog) SetEventContext(c *gin.Context) {
+	if l == nil {
+		return
+	}
+	l.eventContext = c
+	l.eventLogger = requestlogging.GetGinRequestEventLogger(c)
+}
+
+func (l *websocketTimelineLog) emitRequestEvent(eventType string, payload []byte, timestamp time.Time) {
+	if l == nil || l.eventLogger == nil || !l.eventLogger.IsEnabled() || l.eventContext == nil {
+		return
+	}
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	event := l.eventLogger.AcquireEvent()
+	event.Timestamp = timestamp
+	event.RequestID = requestlogging.GetGinRequestID(l.eventContext)
+	event.Sequence = requestlogging.NextGinRequestEventSequence(l.eventContext)
+	event.Event = "websocket." + strings.TrimSpace(eventType)
+	event.Protocol = "websocket"
+	event.ContentType = "application/json"
+	switch eventType {
+	case "request":
+		event.Boundary = "client_to_proxy"
+		event.Direction = "inbound"
+	case "response":
+		event.Boundary = "proxy_to_client"
+		event.Direction = "outbound"
+	case "disconnect":
+		event.Boundary = "proxy_to_client"
+		event.Direction = "outbound"
+		event.ContentType = "text/plain"
+	default:
+		event.Boundary = "proxy_to_client"
+		event.Direction = "outbound"
+	}
+	event.SetPayloadBytes(payload)
+	l.eventLogger.Emit(event)
 }
 
 func (l *websocketTimelineLog) SetContext(c *gin.Context) {
@@ -240,6 +287,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	wsTimelineLog.SetEventContext(c)
 	turnKey, turnMetadata, hasTurnKey := responsesTurnCoordinationKeyFromContext(c)
 	coordinateMainTurn := hasTurnKey && turnMetadata.IsMainTurn()
 

@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -33,17 +34,19 @@ type RequestInfo struct {
 // It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body                *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
-	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
-	logger              logging.RequestLogger      // logger is the instance of the request logger service.
-	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
-	statusCode          int                        // statusCode stores the HTTP status code of the response.
-	headers             map[string][]string        // headers stores the response headers.
-	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
-	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	body                     *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
+	isStreaming              bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	streamWriter             logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
+	chunkChannel             chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamDone               chan struct{}              // streamDone signals when the streaming goroutine completes.
+	logger                   logging.RequestLogger      // logger is the instance of the request logger service.
+	requestInfo              *RequestInfo               // requestInfo holds the details of the original request.
+	statusCode               int                        // statusCode stores the HTTP status code of the response.
+	headers                  map[string][]string        // headers stores the response headers.
+	logOnErrorOnly           bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	firstChunkTimestamp      time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	requestEventLogger       *logging.AsyncRequestEventLogger
+	nextRequestEventSequence func() uint64
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -58,11 +61,12 @@ type ResponseWriterWrapper struct {
 //   - A pointer to a new ResponseWriterWrapper.
 func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger, requestInfo *RequestInfo) *ResponseWriterWrapper {
 	return &ResponseWriterWrapper{
-		ResponseWriter: w,
-		body:           &bytes.Buffer{},
-		logger:         logger,
-		requestInfo:    requestInfo,
-		headers:        make(map[string][]string),
+		ResponseWriter:     w,
+		body:               &bytes.Buffer{},
+		logger:             logger,
+		requestInfo:        requestInfo,
+		headers:            make(map[string][]string),
+		requestEventLogger: logging.RequestEventLoggerFromRequestLogger(logger),
 	}
 }
 
@@ -80,17 +84,20 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
 
 	// THEN: Handle logging based on response type
-	if w.isStreaming && w.chunkChannel != nil {
+	if w.isStreaming {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
+		w.emitDownstreamPayloadEvent("stream.frame", data, w.statusCode, w.headers)
 		// For streaming responses: Send to async logging channel (non-blocking)
-		select {
-		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-		default: // Channel full, skip logging to avoid blocking
+		if w.chunkChannel != nil {
+			select {
+			case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
+			default: // Channel full, skip logging to avoid blocking
+			}
+			return n, err
 		}
-		return n, err
 	}
 
 	if w.shouldBufferResponseBody() {
@@ -102,6 +109,9 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
+		return true
+	}
+	if w.requestEventsEnabled() {
 		return true
 	}
 	if !w.logOnErrorOnly {
@@ -128,16 +138,19 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	n, err := w.ResponseWriter.WriteString(data)
 
 	// THEN: Capture for logging
-	if w.isStreaming && w.chunkChannel != nil {
+	if w.isStreaming {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
-		select {
-		case w.chunkChannel <- []byte(data):
-		default:
+		w.emitDownstreamPayloadEvent("stream.frame", []byte(data), w.statusCode, w.headers)
+		if w.chunkChannel != nil {
+			select {
+			case w.chunkChannel <- []byte(data):
+			default:
+			}
+			return n, err
 		}
-		return n, err
 	}
 
 	if w.shouldBufferResponseBody() {
@@ -253,6 +266,112 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 	}
 }
 
+func (w *ResponseWriterWrapper) requestEventsEnabled() bool {
+	return w != nil && w.requestEventLogger != nil && w.requestEventLogger.IsEnabled()
+}
+
+func (w *ResponseWriterWrapper) nextEventSequence() uint64 {
+	if w == nil || w.nextRequestEventSequence == nil {
+		return 0
+	}
+	return w.nextRequestEventSequence()
+}
+
+func (w *ResponseWriterWrapper) emitDownstreamPayloadEvent(eventName string, payload []byte, statusCode int, headers map[string][]string) {
+	if len(payload) == 0 {
+		return
+	}
+	event := w.newDownstreamEvent(eventName, statusCode, headers)
+	if event == nil {
+		return
+	}
+	event.SetPayloadBytes(payload)
+	w.requestEventLogger.Emit(event)
+}
+
+func (w *ResponseWriterWrapper) emitFinalRequestEvents(statusCode int, headers map[string][]string, responseBody []byte, apiErrors []*interfaces.ErrorMessage) {
+	if !w.requestEventsEnabled() {
+		return
+	}
+	if !w.isStreaming && len(responseBody) > 0 {
+		w.emitDownstreamPayloadEvent("response.body", responseBody, statusCode, headers)
+	}
+	for _, apiErr := range apiErrors {
+		if apiErr == nil {
+			continue
+		}
+		raw, errMarshal := json.Marshal(apiErr)
+		if errMarshal != nil {
+			raw = []byte(errMarshal.Error())
+		}
+		errEvent := w.newDownstreamEvent("response.error", statusCode, headers)
+		if errEvent == nil {
+			continue
+		}
+		errEvent.ContentType = "application/json"
+		errEvent.SetPayloadBytes(raw)
+		w.requestEventLogger.Emit(errEvent)
+	}
+	finalEvent := w.newDownstreamEvent("request.finalized", statusCode, headers)
+	if finalEvent == nil {
+		return
+	}
+	finalEvent.Attributes = map[string]interface{}{
+		"streaming": w.isStreaming,
+	}
+	w.requestEventLogger.Emit(finalEvent)
+}
+
+func (w *ResponseWriterWrapper) newDownstreamEvent(eventName string, statusCode int, headers map[string][]string) *logging.RequestEvent {
+	if !w.requestEventsEnabled() || w.requestInfo == nil {
+		return nil
+	}
+	if statusCode == 0 {
+		statusCode = w.statusCode
+	}
+	if headers == nil {
+		headers = w.headers
+	}
+	contentType := headerValue(headers, "Content-Type")
+	event := w.requestEventLogger.AcquireEvent()
+	event.RequestID = w.requestInfo.RequestID
+	event.Sequence = w.nextEventSequence()
+	event.Event = eventName
+	event.Boundary = "proxy_to_client"
+	event.Direction = "outbound"
+	event.Protocol = protocolFromContentType(contentType)
+	event.ContentType = contentType
+	event.HTTP = &logging.RequestEventHTTP{
+		Method:          w.requestInfo.Method,
+		URL:             w.requestInfo.URL,
+		StatusCode:      statusCode,
+		ResponseHeaders: cloneMaskedHeaders(headers),
+	}
+	return event
+}
+
+func headerValue(headers map[string][]string, key string) string {
+	for headerKey, values := range headers {
+		if !strings.EqualFold(headerKey, key) || len(values) == 0 {
+			continue
+		}
+		return values[0]
+	}
+	return ""
+}
+
+func protocolFromContentType(contentType string) string {
+	lower := strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case strings.Contains(lower, "text/event-stream"):
+		return "sse"
+	case strings.Contains(lower, "application/vnd.amazon.eventstream"):
+		return "aws-eventstream"
+	default:
+		return "http"
+	}
+}
+
 // Finalize completes the logging process for the request and response.
 // For streaming responses, it closes the chunk channel and the stream writer.
 // For non-streaming responses, it logs the complete request and response details,
@@ -285,6 +404,10 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
+	if w.requestEventsEnabled() {
+		w.emitFinalRequestEvents(finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), slicesAPIResponseError)
+	}
+
 	if !w.logger.IsEnabled() && !forceLog {
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return nil

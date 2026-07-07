@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,6 +14,8 @@ type requestIDKey struct{}
 
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
+const ginRequestEventLoggerKey = "__request_event_logger__"
+const ginRequestEventSequenceKey = "__request_event_sequence__"
 
 // GenerateRequestID creates a new 8-character hex request ID.
 func GenerateRequestID() string {
@@ -58,4 +61,47 @@ func GetGinRequestID(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// SetGinRequestEventLogger stores the optional JSONL request event logger in Gin context.
+func SetGinRequestEventLogger(c *gin.Context, logger *AsyncRequestEventLogger) {
+	if c == nil || logger == nil || !logger.IsEnabled() {
+		return
+	}
+	c.Set(ginRequestEventLoggerKey, logger)
+	c.Set(ginRequestEventSequenceKey, &atomic.Uint64{})
+}
+
+// GetGinRequestEventLogger retrieves the optional JSONL request event logger from Gin context.
+func GetGinRequestEventLogger(c *gin.Context) *AsyncRequestEventLogger {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(ginRequestEventLoggerKey)
+	if !exists {
+		return nil
+	}
+	logger, ok := value.(*AsyncRequestEventLogger)
+	if !ok || logger == nil || !logger.IsEnabled() {
+		return nil
+	}
+	return logger
+}
+
+// NextGinRequestEventSequence returns the next per-request event sequence number.
+func NextGinRequestEventSequence(c *gin.Context) uint64 {
+	if c == nil {
+		return 0
+	}
+	value, exists := c.Get(ginRequestEventSequenceKey)
+	if !exists {
+		seq := &atomic.Uint64{}
+		c.Set(ginRequestEventSequenceKey, seq)
+		return seq.Add(1)
+	}
+	seq, ok := value.(*atomic.Uint64)
+	if !ok || seq == nil {
+		return 0
+	}
+	return seq.Add(1)
 }

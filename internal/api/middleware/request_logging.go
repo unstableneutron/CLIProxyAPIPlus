@@ -42,9 +42,11 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
+		requestEventLogger := logging.RequestEventLoggerFromRequestLogger(logger)
+		requestEventsEnabled := requestEventLogger != nil && requestEventLogger.IsEnabled()
 
 		// Capture request information
-		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
+		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled || requestEventsEnabled, c.Request))
 		if err != nil {
 			// Log error but continue processing
 			// In a real implementation, you might want to use a proper logger here
@@ -57,7 +59,12 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
+		wrapper.nextRequestEventSequence = func() uint64 {
+			return logging.NextGinRequestEventSequence(c)
+		}
 		c.Writer = wrapper
+		logging.SetGinRequestEventLogger(c, requestEventLogger)
+		emitClientRequestEvents(c, requestEventLogger, requestInfo)
 		attachRequestLogSources(c, logger, loggerEnabled)
 
 		// Process the request
@@ -69,6 +76,58 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			// In a real implementation, you might want to use a proper logger here
 		}
 	}
+}
+
+func emitClientRequestEvents(c *gin.Context, eventLogger *logging.AsyncRequestEventLogger, requestInfo *RequestInfo) {
+	if c == nil || eventLogger == nil || !eventLogger.IsEnabled() || requestInfo == nil {
+		return
+	}
+	start := newClientRequestEvent(c, eventLogger, requestInfo, "request.start")
+	eventLogger.Emit(start)
+	if len(requestInfo.Body) == 0 {
+		return
+	}
+	body := newClientRequestEvent(c, eventLogger, requestInfo, "request.body")
+	body.SetPayloadBytes(requestInfo.Body)
+	eventLogger.Emit(body)
+}
+
+func newClientRequestEvent(c *gin.Context, eventLogger *logging.AsyncRequestEventLogger, requestInfo *RequestInfo, eventName string) *logging.RequestEvent {
+	event := eventLogger.AcquireEvent()
+	event.RequestID = requestInfo.RequestID
+	event.Sequence = logging.NextGinRequestEventSequence(c)
+	event.Event = eventName
+	event.Boundary = "client_to_proxy"
+	event.Direction = "inbound"
+	event.Protocol = "http"
+	if c != nil && c.Request != nil {
+		event.ContentType = c.Request.Header.Get("Content-Type")
+	}
+	event.HTTP = &logging.RequestEventHTTP{
+		Method:         requestInfo.Method,
+		URL:            requestInfo.URL,
+		RequestHeaders: cloneMaskedHeaders(requestInfo.Headers),
+	}
+	return event
+}
+
+func cloneMaskedHeaders(headers map[string][]string) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	cloned := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		if values == nil {
+			cloned[key] = nil
+			continue
+		}
+		masked := make([]string, len(values))
+		for i, value := range values {
+			masked[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		cloned[key] = masked
+	}
+	return cloned
 }
 
 type fileBodySourceFactory interface {

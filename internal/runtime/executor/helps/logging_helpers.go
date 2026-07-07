@@ -58,13 +58,224 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.RequestLog && !cfg.CommercialMode
 }
 
-// RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
-func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !requestLogCaptureEnabled(cfg) {
+func emitAPIRequestEvent(ginCtx *gin.Context, info UpstreamRequestLog) {
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
 		return
 	}
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = "api.request"
+	event.Boundary = "proxy_to_provider"
+	event.Direction = "outbound"
+	event.Protocol = "http"
+	event.ContentType = info.Headers.Get("Content-Type")
+	event.HTTP = &logging.RequestEventHTTP{
+		Method:         info.Method,
+		URL:            info.URL,
+		RequestHeaders: maskedHTTPHeaders(info.Headers),
+	}
+	event.Upstream = &logging.RequestEventUpstream{
+		URL:       info.URL,
+		Method:    info.Method,
+		Provider:  info.Provider,
+		AuthID:    info.AuthID,
+		AuthLabel: info.AuthLabel,
+		AuthType:  info.AuthType,
+	}
+	event.SetPayloadBytes(info.Body)
+	eventLogger.Emit(event)
+}
+
+func emitAPIResponseMetadataEvent(ginCtx *gin.Context, status int, headers http.Header) {
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	contentType := headers.Get("Content-Type")
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = "api.response.headers"
+	event.Boundary = "provider_to_proxy"
+	event.Direction = "inbound"
+	event.Protocol = protocolFromContentType(contentType)
+	event.ContentType = contentType
+	event.HTTP = &logging.RequestEventHTTP{
+		StatusCode:      status,
+		ResponseHeaders: maskedHTTPHeaders(headers),
+	}
+	eventLogger.Emit(event)
+}
+
+func emitAPIResponsePayloadEvent(ctx context.Context, ginCtx *gin.Context, eventName string, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	headers := logging.GetResponseHeaders(ctx)
+	contentType := headers.Get("Content-Type")
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = eventName
+	event.Boundary = "provider_to_proxy"
+	event.Direction = "inbound"
+	event.Protocol = protocolFromContentType(contentType)
+	event.ContentType = contentType
+	event.HTTP = &logging.RequestEventHTTP{
+		ResponseHeaders: maskedHTTPHeaders(headers),
+	}
+	event.SetPayloadBytes(payload)
+	eventLogger.Emit(event)
+}
+
+func emitAPIResponseChunkEvent(ginCtx *gin.Context, ctx context.Context, payload []byte) {
+	emitAPIResponsePayloadEvent(ctx, ginCtx, "api.response.body", payload)
+}
+
+func emitAPIErrorEvent(ginCtx *gin.Context, eventName string, stage string, err error) {
+	if err == nil {
+		return
+	}
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = eventName
+	event.Boundary = "provider_to_proxy"
+	event.Direction = "inbound"
+	event.Protocol = "http"
+	event.ContentType = "text/plain"
+	event.Error = &logging.RequestEventError{
+		Stage:   strings.TrimSpace(stage),
+		Message: err.Error(),
+	}
+	event.SetPayloadBytes([]byte(err.Error()))
+	eventLogger.Emit(event)
+}
+
+func emitAPIWebsocketRequestEvent(ginCtx *gin.Context, info UpstreamRequestLog) {
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = "api.websocket.request"
+	event.Boundary = "proxy_to_provider"
+	event.Direction = "outbound"
+	event.Protocol = "websocket"
+	event.ContentType = info.Headers.Get("Content-Type")
+	event.HTTP = &logging.RequestEventHTTP{
+		Method:         info.Method,
+		URL:            info.URL,
+		RequestHeaders: maskedHTTPHeaders(info.Headers),
+	}
+	event.Upstream = &logging.RequestEventUpstream{
+		URL:       info.URL,
+		Method:    info.Method,
+		Provider:  info.Provider,
+		AuthID:    info.AuthID,
+		AuthLabel: info.AuthLabel,
+		AuthType:  info.AuthType,
+	}
+	event.SetPayloadBytes(info.Body)
+	eventLogger.Emit(event)
+}
+
+func emitAPIWebsocketHandshakeEvent(ginCtx *gin.Context, status int, headers http.Header) {
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = "api.websocket.handshake"
+	event.Boundary = "provider_to_proxy"
+	event.Direction = "inbound"
+	event.Protocol = "websocket"
+	event.ContentType = headers.Get("Content-Type")
+	event.HTTP = &logging.RequestEventHTTP{
+		StatusCode:      status,
+		ResponseHeaders: maskedHTTPHeaders(headers),
+	}
+	eventLogger.Emit(event)
+}
+
+func emitAPIWebsocketResponseEvent(ginCtx *gin.Context, payload []byte) {
+	emitAPIWebsocketEvent(ginCtx, "api.websocket.response", "inbound", payload)
+}
+
+func emitAPIWebsocketEvent(ginCtx *gin.Context, eventName string, direction string, payload []byte) {
+	eventLogger := logging.GetGinRequestEventLogger(ginCtx)
+	if eventLogger == nil {
+		return
+	}
+	event := eventLogger.AcquireEvent()
+	event.RequestID = logging.GetGinRequestID(ginCtx)
+	event.Sequence = logging.NextGinRequestEventSequence(ginCtx)
+	event.Event = eventName
+	event.Protocol = "websocket"
+	event.ContentType = "application/json"
+	event.Direction = direction
+	if direction == "outbound" {
+		event.Boundary = "proxy_to_provider"
+	} else {
+		event.Boundary = "provider_to_proxy"
+	}
+	event.SetPayloadBytes(payload)
+	eventLogger.Emit(event)
+}
+
+func maskedHTTPHeaders(headers http.Header) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	masked := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		if values == nil {
+			masked[key] = nil
+			continue
+		}
+		copied := make([]string, len(values))
+		for i, value := range values {
+			copied[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		masked[key] = copied
+	}
+	return masked
+}
+
+func protocolFromContentType(contentType string) string {
+	lower := strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case strings.Contains(lower, "text/event-stream"):
+		return "sse"
+	case strings.Contains(lower, "application/vnd.amazon.eventstream"):
+		return "aws-eventstream"
+	default:
+		return "http"
+	}
+}
+
+// RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
+func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIRequestEvent(ginCtx, info)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 
@@ -147,11 +358,12 @@ func RecordAPIHTTPResponseMetadata(ctx context.Context, cfg *config.Config, resp
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIResponseMetadataEvent(ginCtx, status, headers)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -175,11 +387,15 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIErrorEvent(ginCtx, "api.response.error", "api.response", err)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -200,15 +416,16 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIResponseChunkEvent(ginCtx, ctx, chunk)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -244,11 +461,12 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIWebsocketRequestEvent(ginCtx, info)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 
@@ -286,11 +504,12 @@ func RecordAPIWebsocketHandshakeResponse(ctx context.Context, cfg *config.Config
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIWebsocketHandshakeEvent(ginCtx, status, headers)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 
@@ -310,14 +529,6 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.
 func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
-		return
-	}
-
 	RecordAPIRequest(ctx, cfg, info)
 	RecordAPIResponseMetadata(ctx, cfg, status, headers)
 	AppendAPIResponseChunk(ctx, cfg, body)
@@ -344,15 +555,16 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if !requestLogCaptureEnabled(cfg) {
-		return
-	}
 	data := bytes.TrimSpace(payload)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIWebsocketResponseEvent(ginCtx, payload)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	markAPIResponseTimestamp(ginCtx)
@@ -368,11 +580,15 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	emitAPIErrorEvent(ginCtx, "api.websocket.error", stage, err)
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	markAPIResponseTimestamp(ginCtx)
