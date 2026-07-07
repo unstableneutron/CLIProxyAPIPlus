@@ -10,6 +10,9 @@ const (
 	// GeminiInteractions represents the native Google Interactions API provider identifier.
 	GeminiInteractions = "gemini-interactions"
 
+	// GeminiCLI represents the Google Gemini CLI provider identifier.
+	GeminiCLI = "gemini-cli"
+
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 
@@ -27,4 +30,10 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
+	Kiro = "kiro"
+
+	// Kilo represents the Kilo AI provider identifier.
+	Kilo = "kilo"
 )

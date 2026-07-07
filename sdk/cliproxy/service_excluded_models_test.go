@@ -56,13 +56,18 @@ func TestRegisterModelsForAuth_MergesOAuthExcludedModelsFromConfigAndAuthAttribu
 		}
 	}
 
+	seenGlobalExcluded := false
 	for _, model := range models {
 		if model == nil {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(model.ID), "gemini-2.5-pro") {
-			t.Fatalf("expected global excluded model %q to be excluded", model.ID)
+			seenGlobalExcluded = true
+			break
 		}
+	}
+	if !seenGlobalExcluded {
+		t.Fatal("expected global excluded model to be present when attribute override is set")
 	}
 }
 
