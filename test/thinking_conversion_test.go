@@ -12,9 +12,10 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/gemini"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/geminicli"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/interactions"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/xai"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -1040,10 +1041,10 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "128000",
 			expectErr:   false,
 		},
-		// Case 88: Gemini-CLI to Antigravity, budget 8192 → passthrough thinkingBudget
+		// Case 88: Antigravity to Antigravity, budget 8192 → passthrough thinkingBudget
 		{
 			name:            "88",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model(8192)",
 			inputJSON:       `{"model":"antigravity-budget-model(8192)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
@@ -1052,10 +1053,10 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 89: Gemini-CLI to Antigravity, budget 64000 → clamped to Max
+		// Case 89: Antigravity to Antigravity, budget 64000 → clamped to Max
 		{
 			name:            "89",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model(64000)",
 			inputJSON:       `{"model":"antigravity-budget-model(64000)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
@@ -1066,7 +1067,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 		},
 
 		// Gemini Family Cross-Channel Consistency (Cases 90-95)
-		// Tests that gemini/gemini-cli/antigravity as same API family should have consistent validation behavior
+		// Tests that gemini/antigravity as same API family should have consistent validation behavior
 
 		// Case 90: Gemini to Antigravity, budget 64000 (suffix) → clamped to Max
 		{
@@ -1076,42 +1077,6 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:           "gemini-budget-model(64000)",
 			inputJSON:       `{"model":"gemini-budget-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "20000",
-			includeThoughts: "true",
-			expectErr:       false,
-		},
-		// Case 91: Gemini to Gemini-CLI, budget 64000 (suffix) → clamped to Max
-		{
-			name:            "91",
-			from:            "gemini",
-			to:              "gemini-cli",
-			model:           "gemini-budget-model(64000)",
-			inputJSON:       `{"model":"gemini-budget-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "20000",
-			includeThoughts: "true",
-			expectErr:       false,
-		},
-		// Case 92: Gemini-CLI to Antigravity, budget 64000 (suffix) → clamped to Max
-		{
-			name:            "92",
-			from:            "gemini-cli",
-			to:              "antigravity",
-			model:           "gemini-budget-model(64000)",
-			inputJSON:       `{"model":"gemini-budget-model(64000)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "20000",
-			includeThoughts: "true",
-			expectErr:       false,
-		},
-		// Case 93: Gemini-CLI to Gemini, budget 64000 (suffix) → clamped to Max
-		{
-			name:            "93",
-			from:            "gemini-cli",
-			to:              "gemini",
-			model:           "gemini-budget-model(64000)",
-			inputJSON:       `{"model":"gemini-budget-model(64000)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
-			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "20000",
 			includeThoughts: "true",
 			expectErr:       false,
@@ -1127,134 +1092,6 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue:     "8192",
 			includeThoughts: "true",
 			expectErr:       false,
-		},
-		// Case 95: Gemini-CLI to Antigravity, budget 8192 → passthrough (normal value)
-		{
-			name:            "95",
-			from:            "gemini-cli",
-			to:              "antigravity",
-			model:           "gemini-budget-model(8192)",
-			inputJSON:       `{"model":"gemini-budget-model(8192)","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "8192",
-			includeThoughts: "true",
-			expectErr:       false,
-		},
-
-		// GitHub Copilot tests: gpt-5, gpt-5.1, gpt-5.2 (Levels=low/medium/high, some with none/xhigh)
-		// Testing /chat/completions endpoint (openai format) - with suffix
-
-		// Case 112: OpenAI to gpt-5, level high → high
-		{
-			name:        "112",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5(high)",
-			inputJSON:   `{"model":"gpt-5(high)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "high",
-			expectErr:   false,
-		},
-		// Case 113: OpenAI to gpt-5, level none → clamped to low (ZeroAllowed=false)
-		{
-			name:        "113",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5(none)",
-			inputJSON:   `{"model":"gpt-5(none)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "low",
-			expectErr:   false,
-		},
-		// Case 114: OpenAI to gpt-5.1, level none → none (ZeroAllowed=true)
-		{
-			name:        "114",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5.1(none)",
-			inputJSON:   `{"model":"gpt-5.1(none)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "none",
-			expectErr:   false,
-		},
-		// Case 115: OpenAI to gpt-5.2, level xhigh → xhigh
-		{
-			name:        "115",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5.2(xhigh)",
-			inputJSON:   `{"model":"gpt-5.2(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "xhigh",
-			expectErr:   false,
-		},
-		// Case 116: OpenAI to gpt-5, level xhigh (out of range) → error
-		{
-			name:        "116",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5(xhigh)",
-			inputJSON:   `{"model":"gpt-5(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
-		},
-		// Case 117: Claude to gpt-5.1, budget 0 → none (ZeroAllowed=true)
-		{
-			name:        "117",
-			from:        "claude",
-			to:          "github-copilot",
-			model:       "gpt-5.1(0)",
-			inputJSON:   `{"model":"gpt-5.1(0)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_effort",
-			expectValue: "none",
-			expectErr:   false,
-		},
-
-		// GitHub Copilot tests: /responses endpoint (codex format) - with suffix
-
-		// Case 118: OpenAI-Response to gpt-5-codex, level high → high
-		{
-			name:        "118",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5-codex(high)",
-			inputJSON:   `{"model":"gpt-5-codex(high)","input":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning.effort",
-			expectValue: "high",
-			expectErr:   false,
-		},
-		// Case 119: OpenAI-Response to gpt-5.2-codex, level xhigh → xhigh
-		{
-			name:        "119",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5.2-codex(xhigh)",
-			inputJSON:   `{"model":"gpt-5.2-codex(xhigh)","input":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning.effort",
-			expectValue: "xhigh",
-			expectErr:   false,
-		},
-		// Case 120: OpenAI-Response to gpt-5.2-codex, level none → none
-		{
-			name:        "120",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5.2-codex(none)",
-			inputJSON:   `{"model":"gpt-5.2-codex(none)","input":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning.effort",
-			expectValue: "none",
-			expectErr:   false,
-		},
-		// Case 121: OpenAI-Response to gpt-5-codex, level none → clamped to low (ZeroAllowed=false)
-		{
-			name:        "121",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5-codex(none)",
-			inputJSON:   `{"model":"gpt-5-codex(none)","input":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning.effort",
-			expectValue: "low",
-			expectErr:   false,
 		},
 	}
 
@@ -1640,16 +1477,6 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   false,
 		},
-		// Case 31B: reasoning_effort=none with zero allowed to Gemini CLI → delete thinkingConfig
-		{
-			name:        "31B",
-			from:        "openai",
-			to:          "gemini-cli",
-			model:       "gemini-zero-mixed-model",
-			inputJSON:   `{"model":"gemini-zero-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
-			expectField: "",
-			expectErr:   false,
-		},
 		// Case 31C: reasoning_effort=none with zero allowed to Antigravity → delete thinkingConfig
 		{
 			name:        "31C",
@@ -1665,16 +1492,6 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			name:        "31D",
 			from:        "openai-response",
 			to:          "gemini",
-			model:       "gemini-zero-mixed-model",
-			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 31E: reasoning.effort=none with zero allowed to Gemini CLI → delete thinkingConfig
-		{
-			name:        "31E",
-			from:        "openai-response",
-			to:          "gemini-cli",
 			model:       "gemini-zero-mixed-model",
 			inputJSON:   `{"model":"gemini-zero-mixed-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
 			expectField: "",
@@ -2319,10 +2136,10 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 88: Gemini-CLI to Antigravity, thinkingBudget=8192 → passthrough
+		// Case 88: Antigravity to Antigravity, thinkingBudget=8192 → passthrough
 		{
 			name:            "88",
-			from:            "gemini-cli",
+			from:            "antigravity",
 			to:              "antigravity",
 			model:           "antigravity-budget-model",
 			inputJSON:       `{"model":"antigravity-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}}`,
@@ -2331,10 +2148,10 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 89: Gemini-CLI to Antigravity, thinkingBudget=64000 → exceeds Max error
+		// Case 89: Antigravity to Antigravity, thinkingBudget=64000 → exceeds Max error
 		{
 			name:        "89",
-			from:        "gemini-cli",
+			from:        "antigravity",
 			to:          "antigravity",
 			model:       "antigravity-budget-model",
 			inputJSON:   `{"model":"antigravity-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}}`,
@@ -2343,7 +2160,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 		},
 
 		// Gemini Family Cross-Channel Consistency (Cases 90-95)
-		// Tests that gemini/gemini-cli/antigravity as same API family should have consistent validation behavior
+		// Tests that gemini/antigravity as same API family should have consistent validation behavior
 
 		// Case 90: Gemini to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
 		{
@@ -2352,36 +2169,6 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			to:          "antigravity",
 			model:       "gemini-budget-model",
 			inputJSON:   `{"model":"gemini-budget-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
-			expectField: "",
-			expectErr:   true,
-		},
-		// Case 91: Gemini to Gemini-CLI, thinkingBudget=64000 → exceeds Max error (same family strict validation)
-		{
-			name:        "91",
-			from:        "gemini",
-			to:          "gemini-cli",
-			model:       "gemini-budget-model",
-			inputJSON:   `{"model":"gemini-budget-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
-			expectField: "",
-			expectErr:   true,
-		},
-		// Case 92: Gemini-CLI to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
-		{
-			name:        "92",
-			from:        "gemini-cli",
-			to:          "antigravity",
-			model:       "gemini-budget-model",
-			inputJSON:   `{"model":"gemini-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}}`,
-			expectField: "",
-			expectErr:   true,
-		},
-		// Case 93: Gemini-CLI to Gemini, thinkingBudget=64000 → exceeds Max error (same family strict validation)
-		{
-			name:        "93",
-			from:        "gemini-cli",
-			to:          "gemini",
-			model:       "gemini-budget-model",
-			inputJSON:   `{"model":"gemini-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}}`,
 			expectField: "",
 			expectErr:   true,
 		},
@@ -2397,133 +2184,209 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 95: Gemini-CLI to Antigravity, thinkingBudget=8192 → passthrough (normal value)
-		{
-			name:            "95",
-			from:            "gemini-cli",
-			to:              "antigravity",
-			model:           "gemini-budget-model",
-			inputJSON:       `{"model":"gemini-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "8192",
-			includeThoughts: "true",
-			expectErr:       false,
-		},
+	}
 
-		// GitHub Copilot tests: gpt-5, gpt-5.1, gpt-5.2 (Levels=low/medium/high, some with none/xhigh)
-		// Testing /chat/completions endpoint (openai format) - with body params
+	runThinkingTests(t, cases)
+}
 
-		// Case 112: OpenAI to gpt-5, reasoning_effort=high → high
+// TestThinkingE2ENewProviderTargets covers provider-specific targets that do not
+// have their own public translator format but do have ApplyThinking providers.
+func TestThinkingE2ENewProviderTargets(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-e2e-new-providers-%d", time.Now().UnixNano())
+
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		// Kimi target: enabled thinking uses reasoning_effort, explicit disable uses thinking.type=disabled.
 		{
-			name:        "112",
+			name:        "K1",
 			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5",
-			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			to:          "kimi",
+			model:       "kimi-level-model(high)",
+			inputJSON:   `{"model":"kimi-level-model(high)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning_effort",
 			expectValue: "high",
-			expectErr:   false,
 		},
-		// Case 113: OpenAI to gpt-5, reasoning_effort=none → clamped to low (ZeroAllowed=false)
 		{
-			name:        "113",
+			name:        "K2",
 			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5",
-			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			to:          "kimi",
+			model:       "kimi-level-model(none)",
+			inputJSON:   `{"model":"kimi-level-model(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K3",
+			from:        "gemini",
+			to:          "kimi",
+			model:       "kimi-level-model(32768)",
+			inputJSON:   `{"model":"kimi-level-model(32768)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "low",
-			expectErr:   false,
+			expectValue: "high",
 		},
-		// Case 114: OpenAI to gpt-5.1, reasoning_effort=none → none (ZeroAllowed=true)
 		{
-			name:        "114",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5.1",
-			inputJSON:   `{"model":"gpt-5.1","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
-			expectField: "reasoning_effort",
-			expectValue: "none",
-			expectErr:   false,
-		},
-		// Case 115: OpenAI to gpt-5.2, reasoning_effort=xhigh → xhigh
-		{
-			name:        "115",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5.2",
-			inputJSON:   `{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "reasoning_effort",
-			expectValue: "xhigh",
-			expectErr:   false,
-		},
-		// Case 116: OpenAI to gpt-5, reasoning_effort=xhigh (out of range) → error
-		{
-			name:        "116",
-			from:        "openai",
-			to:          "github-copilot",
-			model:       "gpt-5",
-			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
-		},
-		// Case 117: Claude to gpt-5.1, thinking.budget_tokens=0 → none (ZeroAllowed=true)
-		{
-			name:        "117",
+			name:        "K4",
 			from:        "claude",
-			to:          "github-copilot",
-			model:       "gpt-5.1",
-			inputJSON:   `{"model":"gpt-5.1","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			to:          "kimi",
+			model:       "kimi-level-model(0)",
+			inputJSON:   `{"model":"kimi-level-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K5",
+			from:        "openai",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
 			expectField: "reasoning_effort",
-			expectValue: "none",
-			expectErr:   false,
+			expectValue: "high",
+		},
+		{
+			name:        "K6",
+			from:        "openai-response",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+		},
+		{
+			name:        "K7",
+			from:        "gemini",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+		},
+		{
+			name:        "K8",
+			from:        "claude",
+			to:          "kimi",
+			model:       "kimi-level-model",
+			inputJSON:   `{"model":"kimi-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
 		},
 
-		// GitHub Copilot tests: /responses endpoint (codex format) - with body params
-
-		// Case 118: OpenAI-Response to gpt-5-codex, reasoning.effort=high → high
+		// xAI target: Grok uses Responses-compatible reasoning.effort with Grok-specific levels.
 		{
-			name:        "118",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5-codex",
-			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"high"}}`,
+			name:        "X1",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model(high)",
+			inputJSON:   `{"model":"xai-level-model(high)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
 			expectValue: "high",
-			expectErr:   false,
 		},
-		// Case 119: OpenAI-Response to gpt-5.2-codex, reasoning.effort=xhigh → xhigh
 		{
-			name:        "119",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5.2-codex",
-			inputJSON:   `{"model":"gpt-5.2-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"xhigh"}}`,
+			name:        "X2",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model(xhigh)",
+			inputJSON:   `{"model":"xai-level-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "xhigh",
-			expectErr:   false,
+			expectValue: "high",
 		},
-		// Case 120: OpenAI-Response to gpt-5.2-codex, reasoning.effort=none → none
 		{
-			name:        "120",
+			name:        "X3",
 			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5.2-codex",
-			inputJSON:   `{"model":"gpt-5.2-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			to:          "xai",
+			model:       "xai-level-model(max)",
+			inputJSON:   `{"model":"xai-level-model(max)","input":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "none",
-			expectErr:   false,
+			expectValue: "high",
 		},
-		// Case 121: OpenAI-Response to gpt-5-codex, reasoning.effort=none → clamped to low (ZeroAllowed=false)
 		{
-			name:        "121",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5-codex",
-			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			name:        "X4",
+			from:        "gemini",
+			to:          "xai",
+			model:       "xai-level-model(512)",
+			inputJSON:   `{"model":"xai-level-model(512)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning.effort",
 			expectValue: "low",
-			expectErr:   false,
+		},
+		{
+			name:        "X5",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model(0)",
+			inputJSON:   `{"model":"xai-level-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+		},
+		{
+			name:        "X6",
+			from:        "openai",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X7",
+			from:        "openai-response",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"minimal"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+		},
+		{
+			name:        "X8",
+			from:        "gemini",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+		{
+			name:        "X9",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+		},
+		{
+			name:        "X10",
+			from:        "claude",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
+
+		// Interactions target: native API uses generation_config.thinking_level and thinking_summaries.
+		{
+			name:         "I1",
+			from:         "interactions",
+			to:           "interactions",
+			model:        "gemini-zero-mixed-model",
+			inputJSON:    `{"model":"gemini-zero-mixed-model","generation_config":{"thinking_level":"high","thinking_summaries":"auto"},"input":"hi"}`,
+			expectField:  "generation_config.thinking_level",
+			expectValue:  "high",
+			expectField2: "generation_config.thinking_summaries",
+			expectValue2: "auto",
+		},
+		{
+			name:         "I2",
+			from:         "interactions",
+			to:           "interactions",
+			model:        "gemini-zero-mixed-model(8192)",
+			inputJSON:    `{"model":"gemini-zero-mixed-model(8192)","input":"hi"}`,
+			expectField:  "generation_config.thinking_level",
+			expectValue:  "medium",
+			expectField2: "generation_config.thinking_summaries",
+			expectValue2: "auto",
 		},
 	}
 
@@ -3114,9 +2977,27 @@ func getTestModels() []*registry.ModelInfo {
 			Object:      "model",
 			Created:     1700000000,
 			OwnedBy:     "test",
-			Type:        "gemini-cli",
+			Type:        "antigravity",
 			DisplayName: "Antigravity Budget Model",
 			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 20000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:          "kimi-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "moonshot",
+			Type:        "kimi",
+			DisplayName: "Kimi Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "xai-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "xai",
+			Type:        "xai",
+			DisplayName: "xAI Level Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
 			ID:          "no-thinking-model",
@@ -3137,69 +3018,6 @@ func getTestModels() []*registry.ModelInfo {
 			UserDefined: true,
 			Thinking:    nil,
 		},
-		{
-			ID:          "glm-test",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "test",
-			Type:        "iflow",
-			DisplayName: "GLM Test Model",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:          "minimax-test",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "test",
-			Type:        "iflow",
-			DisplayName: "MiniMax Test Model",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:          "gpt-5",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "GPT-5",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
-		},
-		{
-			ID:          "gpt-5.1",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "GPT-5.1",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
-		},
-		{
-			ID:          "gpt-5.2",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "GPT-5.2",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
-		},
-		{
-			ID:          "gpt-5-codex",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "GPT-5 Codex",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
-		},
-		{
-			ID:          "gpt-5.2-codex",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "github-copilot",
-			Type:        "github-copilot",
-			DisplayName: "GPT-5.2 Codex",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
-		},
 	}
 }
 
@@ -3214,18 +3032,11 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
-			if tc.to == "iflow" {
+			switch applyTo {
+			case "kimi":
 				translateTo = "openai"
-				applyTo = "iflow"
-			}
-			if tc.to == "github-copilot" {
-				if tc.from == "openai-response" {
-					translateTo = "codex"
-					applyTo = "codex"
-				} else {
-					translateTo = "openai"
-					applyTo = "openai"
-				}
+			case "xai":
+				translateTo = "codex"
 			}
 
 			body := sdktranslator.TranslateRequest(
@@ -3256,8 +3067,6 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				switch tc.to {
 				case "gemini":
 					hasThinking = gjson.GetBytes(body, "generationConfig.thinkingConfig").Exists()
-				case "gemini-cli":
-					hasThinking = gjson.GetBytes(body, "request.generationConfig.thinkingConfig").Exists()
 				case "antigravity":
 					hasThinking = gjson.GetBytes(body, "request.generationConfig.thinkingConfig").Exists()
 				case "claude":
@@ -3292,9 +3101,9 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				assertField(tc.expectField2, tc.expectValue2)
 			}
 
-			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "gemini-cli" || tc.to == "antigravity") {
+			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "antigravity") {
 				path := "generationConfig.thinkingConfig.includeThoughts"
-				if tc.to == "gemini-cli" || tc.to == "antigravity" {
+				if tc.to == "antigravity" {
 					path = "request.generationConfig.thinkingConfig.includeThoughts"
 				}
 				itVal := gjson.GetBytes(body, path)

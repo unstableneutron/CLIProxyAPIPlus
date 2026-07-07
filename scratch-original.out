@@ -1,0 +1,39 @@
+conflicts=true
+conflict_files<<EOF_conflict_files_76981_16446
+config.example.yaml
+internal/config/config.go
+internal/constant/constant.go
+internal/runtime/executor/helps/usage_helpers.go
+internal/runtime/executor/helps/usage_helpers_test.go
+internal/translator/init.go
+internal/watcher/synthesizer/config.go
+internal/watcher/watcher_test.go
+sdk/cliproxy/service.go
+test/thinking_conversion_test.go
+EOF_conflict_files_76981_16446
+conflict_table<<EOF_conflict_table_76981_31683
+| `config.example.yaml` | `shared-hotspot` |
+| `internal/config/config.go` | `shared-hotspot` |
+| `internal/constant/constant.go` | `shared-hotspot` |
+| `internal/runtime/executor/helps/usage_helpers.go` | `shared-hotspot` |
+| `internal/runtime/executor/helps/usage_helpers_test.go` | `shared-hotspot` |
+| `internal/translator/init.go` | `shared-hotspot` |
+| `internal/watcher/synthesizer/config.go` | `shared-hotspot` |
+| `internal/watcher/watcher_test.go` | `shared-hotspot` |
+| `sdk/cliproxy/service.go` | `shared-hotspot` |
+| `test/thinking_conversion_test.go` | `shared-hotspot` |
+EOF_conflict_table_76981_31683
+ownership_clobber_files=
+overlay_at_risk_report=/tmp/overlay-at-risk-original.diff
+overlay_at_risk_summary<<EOF_overlay_at_risk_summary_76981_10503
+| `config.example.yaml` | `7` |
+| `internal/config/config.go` | `31` |
+| `internal/constant/constant.go` | `2` |
+| `internal/runtime/executor/helps/usage_helpers.go` | `3` |
+| `internal/runtime/executor/helps/usage_helpers_test.go` | `1` |
+| `internal/translator/init.go` | `1` |
+| `internal/watcher/synthesizer/config.go` | `12` |
+| `internal/watcher/watcher_test.go` | `3` |
+| `sdk/cliproxy/service.go` | `20` |
+| `test/thinking_conversion_test.go` | `18` |
+EOF_overlay_at_risk_summary_76981_10503

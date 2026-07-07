@@ -170,8 +170,8 @@ routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
-  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
-  # X-Client-Request-Id (PI), conversation_id, or first few messages hash.
+  # X-Session-ID, Session_id (Codex), X-Client-Request-Id (PI), conversation_id,
+  # or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
@@ -184,23 +184,9 @@ codex:
   # Some superstitious users believe request tracking identifiers can be used
   # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
   identity-confuse: false
-  # Optional Codex reasoning truncation folding. Default is disabled.
-  continue-thinking:
-    enabled: false
-    method: rewind # rewind | replay
-    truncation-step: 518
-    max-rounds: 8
-    min-tier: 1
-    max-tier: 0
-    max-total-output-tokens: 0
-    marker-text: "Continue thinking..."
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
-
-# When true, enable Gemini CLI internal endpoints (/v1internal:*).
-# Default is false for safety.
-enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -238,6 +224,24 @@ nonstream-keepalive-interval: 0
 #       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
+
+# Native Interactions API keys
+# These keys are used only for direct /v1beta/interactions execution. Regular gemini-api-key entries still
+# send Gemini generateContent/streamGenerateContent requests when the client enters through the interactions API.
+# interactions-api-key:
+#   - api-key: "AIzaSy...03"
+#     prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://generativelanguage.googleapis.com"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080"
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "gemini-2.5-flash" # upstream model name
+#         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#     excluded-models:
+#       - "gemini-2.5-pro"
 
 # Codex API keys
 # codex-api-key:
@@ -326,7 +330,6 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
-#     api-key-env: "OPENAI_COMPAT_API_KEY" # optional: add one API key from this environment variable.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -353,37 +356,6 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
-# Bedrock Runtime providers
-# Bedrock requests are translated from OpenAI Chat, OpenAI Responses, and Anthropic Messages
-# into Converse, ConverseStream, Invoke, or InvokeStream shapes based on per-model config.
-# Invoke/InvokeStream currently use Anthropic Messages-style Bedrock payloads; use Converse
-# for non-Anthropic Bedrock models unless a model-specific invoke adapter is added.
-# bedrock:
-#   - name: "llm-fusion-bedrock"
-#     disabled: false
-#     prefix: "bedrock"
-#     base-url: "https://llm-fusion-hub.example/api/v2/proxy/aws/bedrock"
-#     auth:
-#       type: "bearer" # bearer -> Authorization: Bearer <key>; raw -> Authorization: <key>; none -> custom headers only.
-#       api-key-env: "BEDROCK_RUNTIME_API_KEY"
-#       headers:
-#         X-Custom-Auth-Header: "custom-value"
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     query-params:
-#       trace: "1"
-#     models:
-#       - name: "global.anthropic.claude-sonnet-5"
-#         alias: "sonnet-5"
-#         api: "converse"
-#         stream-api: "converse-stream"
-#       - name: "anthropic.claude-3-5-sonnet-20241022-v2:0"
-#         alias: "sonnet-legacy"
-#         api: "invoke"
-#         stream-api: "invoke-stream"
-#     excluded-models:
-#       - "disabled-model-*"
-
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
@@ -402,48 +374,13 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
-# Amp Integration
-# ampcode:
-#   # Configure upstream URL for Amp CLI OAuth and management features
-#   upstream-url: "https://ampcode.com"
-#   # Optional: Override API key for Amp upstream (otherwise uses env or file)
-#   upstream-api-key: ""
-#   # Per-client upstream API key mapping
-#   # Maps client API keys (from top-level api-keys) to different Amp upstream API keys.
-#   # Useful when different clients need to use different Amp accounts/quotas.
-#   # If a client key isn't mapped, falls back to upstream-api-key (default behavior).
-#   upstream-api-keys:
-#     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
-#       api-keys:                                 # Client keys that use this upstream key
-#         - "your-api-key-1"
-#         - "your-api-key-2"
-#     - upstream-api-key: "amp_key_for_team_b"
-#       api-keys:
-#         - "your-api-key-3"
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
-#   restrict-management-to-localhost: false
-#   # Force model mappings to run before checking local API keys (default: false)
-#   force-model-mappings: false
-#   # Amp Model Mappings
-#   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
-#   # but you have a similar model available (e.g., Claude Sonnet 4).
-#   model-mappings:
-#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
-#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
-#     - from: "claude-sonnet-4-5-20250929"
-#       to: "gemini-claude-sonnet-4-5-thinking"
-#     - from: "claude-haiku-4-5-20251001"
-#       to: "gemini-2.5-flash"
-
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
-# Because aliases affect the merged /v1 model list and merged request routing, overlapping
-# client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
-# you select the protocol surface, but inference backend selection can still follow the resolved
-# model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
+# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
+# client-visible names can become ambiguous across providers. For strict backend pinning, use
+# unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # Optional per-entry flags:
 #   fork: true          # keep the upstream model and also expose the alias as a separate client-visible model
@@ -460,10 +397,6 @@ nonstream-keepalive-interval: 0
 #   ]
 # }
 # oauth-model-alias:
-#   gemini-cli:
-#     - name: "gemini-2.5-pro"          # original model name under this channel
-#       alias: "g2.5p"                  # client-visible alias
-#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
@@ -487,22 +420,12 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
-#   qoder:                            # plugin provider keys are supported for OAuth plugins
-#     - name: "auto"
-#       alias: "qoder-auto"
-#     - name: "qmodel_latest"
-#       alias: "qlatest"
 #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
 #     - name: "sample-model-latest"
 #       alias: "sample-latest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   vertex:
 #     - "gemini-3-pro-preview"
 #   aistudio:

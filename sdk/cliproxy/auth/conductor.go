@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -1281,6 +1282,10 @@ func (m *Manager) resolveAPIKeyModelAliasWithResult(auth *Auth, requestedModel s
 		if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "gemini-interactions":
+		if entry := resolveInteractionsAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	case "claude":
 		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
@@ -1837,7 +1842,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel, executionModel string, execModels []string, pooled bool, aliasResult OAuthModelAliasResult) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -1848,6 +1853,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		recordProxySelection(ctx, auth, routeModel, execModel)
 		execReq := req
 		execReq.Model = execModel
+		if executionModel != "" {
+			execReq.Model = executionModel
+		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
@@ -1977,6 +1985,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		switch provider {
 		case "gemini":
 			if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "gemini-interactions":
+			if entry := resolveInteractionsAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		case "claude":
@@ -2305,17 +2317,18 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -2342,17 +2355,18 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -2373,17 +2387,18 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return nil, errWait
 		}
 	}
@@ -2499,7 +2514,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -2526,7 +2542,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2559,6 +2575,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
+			if restoreExecutionModel {
+				execReq.Model = executionModel
+			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
@@ -2602,7 +2621,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -2629,7 +2649,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2662,6 +2682,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
+			if restoreExecutionModel {
+				execReq.Model = executionModel
+			}
 			execOpts := opts
 			execReq, execOpts = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
@@ -2705,7 +2728,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	routeModel := req.Model
+	routeModel := authSelectionModelFromOptions(opts, req.Model)
+	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -2732,7 +2756,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2758,7 +2782,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled, aliasResult)
+		streamExecutionModel := ""
+		if restoreExecutionModel {
+			streamExecutionModel = executionModel
+		}
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, streamExecutionModel, models, pooled, aliasResult)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -2807,6 +2835,40 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
 	opts.Metadata = meta
 	return opts
+}
+
+func authSelectionModelFromOptions(opts cliproxyexecutor.Options, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	if len(opts.Metadata) == 0 {
+		return fallback
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]
+	if !ok || raw == nil {
+		return fallback
+	}
+	switch value := raw.(type) {
+	case string:
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	case []byte:
+		if strings.TrimSpace(string(value)) != "" {
+			return strings.TrimSpace(string(value))
+		}
+	}
+	return fallback
+}
+
+func executionModelForAuthSelection(opts cliproxyexecutor.Options, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", false
+	}
+	selectionModel := authSelectionModelFromOptions(opts, model)
+	if selectionModel == model {
+		return "", false
+	}
+	return model, true
 }
 
 func withHomeAuthCount(opts cliproxyexecutor.Options, count int) cliproxyexecutor.Options {
@@ -3102,6 +3164,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	switch provider {
 	case "gemini":
 		upstreamModel = resolveUpstreamModelForGeminiAPIKey(cfg, auth, requestedModel)
+	case "gemini-interactions":
+		upstreamModel = resolveUpstreamModelForInteractionsAPIKey(cfg, auth, requestedModel)
 	case "claude":
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
 	case "codex":
@@ -3175,6 +3239,13 @@ func resolveGeminiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.GeminiKey, auth)
 }
 
+func resolveInteractionsAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.GeminiKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.InteractionsKey, auth)
+}
+
 func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.ClaudeKey {
 	if cfg == nil {
 		return nil
@@ -3212,6 +3283,14 @@ func resolveBedrockAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *interna
 
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForInteractionsAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveInteractionsAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
@@ -3542,11 +3621,37 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	return *retryAfter, true
 }
 
-func waitForCooldown(ctx context.Context, wait time.Duration) error {
+// cooldownWaitJitterCap bounds the random jitter added to cooldown waits so a
+// long wait is never extended by more than this amount.
+const cooldownWaitJitterCap = 2 * time.Second
+
+// jitteredCooldownWait adds a small random delay to a cooldown wait so
+// concurrent requests waiting on the same recovery deadline do not wake in
+// lockstep and stampede the first credential that recovers. The jitter never
+// pushes the total wait past maxWait, which callers have already enforced as
+// the retry ceiling; maxWait <= 0 means no ceiling.
+func jitteredCooldownWait(wait, maxWait time.Duration) time.Duration {
+	if wait <= 0 {
+		return wait
+	}
+	jitterRange := wait / 4
+	if jitterRange > cooldownWaitJitterCap {
+		jitterRange = cooldownWaitJitterCap
+	}
+	if maxWait > 0 && jitterRange > maxWait-wait {
+		jitterRange = maxWait - wait
+	}
+	if jitterRange <= 0 {
+		return wait
+	}
+	return wait + rand.N(jitterRange)
+}
+
+func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 	if wait <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(wait)
+	timer := time.NewTimer(jitteredCooldownWait(wait, maxWait))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -3671,11 +3776,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
-									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-									if cooldown > 0 {
-										next = now.Add(cooldown)
-									}
-									backoffLevel = nextLevel
+									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
 							}
 							state.NextRetryAfter = next
@@ -4191,11 +4292,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if retryAfter != nil {
 				next = now.Add(*retryAfter)
 			} else {
-				cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, disableCooling)
-				if cooldown > 0 {
-					next = now.Add(cooldown)
-				}
-				auth.Quota.BackoffLevel = nextLevel
+				next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 			}
 		}
 		auth.Quota.NextRecoverAt = next
@@ -4212,6 +4309,23 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+// quotaCooldownAfterFailure returns the recovery deadline and backoff level for
+// a quota failure observed at now. Failures that land while a previous quota
+// window is still open reuse that window instead of escalating, so a burst of
+// concurrent in-flight failures advances the backoff ladder at most once per
+// window.
+func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int) {
+	if quota.NextRecoverAt.After(now) {
+		return quota.NextRecoverAt, quota.BackoffLevel
+	}
+	cooldown, nextLevel := nextQuotaCooldown(quota.BackoffLevel, false)
+	var next time.Time
+	if cooldown > 0 {
+		next = now.Add(cooldown)
+	}
+	return next, nextLevel
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
@@ -5255,7 +5369,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, pooled, aliasResult)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult)
 		if errStream != nil {
 			continue
 		}
