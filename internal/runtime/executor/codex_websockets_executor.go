@@ -826,11 +826,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 func (e *CodexWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestPayload []byte, sessionID string) (*cliproxyexecutor.StreamResult, bool, error) {
 	state := getXAIWebsocketIDState(e.idStore, sessionID)
 	if state == nil {
-		return nil, true, codexWebsocketCompactionContextErr()
+		return e.executeCompactionTriggerWithoutWebsocketTranscript(ctx, auth, req, opts)
 	}
 	transcriptInput := state.snapshotTranscriptInput()
 	if len(transcriptInput) == 0 {
-		return nil, true, codexWebsocketCompactionContextErr()
+		return e.executeCompactionTriggerWithoutWebsocketTranscript(ctx, auth, req, opts)
 	}
 	transcriptInput = codexWebsocketCompactionReplayInput(transcriptInput, requestPayload)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -876,8 +876,10 @@ func (e *CodexWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(c
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, true, nil
 }
 
-func codexWebsocketCompactionContextErr() statusErr {
-	return newCodexStatusErr(http.StatusBadRequest, []byte(`{"error":{"message":"websocket compaction requires an active transcript context","type":"invalid_request_error","code":"missing_compaction_context"}}`))
+func (e *CodexWebsocketsExecutor) executeCompactionTriggerWithoutWebsocketTranscript(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool, error) {
+	helps.LogWithRequestID(ctx).Debugf("codex websockets executor: compact trigger falling back without websocket transcript context")
+	streamResult, err := e.CodexExecutor.executeCompactionTriggerStream(ctx, auth, req, opts)
+	return streamResult, true, err
 }
 
 func buildCodexWebsocketCompactionPayload(payload []byte, transcriptInput []byte) ([]byte, error) {
