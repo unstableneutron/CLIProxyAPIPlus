@@ -193,6 +193,46 @@ func TestHandleStreamingResponseCommitsSSEWhileBootstrapWaits(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, executor := newBlockingBootstrapResponsesHandler(t, &sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapTimeoutSeconds: 1},
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+
+	done := make(chan struct{})
+	go func() {
+		h.handleStreamingResponse(c, []byte(`{"model":"test-model","stream":true,"input":[{"type":"compaction_trigger"}]}`))
+		close(done)
+	}()
+
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream bootstrap did not start")
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
+		t.Fatalf("expected bootstrap heartbeat while compact waits, got body %q", body)
+	}
+	select {
+	case <-done:
+		t.Fatalf("handler returned before request cancellation; body=%q", recorder.Body.String())
+	default:
+	}
+
+	cancelReq()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not exit after request cancellation")
+	}
+}
+
 func TestHandleStreamingResponseCommitsSSEWhileFirstChunkWaits(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, executor := newBlockingFirstChunkResponsesHandler(t, &sdkconfig.SDKConfig{})
@@ -259,6 +299,7 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 			flusher,
 			context.Background(),
 			func(...interface{}) {},
+			handlers.StreamingBootstrapTimeout(h.Cfg),
 			func(context.Context) responsesStreamBootstrapResult {
 				return responsesStreamBootstrapResult{data: data, errs: errs}
 			},

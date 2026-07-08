@@ -574,6 +574,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	h.flushCompactKeepAlive(c)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
 		ctx:       cliCtx,
@@ -592,6 +593,18 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	cliCancel()
 }
 
+func (h *OpenAIResponsesAPIHandler) flushCompactKeepAlive(c *gin.Context) {
+	if h == nil || c == nil || handlers.NonStreamingKeepAliveInterval(h.Cfg) <= 0 {
+		return
+	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		return
+	}
+	_, _ = c.Writer.Write([]byte("\n"))
+	flusher.Flush()
+}
+
 func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Context, rawJSON []byte, stream bool) {
 	finishCompaction := h.beginResponsesTurnCompaction(c)
 	defer finishCompaction()
@@ -604,6 +617,7 @@ func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Cont
 	}
 
 	c.Header("Content-Type", "application/json")
+	h.flushCompactKeepAlive(c)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
 		ctx:       cliCtx,
@@ -828,6 +842,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 	framer := &responsesSSEFramer{onCompleted: stateTracker.Complete}
+	bootstrapTimeout := handlers.StreamingBootstrapTimeout(h.Cfg)
+	if isResponsesCompactionTriggerRequest(rawJSON) {
+		bootstrapTimeout = 0
+	}
 	startResponsesStream := func(ctx context.Context) responsesStreamBootstrapResult {
 		data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, h.HandlerType(), modelName, replayPayload, "")
 		return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
@@ -846,6 +864,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		flusher,
 		cliCtx,
 		cliCancel,
+		bootstrapTimeout,
 		startResponsesStream,
 		setSSEHeaders,
 		func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time) {
@@ -874,6 +893,7 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 	flusher http.Flusher,
 	cliCtx context.Context,
 	cliCancel func(...interface{}),
+	bootstrapTimeout time.Duration,
 	start func(context.Context) responsesStreamBootstrapResult,
 	setSSEHeaders func(),
 	forward func(data <-chan []byte, headers http.Header, errs <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time),
@@ -881,7 +901,6 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 	bootstrapCtx, bootstrapCancel := context.WithCancel(cliCtx)
 	defer bootstrapCancel()
 
-	bootstrapTimeout := handlers.StreamingBootstrapTimeout(h.Cfg)
 	bootstrapDeadline := time.Time{}
 	var timeoutC <-chan time.Time
 	var timeoutTimer *time.Timer
@@ -1135,6 +1154,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 		flusher,
 		cliCtx,
 		cliCancel,
+		handlers.StreamingBootstrapTimeout(h.Cfg),
 		func(ctx context.Context) responsesStreamBootstrapResult {
 			data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, OpenAI, modelName, chatJSON, "")
 			return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}

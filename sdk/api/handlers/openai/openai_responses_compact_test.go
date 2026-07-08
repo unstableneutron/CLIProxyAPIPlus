@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
@@ -57,6 +59,40 @@ func (e *compactCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, co
 }
 
 func (e *compactCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+type blockingCompactExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (e *blockingCompactExecutor) Identifier() string { return "test-provider" }
+
+func (e *blockingCompactExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+		return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	case <-ctx.Done():
+		return coreexecutor.Response{}, ctx.Err()
+	}
+}
+
+func (e *blockingCompactExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *blockingCompactExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *blockingCompactExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *blockingCompactExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -129,6 +165,58 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactFlushesKeepAliveBeforeUpstreamCompletes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &blockingCompactExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-keepalive", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-compact-keepalive-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{NonStreamKeepAliveInterval: 15}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-compact-keepalive-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(resp, req)
+		close(done)
+	}()
+
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream compact executor did not start")
+	}
+	if body := resp.Body.String(); body != "\n" {
+		t.Fatalf("early body = %q, want compact keep-alive newline before upstream completes", body)
+	}
+
+	close(executor.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("compact handler did not finish after upstream release")
+	}
+	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
+		t.Fatalf("final body = %q, want keep-alive plus JSON response", resp.Body.String())
 	}
 }
 

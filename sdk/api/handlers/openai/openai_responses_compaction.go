@@ -46,6 +46,19 @@ func isNativeCheckpointCompactionRequest(rawJSON []byte) bool {
 	return strings.HasPrefix(text, nativeCheckpointCompactionPrompt)
 }
 
+func isResponsesCompactionTriggerRequest(rawJSON []byte) bool {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) == "compaction_trigger" {
+			return true
+		}
+	}
+	return false
+}
+
 func firstResponsesInputText(content gjson.Result) string {
 	if content.Type == gjson.String {
 		return content.String()
