@@ -1026,11 +1026,35 @@ func TestCodexWebsocketsCompactionProvenanceChangeStripsEncryptedContent(t *test
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamRejectsCompactionTriggerWithoutTranscript(t *testing.T) {
-	var upstreamCalls atomic.Int32
+func TestCodexWebsocketsExecuteStreamFallsBackForCompactionTriggerWithoutTranscript(t *testing.T) {
+	var compactCalls atomic.Int32
+	var websocketCalls atomic.Int32
+	compactBody := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamCalls.Add(1)
-		http.Error(w, "unexpected upstream websocket call", http.StatusTeapot)
+		switch r.URL.Path {
+		case "/responses/compact":
+			compactCalls.Add(1)
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Errorf("read compact body: %v", errRead)
+			}
+			compactBody <- bytes.Clone(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+  "id": "resp-compact",
+  "object": "response",
+  "created_at": 1775555723,
+  "status": "completed",
+  "output": [{"type": "compaction", "id": "cmp-1", "summary": "compressed"}],
+  "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+}`))
+		case "/responses":
+			websocketCalls.Add(1)
+			http.Error(w, "unexpected upstream websocket call", http.StatusTeapot)
+		default:
+			t.Errorf("request path = %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
 	}))
 	defer server.Close()
 
@@ -1040,32 +1064,59 @@ func TestCodexWebsocketsExecuteStreamRejectsCompactionTriggerWithoutTranscript(t
 		SourceFormat:   sdktranslator.FromString("openai-response"),
 		ResponseFormat: sdktranslator.FromString("openai-response"),
 		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "codex-compact-empty-session",
+		},
 	}
 
 	result, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","input":[{"type":"compaction_trigger"}]}`),
+		Payload: []byte(`{"model":"gpt-5.5","previous_response_id":"resp-1","stream":true,"input":[{"type":"message","id":"msg-pending","role":"user","content":"pending"},{"type":"compaction_trigger"}]}`),
 	}, opts)
-	if err == nil {
-		if result != nil {
-			for range result.Chunks {
-			}
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("ExecuteStream result = nil")
+	}
+	var sawCompleted bool
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
-		t.Fatalf("ExecuteStream error = nil, want missing compaction context status error")
+		if strings.Contains(string(chunk.Payload), "response.completed") {
+			sawCompleted = true
+		}
+	}
+	if !sawCompleted {
+		t.Fatal("fallback compact stream did not emit response.completed")
 	}
 
-	var status interface{ StatusCode() int }
-	if !errors.As(err, &status) {
-		t.Fatalf("ExecuteStream error type = %T, want StatusCode", err)
+	select {
+	case body := <-compactBody:
+		if xaiInputHasItemType(body, "compaction_trigger") {
+			t.Fatalf("compact fallback kept compaction_trigger: %s", body)
+		}
+		if gjson.GetBytes(body, "previous_response_id").Exists() {
+			t.Fatalf("compact fallback kept previous_response_id: %s", body)
+		}
+		if gjson.GetBytes(body, "stream").Exists() {
+			t.Fatalf("compact fallback kept stream: %s", body)
+		}
+		if strings.Contains(gjson.GetBytes(body, "input").Raw, `"id":`) {
+			t.Fatalf("compact fallback kept non-portable item ids: %s", body)
+		}
+		if got := gjson.GetBytes(body, "input.0.content").String(); got != "pending" {
+			t.Fatalf("compact fallback input.0.content = %q, want pending; body=%s", got, body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for compact request body")
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("StatusCode = %d, want %d; err=%v", got, http.StatusBadRequest, err)
+	if got := compactCalls.Load(); got != 1 {
+		t.Fatalf("compact calls = %d, want 1", got)
 	}
-	if got := gjson.Get(err.Error(), "error.code").String(); got != "missing_compaction_context" {
-		t.Fatalf("error.code = %q, want missing_compaction_context; err=%v", got, err)
-	}
-	if got := upstreamCalls.Load(); got != 0 {
-		t.Fatalf("upstream calls = %d, want 0", got)
+	if got := websocketCalls.Load(); got != 0 {
+		t.Fatalf("websocket calls = %d, want 0", got)
 	}
 }
 
