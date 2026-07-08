@@ -574,7 +574,6 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	h.flushCompactKeepAlive(c)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
 		ctx:       cliCtx,
@@ -593,18 +592,6 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	cliCancel()
 }
 
-func (h *OpenAIResponsesAPIHandler) flushCompactKeepAlive(c *gin.Context) {
-	if h == nil || c == nil || handlers.NonStreamingKeepAliveInterval(h.Cfg) <= 0 {
-		return
-	}
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return
-	}
-	_, _ = c.Writer.Write([]byte("\n"))
-	flusher.Flush()
-}
-
 func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Context, rawJSON []byte, stream bool) {
 	finishCompaction := h.beginResponsesTurnCompaction(c)
 	defer finishCompaction()
@@ -617,7 +604,6 @@ func (h *OpenAIResponsesAPIHandler) handleNativeCheckpointCompaction(c *gin.Cont
 	}
 
 	c.Header("Content-Type", "application/json")
-	h.flushCompactKeepAlive(c)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
 		ctx:       cliCtx,
