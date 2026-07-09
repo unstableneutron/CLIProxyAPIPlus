@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,9 +22,11 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
@@ -84,6 +87,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	}
 	rawJSON = updatedJSON
 
+	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
+	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if !streamResult.Exists() || streamResult.Type == gjson.False {
@@ -119,6 +125,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	}
 	rawJSON = updatedJSON
 
+	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
+	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+
 	c.Header("Content-Type", "application/json")
 
 	alt := h.GetAlt(c)
@@ -137,6 +146,21 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	cliCancel()
 }
 
+// rewriteClaudeDDModelInBody decodes model IDs of the form claude-fable-5-dd-<reversed>
+// back into the original model name used for routing and upstream requests.
+func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	resolved := util.ResolveClaudeModelIDPrefix(modelName)
+	if resolved == modelName {
+		return rawJSON
+	}
+	updated, errSet := sjson.SetBytes(rawJSON, "model", resolved)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
 // ClaudeModels handles the Claude models listing endpoint.
 // It returns a JSON response containing available Claude models and their specifications.
 //
@@ -144,6 +168,12 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
+	for i := range models {
+		if id, ok := models[i]["id"].(string); ok {
+			models[i]["id"] = util.EnsureClaudeModelIDPrefix(id)
+		}
+	}
+	sortClaudeModelsByDisplayName(models)
 	firstID := ""
 	lastID := ""
 	if len(models) > 0 {
@@ -160,6 +190,21 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 		"has_more": false,
 		"first_id": firstID,
 		"last_id":  lastID,
+	})
+}
+
+// sortClaudeModelsByDisplayName sorts models by display_name ascending.
+// When display_name is equal or missing, id is used as a stable tie-breaker.
+func sortClaudeModelsByDisplayName(models []map[string]any) {
+	sort.SliceStable(models, func(i, j int) bool {
+		di, _ := models[i]["display_name"].(string)
+		dj, _ := models[j]["display_name"].(string)
+		if di != dj {
+			return di < dj
+		}
+		idi, _ := models[i]["id"].(string)
+		idj, _ := models[j]["id"].(string)
+		return idi < idj
 	})
 }
 
