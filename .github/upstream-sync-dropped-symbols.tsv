@@ -2,3 +2,25 @@
 # Add intentional shared-hotspot overlay symbol removals here when resolving
 # upstream-sync PRs. Keep this empty by default; each entry must explain why
 # the fork-only symbol or test no longer needs to survive the merge.
+TestAntigravityCLIUpdaterManifestName	original v7.2.53 replaced Antigravity CLI updater coverage with Hub updater coverage
+TestAntigravityLatestVersionUsesCurrentCLIFallback	original v7.2.53 replaced the CLI fallback version with the Hub fallback version
+TestAntigravityUserAgentUsesCLIFamily	original v7.2.53 replaced the default Antigravity CLI user agent with the Hub user agent
+TestAntigravityVersionFromUserAgentParsesAidevClientSuffix	original v7.2.53 replaced CLI user-agent parsing coverage with Hub and legacy coverage
+TestAntigravityVersionFromUserAgentParsesCLIFamily	original v7.2.53 replaced CLI user-agent parsing coverage with Hub and legacy coverage
+TestFetchAntigravityLatestVersionFallsBackToCLIGCSList	original v7.2.53 replaced CLI GCS fallback fetching with Hub manifest fetching
+TestFetchAntigravityLatestVersionFallsBackToCLILatest	original v7.2.53 replaced CLI latest fallback fetching with Hub manifest fetching
+TestFetchAntigravityLatestVersionPrefersDarwinManifest	original v7.2.53 replaced CLI Darwin manifest fetching with Hub manifest fetching
+TestLatestAntigravityCLIVersionFromPrefixesSortsByNumericSemver	original v7.2.53 removed CLI GCS prefix semver selection in favor of Hub manifests
+antigravityCLIUpdaterManifest	original v7.2.53 replaced the CLI JSON updater manifest with the Hub YAML updater manifest
+antigravityCLIUpdaterManifestName	original v7.2.53 replaced per-platform CLI manifest names with the Hub manifest URL
+antigravityCLIUserAgentDetails	original v7.2.53 replaced CLI user-agent details with the Hub platform user agent
+antigravityCLIVersionFromPrefix	original v7.2.53 removed CLI GCS prefix parsing in favor of Hub manifests
+antigravityGCSList	original v7.2.53 removed CLI GCS list parsing in favor of Hub manifests
+antigravityGCSPrefix	original v7.2.53 removed CLI GCS prefix parsing in favor of Hub manifests
+antigravitySemVersion	original v7.2.53 replaced CLI semver structs with Hub manifest semver validation
+compareAntigravitySemVersion	original v7.2.53 removed CLI GCS prefix semver ordering in favor of Hub manifests
+fetchAntigravityCLIGCSLatestVersion	original v7.2.53 removed CLI GCS fallback fetching in favor of Hub manifest fetching
+fetchAntigravityCLILatestVersion	original v7.2.53 removed CLI latest fallback fetching in favor of Hub manifest fetching
+fetchAntigravityCLIUpdaterManifestVersion	original v7.2.53 removed CLI updater manifest fetching in favor of Hub manifest fetching
+latestAntigravityCLIVersionFromPrefixes	original v7.2.53 removed CLI GCS prefix semver selection in favor of Hub manifests
+parseAntigravitySemVersion	original v7.2.53 replaced CLI semver parsing with Hub manifest semver validation

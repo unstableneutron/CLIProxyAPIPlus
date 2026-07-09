@@ -53,7 +53,6 @@ const (
 	antigravityGeneratePath                = "/v1internal:generateContent"
 	antigravityClientIDEnv                 = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
 	antigravityClientSecretEnv             = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
-	defaultAntigravityAgent                = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
 	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
