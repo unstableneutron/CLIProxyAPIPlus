@@ -1479,25 +1479,113 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 
 // --- Model Discovery ---
 
+// cursorModelsCache stores the last successful model list for each auth ID.
+// A transient models request failure must not replace a verified live catalog
+// with the hardcoded cold-start fallback.
+var (
+	cursorModelsCacheMu sync.RWMutex
+	cursorModelsCache   = make(map[string][]*registry.ModelInfo)
+)
+
+// cursorModelsOrFallback returns an independent copy of the last successful
+// list for authID. The hardcoded fallback is used only before that auth has a
+// successful live fetch.
+func cursorModelsOrFallback(authID string) []*registry.ModelInfo {
+	if authID != "" {
+		cursorModelsCacheMu.RLock()
+		cached, ok := cursorModelsCache[authID]
+		if ok && len(cached) > 0 {
+			models := cloneCursorModelInfos(cached)
+			cursorModelsCacheMu.RUnlock()
+			return models
+		}
+		cursorModelsCacheMu.RUnlock()
+	}
+	return GetCursorFallbackModels()
+}
+
+// cacheCursorModels records a complete, independent snapshot after a
+// successful live fetch. Each success replaces the previous snapshot for the
+// same auth ID.
+func cacheCursorModels(authID string, models []*registry.ModelInfo) {
+	if authID == "" || len(models) == 0 {
+		return
+	}
+
+	snapshot := cloneCursorModelInfos(models)
+	cursorModelsCacheMu.Lock()
+	cursorModelsCache[authID] = snapshot
+	cursorModelsCacheMu.Unlock()
+}
+
+func cloneCursorModelInfos(models []*registry.ModelInfo) []*registry.ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+
+	cloned := make([]*registry.ModelInfo, len(models))
+	for i, model := range models {
+		cloned[i] = cloneCursorModelInfo(model)
+	}
+	return cloned
+}
+
+func cloneCursorModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
+	if model == nil {
+		return nil
+	}
+
+	cloned := *model
+	cloned.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
+	cloned.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+	cloned.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
+	cloned.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
+	cloned.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
+	if model.Thinking != nil {
+		thinking := *model.Thinking
+		thinking.Levels = append([]string(nil), model.Thinking.Levels...)
+		cloned.Thinking = &thinking
+	}
+	if model.Config != nil {
+		modelConfig := *model.Config
+		if model.Config.OverrideHeader != nil {
+			modelConfig.OverrideHeader = make(map[string]string, len(model.Config.OverrideHeader))
+			for key, value := range model.Config.OverrideHeader {
+				modelConfig.OverrideHeader[key] = value
+			}
+		}
+		cloned.Config = &modelConfig
+	}
+	return &cloned
+}
+
 // FetchCursorModels retrieves available models from Cursor's API.
 func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	if auth == nil {
+		return GetCursorFallbackModels()
+	}
+
+	authID := auth.ID
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	return fetchCursorModels(ctx, authID, accessToken, newH2Client(), cursorAPIURL+cursorModelsPath)
+}
 
+func fetchCursorModels(ctx context.Context, authID, accessToken string, client *http.Client, modelsURL string) []*registry.ModelInfo {
 	// GetUsableModels is a unary RPC call (not streaming)
 	// Send an empty protobuf request
 	emptyReq := make([]byte, 0)
 
 	h2Req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		cursorAPIURL+cursorModelsPath, bytes.NewReader(emptyReq))
+		modelsURL, bytes.NewReader(emptyReq))
 	if err != nil {
 		log.Debugf("cursor: failed to create models request: %v", err)
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
 
 	h2Req.Header.Set("Content-Type", "application/proto")
@@ -1507,28 +1595,28 @@ func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	h2Req.Header.Set("X-Cursor-Client-Version", cursorClientVersion)
 	h2Req.Header.Set("X-Cursor-Client-Type", "cli")
 
-	client := newH2Client()
 	resp, err := client.Do(h2Req)
 	if err != nil {
 		log.Debugf("cursor: models request failed: %v", err)
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Debugf("cursor: models request returned status %d", resp.StatusCode)
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
 
 	models := parseModelsResponse(body)
 	if len(models) == 0 {
-		return GetCursorFallbackModels()
+		return cursorModelsOrFallback(authID)
 	}
+	cacheCursorModels(authID, models)
 	return models
 }
 
