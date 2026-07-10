@@ -1,30 +1,56 @@
 name: pr-test-build
+run-name: >-
+  sync-validation ref=${{ inputs.ref || github.head_ref || github.ref_name }}
+  head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
+  sync_pr=${{ inputs.sync_pr || github.event.pull_request.number || 'none' }}
+  upstream_sha=${{ inputs.upstream_sha || 'none' }}
 
 on:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Sync branch name for correlation
+        required: true
+        type: string
+      head_sha:
+        description: Exact sync PR head SHA to validate
+        required: true
+        type: string
+      sync_pr:
+        description: Sync PR number for correlation
+        required: true
+        type: string
+      upstream_sha:
+        description: Pinned upstream commit included by the sync PR
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MODEL_CATALOG_REF: 9e658ffbc94b0d46392019c59d47d7dc7e5a2b96
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.head_sha || github.event.pull_request.head.sha || github.sha }}
       - name: Refresh models catalog
         run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          git fetch --depth 1 https://github.com/router-for-me/models.git "${MODEL_CATALOG_REF}"
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
       - name: Build
-        run: |
-          go build -o test-output ./cmd/server
-          rm -f test-output
+        run: go build ./cmd/server
+      - name: Test
+        run: go test ./...

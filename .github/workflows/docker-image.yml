@@ -1,4 +1,7 @@
 name: docker-image
+run-name: >-
+  docker-image tag=${{ inputs.tag || github.ref_name }}
+  commit=${{ inputs.commit || github.sha }}
 
 # Builds and publishes the multi-arch Docker image for CLIProxyAPIPlus.
 #
@@ -23,6 +26,10 @@ on:
         description: 'Existing tag to build, e.g. v6.9.45-0'
         required: false
         type: string
+      commit:
+        description: 'Exact commit the supplied tag must resolve to'
+        required: false
+        type: string
   push:
     tags:
       - 'v*'
@@ -33,6 +40,7 @@ env:
   GHCR_REGISTRY: ghcr.io
   GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
   DOCKERHUB_IMAGE_NAME: kaitranntt/cli-proxy-api-plus
+  MODEL_CATALOG_REF: 9e658ffbc94b0d46392019c59d47d7dc7e5a2b96
 
 permissions:
   contents: read
@@ -54,26 +62,32 @@ jobs:
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
       - name: Refresh models catalog
         run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          git fetch --depth 1 https://github.com/router-for-me/models.git "${MODEL_CATALOG_REF}"
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
 
+      - name: Verify requested image commit
+        if: inputs.commit != ''
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_COMMIT}"
+
       - name: Set up QEMU (for arm64 emulation on x64 self-hosted runner)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
@@ -92,7 +106,7 @@ jobs:
 
       - name: Login to Docker Hub
         if: steps.dockerhub.outputs.enabled == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME || 'kaitranntt' }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -140,7 +154,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push (multi-arch)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: linux/amd64,linux/arm64

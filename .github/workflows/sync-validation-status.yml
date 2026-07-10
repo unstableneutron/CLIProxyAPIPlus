@@ -1,0 +1,90 @@
+name: Sync Validation Status
+
+on:
+  workflow_run:
+    workflows: [pr-test-build]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  record-failed-sync-validation:
+    # Only the trusted upstream-sync workflow dispatches the correlated check.
+    # workflow_run has write permissions, so this job never checks out or runs PR code.
+    if: >-
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update only the correlated tracker from run metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_NAME: ${{ github.event.workflow_run.display_title }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          case "${RUN_NAME}" in
+            sync-validation\ *) ;;
+            *)
+              echo "Uncorrelated workflow_dispatch run; no tracker mutation."
+              exit 0
+              ;;
+          esac
+
+          HEAD_SHA="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*head_sha=\([^ ]*\).*/\1/p')"
+          PR_NUMBER="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*sync_pr=\([^ ]*\).*/\1/p')"
+          UPSTREAM_SHA="$(printf '%s\n' "${RUN_NAME}" | sed -n 's/.*upstream_sha=\([^ ]*\).*/\1/p')"
+          if ! printf '%s' "${HEAD_SHA}" | grep -Eq '^[0-9a-f]{40}$' || \
+             ! printf '%s' "${PR_NUMBER}" | grep -Eq '^[0-9]+$' || \
+             ! printf '%s' "${UPSTREAM_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Run metadata does not contain a complete sync correlation; no tracker mutation." >&2
+            exit 1
+          fi
+
+          PR_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          ACTUAL_HEAD="$(printf '%s' "${PR_JSON}" | jq -r .head.sha)"
+          PR_BODY="$(printf '%s' "${PR_JSON}" | jq -r .body)"
+          BRANCH="$(printf '%s' "${PR_JSON}" | jq -r .head.ref)"
+          if [ "${ACTUAL_HEAD}" != "${HEAD_SHA}" ]; then
+            echo "PR head no longer matches the validated run; no tracker mutation." >&2
+            exit 1
+          fi
+
+          MARKER="$(printf '%s\n' "${PR_BODY}" | grep -o '<!-- ccs-upstream-sync:tag=[^;]*;sha=[0-9a-f]\{40\} -->' | head -n 1)"
+          if [ -z "${MARKER}" ] || ! printf '%s' "${MARKER}" | grep -Fq "sha=${UPSTREAM_SHA}"; then
+            echo "PR lacks the exact upstream marker for this validation run; no tracker mutation." >&2
+            exit 1
+          fi
+          TAG="$(printf '%s' "${MARKER}" | sed -n 's/.*tag=\([^;]*\);sha=.*/\1/p')"
+
+          LABEL_EXISTS="$(gh label list --repo "${GITHUB_REPOSITORY}" --limit 100 --json name \
+            --jq '.[] | select(.name == "upstream-sync-blocked") | .name')"
+          if [ -z "${LABEL_EXISTS}" ]; then
+            gh label create upstream-sync-blocked --repo "${GITHUB_REPOSITORY}" --color B60205 \
+              --description "Pinned upstream sync needs maintainer attention."
+          fi
+
+          ISSUE_NUMBER="$(gh api --method GET search/issues \
+            --raw-field "q=repo:${GITHUB_REPOSITORY} is:issue is:open in:body \"${MARKER}\"" \
+            --jq '.items[0].number // empty')"
+          STATUS="- upstream tag: \`${TAG}\`
+          - upstream commit: \`${UPSTREAM_SHA}\`
+          - status: read-only validation failed
+          - sync PR: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}
+          - pushed branch: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${BRANCH}
+          - validation run: ${RUN_URL}"
+
+          if [ -n "${ISSUE_NUMBER}" ]; then
+            gh issue comment "${ISSUE_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body "${STATUS}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" \
+              --title "upstream-sync blocked: ${TAG} (${UPSTREAM_SHA})" \
+              --label upstream-sync-blocked --assignee kaitranntt \
+              --body "${MARKER}
+
+          ${STATUS}"
+          fi

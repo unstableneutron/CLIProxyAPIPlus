@@ -7,14 +7,15 @@ internal/auth/iflow/** merge=ours
 internal/auth/kilo/** merge=ours
 internal/auth/kiro/** merge=ours
 
-# Plus-specific registration and deps — resolve as PR, not auto
-cmd/server/main.go merge=union
-go.mod merge=union
-go.sum merge=union
-
-# Our fork-maintenance files — always keep ours
+# Fork-maintenance files — always keep ours. Workflow ownership is explicit so
+# the sync job can restore exactly this allowlist after every upstream merge.
 .github/workflows/upstream-sync.yml merge=ours
+.github/workflows/sync-release-tag.yml merge=ours
 .github/workflows/release.yaml merge=ours
+.github/workflows/docker-image.yml merge=ours
+.github/workflows/pr-test-build.yml merge=ours
+.github/workflows/agents-md-guard.yml merge=ours
+.github/workflows/sync-validation-status.yml merge=ours
 .goreleaser.yml merge=ours
 .gitattributes merge=ours
 README-ccs-fork.md merge=ours
