@@ -95,7 +95,8 @@ jobs:
             for _ in $(seq 1 12); do
               run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${workflow}" \
                 --event workflow_dispatch --limit 20 --json databaseId,displayTitle \
-                --jq ".[] | select(.displayTitle == \\\"${title}\\\") | .databaseId" | head -n 1)"
+                | jq -r --arg title "${title}" \
+                  'first(.[] | select(.displayTitle == $title) | .databaseId) // empty')"
               if [ -n "${run_id}" ]; then
                 printf '%s' "${run_id}"
                 return 0
