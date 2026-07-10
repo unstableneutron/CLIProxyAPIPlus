@@ -155,7 +155,7 @@ const (
     <div class="container">
         <h1>🔐 AWS SSO Authentication</h1>
         <p class="subtitle">Follow the steps below to complete authentication</p>
-        
+
         <div class="step">
             <div class="step-title">
                 <span class="step-number">1</span>
@@ -165,7 +165,7 @@ const (
                 🚀 Open Authorization Page
             </a>
         </div>
-        
+
         <div class="step">
             <div class="step-title">
                 <span class="step-number">2</span>
@@ -176,7 +176,7 @@ const (
                 <div class="user-code-value">{{.UserCode}}</div>
             </div>
         </div>
-        
+
         <div class="step">
             <div class="step-title">
                 <span class="step-number">3</span>
@@ -186,7 +186,7 @@ const (
                 Use your AWS SSO account to login and authorize
             </p>
         </div>
-        
+
         <div class="status status-pending" id="statusBox">
             <div class="spinner" id="spinner"></div>
             <div class="timer" id="timer">{{.ExpiresIn}}s</div>
@@ -194,22 +194,22 @@ const (
                 Waiting for authorization...
             </div>
         </div>
-        
+
         <div class="info-box">
             💡 <strong>Tip:</strong> The authorization page will open in a new tab. This page will automatically update once authorization is complete.
         </div>
     </div>
-    
+
     <script>
         let pollInterval;
         let timerInterval;
         let remainingSeconds = {{.ExpiresIn}};
         const stateID = "{{.StateID}}";
-        
+
         setTimeout(() => {
             document.getElementById('authBtn').click();
         }, 500);
-        
+
         function pollStatus() {
             fetch('/v0/oauth/kiro/status?state=' + stateID)
                 .then(response => response.json())
@@ -231,13 +231,13 @@ const (
                     console.error('Poll error:', error);
                 });
         }
-        
+
         function updateTimer() {
             const timerEl = document.getElementById('timer');
             const minutes = Math.floor(remainingSeconds / 60);
             const seconds = remainingSeconds % 60;
             timerEl.textContent = minutes + ':' + seconds.toString().padStart(2, '0');
-            
+
             if (remainingSeconds < 60) {
                 timerEl.className = 'timer danger';
             } else if (remainingSeconds < 180) {
@@ -245,16 +245,16 @@ const (
             } else {
                 timerEl.className = 'timer';
             }
-            
+
             remainingSeconds--;
-            
+
             if (remainingSeconds < 0) {
                 clearInterval(timerInterval);
                 clearInterval(pollInterval);
                 showError({ error: 'Authentication timed out. Please refresh and try again.' });
             }
         }
-        
+
         function showSuccess(data) {
             const statusBox = document.getElementById('statusBox');
             statusBox.className = 'status status-success';
@@ -264,7 +264,7 @@ const (
                 'Token expires: ' + new Date(data.expires_at).toLocaleString() +
                 '</div>';
         }
-        
+
         function showError(data) {
             const statusBox = document.getElementById('statusBox');
             statusBox.className = 'status status-failed';
@@ -277,7 +277,7 @@ const (
                 '🔄 Retry' +
                 '</button>';
         }
-        
+
         pollInterval = setInterval(pollStatus, 3000);
         timerInterval = setInterval(updateTimer, 1000);
         pollStatus();
@@ -591,55 +591,55 @@ const (
     <div class="container">
         <h1>🔐 Select Authentication Method</h1>
         <p class="subtitle">Choose how you want to authenticate with Kiro</p>
-        
+
         <div class="auth-methods">
             <a href="/v0/oauth/kiro/start?method=builder-id" class="auth-btn aws">
                 <span class="icon">🔶</span>
                 AWS Builder ID (Recommended)
             </a>
-            
+
             <button type="button" class="auth-btn idc" onclick="toggleIdcForm()">
                 <span class="icon">🏢</span>
                 AWS Identity Center (IDC)
             </button>
-            
+
             <div class="divider"><span>or</span></div>
-            
+
             <button type="button" class="auth-btn manual" onclick="toggleManualForm()">
                 <span class="icon">📋</span>
                 Import RefreshToken from Kiro IDE
             </button>
-            
+
             <button type="button" class="auth-btn refresh" onclick="manualRefresh()" id="refreshBtn">
                 <span class="icon">🔄</span>
                 Manual Refresh All Tokens
             </button>
-            
+
             <div class="status-message" id="refreshStatus"></div>
         </div>
-        
+
         <div class="idc-form" id="idcForm">
             <form action="/v0/oauth/kiro/start" method="get">
                 <input type="hidden" name="method" value="idc">
-                
+
                 <div class="form-group">
                     <label for="startUrl">Start URL</label>
                     <input type="url" id="startUrl" name="startUrl" placeholder="https://your-org.awsapps.com/start" required>
                     <div class="hint">Your AWS Identity Center Start URL</div>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="region">Region</label>
                     <input type="text" id="region" name="region" value="us-east-1" placeholder="us-east-1">
                     <div class="hint">AWS Region for your Identity Center</div>
                 </div>
-                
+
                 <button type="submit" class="submit-btn">
                     🚀 Continue with IDC
                 </button>
             </form>
         </div>
-        
+
         <div class="manual-form" id="manualForm">
             <form id="importForm" onsubmit="submitImport(event)">
                 <div class="form-group">
@@ -647,19 +647,19 @@ const (
                     <textarea id="refreshToken" name="refreshToken" placeholder="Paste the full kiro-auth-token.json content, or just refreshToken (starts with aorAAAAAG...)" required></textarea>
                     <div class="hint">Copy from Kiro IDE: ~/.aws/sso/cache/kiro-auth-token.json, or paste only its refreshToken field</div>
                 </div>
-                
+
                 <button type="submit" class="submit-btn" id="importBtn">
                     📥 Import Token
                 </button>
-                
+
                 <div class="status-message" id="importStatus"></div>
             </form>
         </div>
-        
+
         <div class="warning-box">
             ⚠️ <strong>Note:</strong> Google and GitHub login are not available for third-party applications due to AWS Cognito restrictions. Please use AWS Builder ID or import your token from Kiro IDE.
         </div>
-        
+
         <div class="info-box">
             💡 <strong>How to get RefreshToken:</strong><br>
             1. Open Kiro IDE and login with Google/GitHub<br>
@@ -667,7 +667,7 @@ const (
             3. Paste the full JSON content above, or copy only the <code>refreshToken</code> value
         </div>
     </div>
-    
+
     <script>
         function toggleIdcForm() {
             const idcForm = document.getElementById('idcForm');
@@ -678,7 +678,7 @@ const (
                 document.getElementById('startUrl').focus();
             }
         }
-        
+
         function toggleManualForm() {
             const idcForm = document.getElementById('idcForm');
             const manualForm = document.getElementById('manualForm');
@@ -688,19 +688,19 @@ const (
                 document.getElementById('refreshToken').focus();
             }
         }
-        
+
         async function submitImport(event) {
             event.preventDefault();
             const refreshToken = document.getElementById('refreshToken').value.trim();
             const statusEl = document.getElementById('importStatus');
             const btn = document.getElementById('importBtn');
-            
+
             if (!refreshToken) {
                 statusEl.className = 'status-message error';
                 statusEl.textContent = 'Please enter a refresh token';
                 return;
             }
-            
+
             let requestBody;
             if (refreshToken.startsWith('{')) {
                 try {
@@ -718,21 +718,21 @@ const (
             } else {
                 requestBody = JSON.stringify({ refreshToken: refreshToken });
             }
-            
+
             btn.disabled = true;
             btn.textContent = '⏳ Importing...';
             statusEl.className = 'status-message';
             statusEl.style.display = 'none';
-            
+
             try {
                 const response = await fetch('/v0/oauth/kiro/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: requestBody
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (response.ok && data.success) {
                     statusEl.className = 'status-message success';
                     statusEl.textContent = '✅ Token imported successfully! File: ' + (data.fileName || 'kiro-token.json');
@@ -748,24 +748,24 @@ const (
                 btn.textContent = '📥 Import Token';
             }
         }
-        
+
         async function manualRefresh() {
             const btn = document.getElementById('refreshBtn');
             const statusEl = document.getElementById('refreshStatus');
-            
+
             btn.disabled = true;
             btn.innerHTML = '<span class="icon">⏳</span> Refreshing...';
             statusEl.className = 'status-message';
             statusEl.style.display = 'none';
-            
+
             try {
                 const response = await fetch('/v0/oauth/kiro/refresh', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (response.ok && data.success) {
                     statusEl.className = 'status-message success';
                     let msg = '✅ ' + data.message;

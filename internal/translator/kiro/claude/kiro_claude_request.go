@@ -999,4 +999,3 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		ToolUses: toolUses,
 	}
 }
-
