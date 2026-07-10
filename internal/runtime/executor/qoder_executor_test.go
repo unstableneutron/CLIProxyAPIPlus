@@ -255,7 +255,7 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 	executor := NewQoderExecutor(&config.Config{})
 	storage := testQoderStorageWithModelConfig()
 	authRecord := &cliproxyauth.Auth{
-		ID:       "qoder-test-auth",
+		ID:       "qoder-stream-usage-auth",
 		Provider: "qoder",
 		Storage:  storage,
 	}
@@ -280,7 +280,7 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 		}
 	}
 
-	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	record := waitForQoderUsageRecord(t, plugin.records, authRecord.ID, "auto")
 	if record.Provider != "qoder" {
 		t.Fatalf("Provider = %q, want qoder", record.Provider)
 	}
@@ -292,6 +292,18 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 	}
 	if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
 		t.Fatalf("Detail = %+v, want input=3 output=4 total=7", record.Detail)
+	}
+}
+
+func TestWaitForQoderUsageRecord_RequiresMatchingAuthID(t *testing.T) {
+	const expectedAuthID = "qoder-stream-usage-auth"
+	records := make(chan usage.Record, 2)
+	records <- usage.Record{Provider: "qoder", AuthID: "prior-qoder-auth", Model: "auto"}
+	records <- usage.Record{Provider: "qoder", AuthID: expectedAuthID, Model: "auto"}
+
+	record := waitForQoderUsageRecord(t, records, expectedAuthID, "auto")
+	if record.AuthID != expectedAuthID {
+		t.Fatalf("AuthID = %q, want %q", record.AuthID, expectedAuthID)
 	}
 }
 
@@ -322,7 +334,7 @@ func TestExecuteStream_PublishesFailureRecordForUpstreamStatus(t *testing.T) {
 		t.Fatal("ExecuteStream() error = nil, want error")
 	}
 
-	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	record := waitForQoderUsageRecord(t, plugin.records, authRecord.ID, "auto")
 	if !record.Failed {
 		t.Fatalf("Failed = false, want true")
 	}
@@ -363,7 +375,7 @@ func TestExecuteStream_EnsuresUsageRecordForRawDoneWithoutUsage(t *testing.T) {
 		}
 	}
 
-	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	record := waitForQoderUsageRecord(t, plugin.records, authRecord.ID, "auto")
 	if record.Failed {
 		t.Fatalf("Failed = true, want false: %+v", record.Fail)
 	}
@@ -407,7 +419,7 @@ func TestExecuteStream_PublishesFailureRecordForStreamEnvelopeStatus(t *testing.
 		t.Fatal("stream error = nil, want envelope error")
 	}
 
-	record := waitForQoderUsageRecord(t, plugin.records, "auto")
+	record := waitForQoderUsageRecord(t, plugin.records, authRecord.ID, "auto")
 	if !record.Failed {
 		t.Fatal("Failed = false, want true")
 	}
@@ -460,17 +472,17 @@ func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Re
 	}
 }
 
-func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, model string) usage.Record {
+func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID, model string) usage.Record {
 	t.Helper()
 	timeout := time.After(2 * time.Second)
 	for {
 		select {
 		case record := <-records:
-			if record.Provider == "qoder" && record.Model == model {
+			if record.Provider == "qoder" && record.AuthID == authID && record.Model == model {
 				return record
 			}
 		case <-timeout:
-			t.Fatalf("timed out waiting for Qoder usage record for model %q", model)
+			t.Fatalf("timed out waiting for Qoder usage record for auth %q and model %q", authID, model)
 		}
 	}
 }
