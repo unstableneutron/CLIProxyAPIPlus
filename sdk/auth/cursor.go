@@ -46,9 +46,9 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		return nil, fmt.Errorf("cursor: failed to generate auth params: %w", err)
 	}
 
-	// Display the login URL
-	log.Info("Starting Cursor authentication...")
-	log.Infof("Please visit this URL to log in: %s", authParams.LoginURL)
+	// Interactive login prompts bypass logrus so file logging cannot hide the URL.
+	fmt.Println("Starting Cursor authentication...")
+	fmt.Printf("Please visit this URL to log in: %s\n", authParams.LoginURL)
 
 	// Try to open the browser automatically
 	if !opts.NoBrowser {
@@ -59,7 +59,7 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}
 
-	log.Info("Waiting for Cursor authorization...")
+	fmt.Println("Waiting for Cursor authorization...")
 
 	// Poll for the auth result
 	tokens, err := cursorauth.PollForAuth(ctx, authParams.UUID, authParams.Verifier)
