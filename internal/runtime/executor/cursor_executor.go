@@ -296,7 +296,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	parsed := parseOpenAIRequest(payload)
 	ccSessId := extractClaudeCodeSessionId(req.Payload)
 	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -455,7 +455,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally
@@ -479,7 +479,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId)
+			params = buildRunRequestParams(parsed, conversationId, req.Model)
 		}
 	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 		// Fallback: no checkpoint available (cold resume / proxy restart).
@@ -487,7 +487,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Cursor's turns encoding is not reliably read by the model, but userText always works.
 		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId)
+		params = buildRunRequestParams(parsed, conversationId, req.Model)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -1289,9 +1289,16 @@ func parseDataURL(url string) *cursorproto.ImageData {
 	}
 }
 
-func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
+func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId, upstreamModel string) *cursorproto.RunRequestParams {
+	// upstreamModel is the provider-resolved model name. Keep parsed.Model
+	// unchanged so OpenAI-compatible responses continue to echo the client model.
+	modelID := strings.TrimSpace(upstreamModel)
+	if modelID == "" {
+		modelID = parsed.Model
+	}
+
 	params := &cursorproto.RunRequestParams{
-		ModelId:        parsed.Model,
+		ModelId:        modelID,
 		SystemPrompt:   parsed.SystemPrompt,
 		UserText:       parsed.UserText,
 		MessageId:      uuid.New().String(),
