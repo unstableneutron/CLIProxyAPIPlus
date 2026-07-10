@@ -275,6 +275,167 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// interactions-api-key: []GeminiKey
+func (h *Handler) GetInteractionsKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"interactions-api-key": h.interactionsKeysWithAuthIndex()})
+}
+func (h *Handler) PutInteractionsKeys(c *gin.Context) {
+	data, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.GeminiKey
+	errUnmarshal := json.Unmarshal(data, &arr)
+	if errUnmarshal != nil {
+		var obj struct {
+			Items []config.GeminiKey `json:"items"`
+		}
+		errObjUnmarshal := json.Unmarshal(data, &obj)
+		if errObjUnmarshal != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.InteractionsKey = append([]config.GeminiKey(nil), arr...)
+	h.cfg.SanitizeInteractionsKeys()
+	h.persistLocked(c)
+}
+func (h *Handler) PatchInteractionsKey(c *gin.Context) {
+	type geminiKeyPatch struct {
+		APIKey         *string            `json:"api-key"`
+		Prefix         *string            `json:"prefix"`
+		BaseURL        *string            `json:"base-url"`
+		ProxyURL       *string            `json:"proxy-url"`
+		Headers        *map[string]string `json:"headers"`
+		ExcludedModels *[]string          `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int            `json:"index"`
+		Match *string         `json:"match"`
+		Value *geminiKeyPatch `json:"value"`
+	}
+	errBind := c.ShouldBindJSON(&body)
+	if errBind != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.InteractionsKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		if match != "" {
+			for i := range h.cfg.InteractionsKey {
+				if h.cfg.InteractionsKey[i].APIKey == match {
+					targetIndex = i
+					break
+				}
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.InteractionsKey[targetIndex]
+	if body.Value.APIKey != nil {
+		trimmed := strings.TrimSpace(*body.Value.APIKey)
+		if trimmed == "" {
+			h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:targetIndex], h.cfg.InteractionsKey[targetIndex+1:]...)
+			h.cfg.SanitizeInteractionsKeys()
+			h.persistLocked(c)
+			return
+		}
+		entry.APIKey = trimmed
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	h.cfg.InteractionsKey[targetIndex] = entry
+	h.cfg.SanitizeInteractionsKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteInteractionsKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
+			base := strings.TrimSpace(baseRaw)
+			out := make([]config.GeminiKey, 0, len(h.cfg.InteractionsKey))
+			for _, v := range h.cfg.InteractionsKey {
+				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+					continue
+				}
+				out = append(out, v)
+			}
+			if len(out) != len(h.cfg.InteractionsKey) {
+				h.cfg.InteractionsKey = out
+				h.cfg.SanitizeInteractionsKeys()
+				h.persistLocked(c)
+			} else {
+				c.JSON(404, gin.H{"error": "item not found"})
+			}
+			return
+		}
+
+		matchIndex := -1
+		matchCount := 0
+		for i := range h.cfg.InteractionsKey {
+			if strings.TrimSpace(h.cfg.InteractionsKey[i].APIKey) == val {
+				matchCount++
+				if matchIndex == -1 {
+					matchIndex = i
+				}
+			}
+		}
+		if matchCount == 0 {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
+		}
+		if matchCount > 1 {
+			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+			return
+		}
+		h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:matchIndex], h.cfg.InteractionsKey[matchIndex+1:]...)
+		h.cfg.SanitizeInteractionsKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, errScan := fmt.Sscanf(idxStr, "%d", &idx)
+		if errScan == nil && idx >= 0 && idx < len(h.cfg.InteractionsKey) {
+			h.cfg.InteractionsKey = append(h.cfg.InteractionsKey[:idx], h.cfg.InteractionsKey[idx+1:]...)
+			h.cfg.SanitizeInteractionsKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
 // claude-api-key: []ClaudeKey
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
@@ -307,13 +468,14 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
+		APIKey                  *string               `json:"api-key"`
+		Prefix                  *string               `json:"prefix"`
+		BaseURL                 *string               `json:"base-url"`
+		ProxyURL                *string               `json:"proxy-url"`
+		Models                  *[]config.ClaudeModel `json:"models"`
+		Headers                 *map[string]string    `json:"headers"`
+		ExcludedModels          *[]string             `json:"excluded-models"`
+		RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -366,6 +528,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.RebuildMidSystemMessage != nil {
+		entry.RebuildMidSystemMessage = *body.Value.RebuildMidSystemMessage
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
@@ -462,13 +627,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name          *string                             `json:"name"`
-		Prefix        *string                             `json:"prefix"`
-		Disabled      *bool                               `json:"disabled"`
-		BaseURL       *string                             `json:"base-url"`
-		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers       *map[string]string                  `json:"headers"`
+		Name           *string                             `json:"name"`
+		Prefix         *string                             `json:"prefix"`
+		Disabled       *bool                               `json:"disabled"`
+		DisableCooling *bool                               `json:"disable-cooling"`
+		BaseURL        *string                             `json:"base-url"`
+		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers        *map[string]string                  `json:"headers"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -509,6 +675,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
+	}
+	if body.Value.DisableCooling != nil {
+		entry.DisableCooling = *body.Value.DisableCooling
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1313,8 +1482,8 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 	}
 
 	existing := make(map[string]int)
-	for i, m := range h.cfg.AmpCode.ModelMappings {
-		existing[strings.TrimSpace(m.From)] = i
+	for i, mapping := range h.cfg.AmpCode.ModelMappings {
+		existing[strings.TrimSpace(mapping.From)] = i
 	}
 
 	for _, newMapping := range body.Value {
@@ -1346,9 +1515,9 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	}
 
 	newMappings := make([]config.AmpModelMapping, 0, len(h.cfg.AmpCode.ModelMappings))
-	for _, m := range h.cfg.AmpCode.ModelMappings {
-		if !toRemove[strings.TrimSpace(m.From)] {
-			newMappings = append(newMappings, m)
+	for _, mapping := range h.cfg.AmpCode.ModelMappings {
+		if !toRemove[strings.TrimSpace(mapping.From)] {
+			newMappings = append(newMappings, mapping)
 		}
 	}
 	h.cfg.AmpCode.ModelMappings = newMappings
@@ -1378,7 +1547,7 @@ func (h *Handler) GetAmpUpstreamAPIKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"upstream-api-keys": h.cfg.AmpCode.UpstreamAPIKeys})
 }
 
-// PutAmpUpstreamAPIKeys replaces all ampcode upstream API keys mappings.
+// PutAmpUpstreamAPIKeys replaces all ampcode upstream API key mappings.
 func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
@@ -1387,14 +1556,11 @@ func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	// Normalize entries: trim whitespace, filter empty
-	normalized := normalizeAmpUpstreamAPIKeyEntries(body.Value)
-	h.cfg.AmpCode.UpstreamAPIKeys = normalized
+	h.cfg.AmpCode.UpstreamAPIKeys = normalizeAmpUpstreamAPIKeyEntries(body.Value)
 	h.persist(c)
 }
 
-// PatchAmpUpstreamAPIKeys adds or updates upstream API keys entries.
-// Matching is done by upstream-api-key value.
+// PatchAmpUpstreamAPIKeys adds or updates upstream API key entries by upstream key.
 func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
@@ -1428,10 +1594,7 @@ func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 	h.persist(c)
 }
 
-// DeleteAmpUpstreamAPIKeys removes specified upstream API keys entries.
-// Body must be JSON: {"value": ["<upstream-api-key>", ...]}.
-// If "value" is an empty array, clears all entries.
-// If JSON is invalid or "value" is missing/null, returns 400 and does not persist any change.
+// DeleteAmpUpstreamAPIKeys removes specified upstream API key entries.
 func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []string `json:"value"`
@@ -1440,13 +1603,10 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-
 	if body.Value == nil {
 		c.JSON(400, gin.H{"error": "missing value"})
 		return
 	}
-
-	// Empty array means clear all
 	if len(body.Value) == 0 {
 		h.cfg.AmpCode.UpstreamAPIKeys = nil
 		h.persist(c)
@@ -1455,11 +1615,9 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 
 	toRemove := make(map[string]bool)
 	for _, key := range body.Value {
-		trimmed := strings.TrimSpace(key)
-		if trimmed == "" {
-			continue
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
+			toRemove[trimmed] = true
 		}
-		toRemove[trimmed] = true
 	}
 	if len(toRemove) == 0 {
 		c.JSON(400, gin.H{"error": "empty value"})
@@ -1476,7 +1634,6 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 	h.persist(c)
 }
 
-// normalizeAmpUpstreamAPIKeyEntries normalizes a list of upstream API key entries.
 func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) []config.AmpUpstreamAPIKeyEntry {
 	if len(entries) == 0 {
 		return nil
@@ -1487,10 +1644,9 @@ func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) 
 		if upstreamKey == "" {
 			continue
 		}
-		apiKeys := normalizeAPIKeysList(entry.APIKeys)
 		out = append(out, config.AmpUpstreamAPIKeyEntry{
 			UpstreamAPIKey: upstreamKey,
-			APIKeys:        apiKeys,
+			APIKeys:        normalizeAPIKeysList(entry.APIKeys),
 		})
 	}
 	if len(out) == 0 {
@@ -1499,15 +1655,13 @@ func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) 
 	return out
 }
 
-// normalizeAPIKeysList trims and filters empty strings from a list of API keys.
 func normalizeAPIKeysList(keys []string) []string {
 	if len(keys) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		trimmed := strings.TrimSpace(k)
-		if trimmed != "" {
+	for _, key := range keys {
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
 			out = append(out, trimmed)
 		}
 	}

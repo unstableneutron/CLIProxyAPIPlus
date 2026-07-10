@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	oauthSessionTTL     = 10 * time.Minute
-	maxOAuthStateLength = 128
+	oauthSessionTTL          = 10 * time.Minute
+	oauthCompletedSessionTTL = time.Minute
+	maxOAuthStateLength      = 128
 )
 
 const (
@@ -33,23 +34,30 @@ type oauthSession struct {
 	Status    string
 	Source    string
 	Metadata  map[string]any
+	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
 type oauthSessionStore struct {
-	mu       sync.RWMutex
-	ttl      time.Duration
-	sessions map[string]oauthSession
+	mu           sync.RWMutex
+	ttl          time.Duration
+	completedTTL time.Duration
+	sessions     map[string]oauthSession
 }
 
 func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	if ttl <= 0 {
 		ttl = oauthSessionTTL
 	}
+	completedTTL := oauthCompletedSessionTTL
+	if ttl < completedTTL {
+		completedTTL = ttl
+	}
 	return &oauthSessionStore{
-		ttl:      ttl,
-		sessions: make(map[string]oauthSession),
+		ttl:          ttl,
+		completedTTL: completedTTL,
+		sessions:     make(map[string]oauthSession),
 	}
 }
 
@@ -127,7 +135,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok {
+	if !ok || session.Completed {
 		return
 	}
 	session.Status = message
@@ -146,7 +154,15 @@ func (s *oauthSessionStore) Complete(state string) {
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
-	delete(s.sessions, state)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return
+	}
+	session.Status = ""
+	session.Metadata = nil
+	session.Completed = true
+	session.ExpiresAt = now.Add(s.completedTTL)
+	s.sessions[state] = session
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
@@ -163,8 +179,12 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
-			delete(s.sessions, state)
+		if !session.Completed && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+			session.Status = ""
+			session.Metadata = nil
+			session.Completed = true
+			session.ExpiresAt = now.Add(s.completedTTL)
+			s.sessions[state] = session
 			removed++
 		}
 	}
@@ -197,6 +217,9 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if !ok {
 		return false
 	}
+	if session.Completed {
+		return false
+	}
 	if session.Status != "" {
 		if !strings.EqualFold(session.Provider, "kiro") {
 			return false
@@ -204,9 +227,6 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
 			return false
 		}
-	}
-	if session.Source == oauthSessionSourcePlugin {
-		return false
 	}
 	if provider == "" {
 		return true
@@ -247,18 +267,18 @@ func CompletePluginOAuthSessionsByProvider(provider string) int {
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
-	if !ok {
+	if !ok || session.Completed {
 		return "", "", false
 	}
 	return session.Provider, session.Status, true
 }
 
-func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, ok bool) {
+func GetOAuthSessionDetails(state string) (provider string, status string, isPlugin bool, metadata map[string]any, completed bool, ok bool) {
 	session, ok := oauthSessions.Get(state)
 	if !ok {
-		return "", "", false, nil, false
+		return "", "", false, nil, false, false
 	}
-	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), true
+	return session.Provider, session.Status, session.Source == oauthSessionSourcePlugin, cloneOAuthSessionMetadata(session.Metadata), session.Completed, true
 }
 
 func IsOAuthSessionPending(state, provider string) bool {
@@ -332,6 +352,38 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 	}
 }
 
+func NormalizeOAuthCallbackProvider(provider string) (string, error) {
+	if normalized, errNormalize := NormalizeOAuthProvider(provider); errNormalize == nil {
+		return normalized, nil
+	}
+	return NormalizePluginOAuthCallbackProvider(provider)
+}
+
+func NormalizePluginOAuthCallbackProvider(provider string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(provider))
+	if trimmed == "" {
+		return "", errUnsupportedOAuthFlow
+	}
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return "", errUnsupportedOAuthFlow
+		}
+	}
+	return trimmed, nil
+}
+
+func normalizeOAuthCallbackProviderForPendingSession(provider, state string) (string, error) {
+	session, ok := oauthSessions.Get(state)
+	if ok && session.Source == oauthSessionSourcePlugin {
+		return NormalizePluginOAuthCallbackProvider(provider)
+	}
+	return NormalizeOAuthCallbackProvider(provider)
+}
+
 type oauthCallbackFilePayload struct {
 	Code  string `json:"code"`
 	State string `json:"state"`
@@ -339,12 +391,20 @@ type oauthCallbackFilePayload struct {
 }
 
 func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
+	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
+	if err != nil {
+		return "", err
+	}
+	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+}
+
+func writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage string) (string, error) {
 	if strings.TrimSpace(authDir) == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
-	canonicalProvider, err := NormalizeOAuthProvider(provider)
-	if err != nil {
-		return "", err
+	canonicalProvider = strings.TrimSpace(canonicalProvider)
+	if canonicalProvider == "" {
+		return "", errUnsupportedOAuthFlow
 	}
 	if err := ValidateOAuthState(state); err != nil {
 		return "", err
@@ -371,12 +431,12 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 }
 
 func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
-	canonicalProvider, err := NormalizeOAuthProvider(provider)
+	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(provider, state)
 	if err != nil {
 		return "", err
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }

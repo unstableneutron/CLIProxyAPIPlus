@@ -45,6 +45,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}
+	if oldCfg.SaveCooldownStatus != newCfg.SaveCooldownStatus {
+		changes = append(changes, fmt.Sprintf("save-cooldown-status: %t -> %t", oldCfg.SaveCooldownStatus, newCfg.SaveCooldownStatus))
+	}
+	if oldCfg.TransientErrorCooldownSeconds != newCfg.TransientErrorCooldownSeconds {
+		changes = append(changes, fmt.Sprintf("transient-error-cooldown-seconds: %d -> %d", oldCfg.TransientErrorCooldownSeconds, newCfg.TransientErrorCooldownSeconds))
+	}
+	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
+		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
+	}
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}
@@ -143,6 +152,39 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 		}
 	}
+	if len(oldCfg.InteractionsKey) != len(newCfg.InteractionsKey) {
+		changes = append(changes, fmt.Sprintf("interactions-api-key count: %d -> %d", len(oldCfg.InteractionsKey), len(newCfg.InteractionsKey)))
+	} else {
+		for i := range oldCfg.InteractionsKey {
+			o := oldCfg.InteractionsKey[i]
+			n := newCfg.InteractionsKey[i]
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("interactions[%d].headers: updated", i))
+			}
+			oldModels := SummarizeGeminiModels(o.Models)
+			newModels := SummarizeGeminiModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("interactions[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("interactions[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
 
 	// Claude keys (do not print key material)
 	if len(oldCfg.ClaudeKey) != len(newCfg.ClaudeKey) {
@@ -175,6 +217,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(changes, fmt.Sprintf("claude[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
+				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
@@ -226,39 +271,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
 		}
-	}
-
-	// AmpCode settings (redacted where needed)
-	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
-	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
-	if oldAmpURL != newAmpURL {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-url: %s -> %s", oldAmpURL, newAmpURL))
-	}
-	oldAmpKey := strings.TrimSpace(oldCfg.AmpCode.UpstreamAPIKey)
-	newAmpKey := strings.TrimSpace(newCfg.AmpCode.UpstreamAPIKey)
-	switch {
-	case oldAmpKey == "" && newAmpKey != "":
-		changes = append(changes, "ampcode.upstream-api-key: added")
-	case oldAmpKey != "" && newAmpKey == "":
-		changes = append(changes, "ampcode.upstream-api-key: removed")
-	case oldAmpKey != newAmpKey:
-		changes = append(changes, "ampcode.upstream-api-key: updated")
-	}
-	if oldCfg.AmpCode.RestrictManagementToLocalhost != newCfg.AmpCode.RestrictManagementToLocalhost {
-		changes = append(changes, fmt.Sprintf("ampcode.restrict-management-to-localhost: %t -> %t", oldCfg.AmpCode.RestrictManagementToLocalhost, newCfg.AmpCode.RestrictManagementToLocalhost))
-	}
-	oldMappings := SummarizeAmpModelMappings(oldCfg.AmpCode.ModelMappings)
-	newMappings := SummarizeAmpModelMappings(newCfg.AmpCode.ModelMappings)
-	if oldMappings.hash != newMappings.hash {
-		changes = append(changes, fmt.Sprintf("ampcode.model-mappings: updated (%d -> %d entries)", oldMappings.count, newMappings.count))
-	}
-	if oldCfg.AmpCode.ForceModelMappings != newCfg.AmpCode.ForceModelMappings {
-		changes = append(changes, fmt.Sprintf("ampcode.force-model-mappings: %t -> %t", oldCfg.AmpCode.ForceModelMappings, newCfg.AmpCode.ForceModelMappings))
-	}
-	oldUpstreamAPIKeysCount := len(oldCfg.AmpCode.UpstreamAPIKeys)
-	newUpstreamAPIKeysCount := len(newCfg.AmpCode.UpstreamAPIKeys)
-	if !equalUpstreamAPIKeys(oldCfg.AmpCode.UpstreamAPIKeys, newCfg.AmpCode.UpstreamAPIKeys) {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-api-keys: updated (%d -> %d entries)", oldUpstreamAPIKeysCount, newUpstreamAPIKeysCount))
 	}
 
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
@@ -409,44 +421,4 @@ func formatProxyURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
-}
-
-func equalStringSet(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	aSet := make(map[string]struct{}, len(a))
-	for _, k := range a {
-		aSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	bSet := make(map[string]struct{}, len(b))
-	for _, k := range b {
-		bSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	if len(aSet) != len(bSet) {
-		return false
-	}
-	for k := range aSet {
-		if _, ok := bSet[k]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.
-// Comparison is done by count and content (upstream key and client keys).
-func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if strings.TrimSpace(a[i].UpstreamAPIKey) != strings.TrimSpace(b[i].UpstreamAPIKey) {
-			return false
-		}
-		if !equalStringSet(a[i].APIKeys, b[i].APIKeys) {
-			return false
-		}
-	}
-	return true
 }
