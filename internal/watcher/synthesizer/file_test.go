@@ -164,6 +164,48 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFileRejectsRawGeminiBeforePluginDispatch(t *testing.T) {
+	tempDir := t.TempDir()
+
+	for _, tt := range []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "single project",
+			raw:  []byte(`{"type":"gemini","project_id":"project-a"}`),
+		},
+		{
+			name: "multiple projects",
+			raw:  []byte(`{"type":"gemini","project_id":"project-a,project-b"}`),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parserCalls := 0
+			ctx := &SynthesisContext{
+				Config:  &config.Config{},
+				AuthDir: tempDir,
+				Now:     time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
+				PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+					parserCalls++
+					return []*coreauth.Auth{
+						{ID: "gemini-cli.json", Provider: "gemini-cli"},
+						{ID: "gemini-cli-project-a.json", Provider: "gemini-cli"},
+					}, true, nil
+				}),
+			}
+
+			auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			if len(auths) != 0 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want no auths for raw Gemini input", len(auths))
+			}
+			if parserCalls != 0 {
+				t.Fatalf("plugin parser calls = %d, want 0 for raw Gemini input", parserCalls)
+			}
+		})
+	}
+}
+
 func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "geminicli.json")

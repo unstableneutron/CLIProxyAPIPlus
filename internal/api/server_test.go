@@ -337,6 +337,47 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	}
 }
 
+func TestManagementAmpRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+
+	expected := []string{
+		"GET /v0/management/ampcode",
+		"GET /v0/management/ampcode/upstream-url",
+		"PUT /v0/management/ampcode/upstream-url",
+		"PATCH /v0/management/ampcode/upstream-url",
+		"DELETE /v0/management/ampcode/upstream-url",
+		"GET /v0/management/ampcode/upstream-api-key",
+		"PUT /v0/management/ampcode/upstream-api-key",
+		"PATCH /v0/management/ampcode/upstream-api-key",
+		"DELETE /v0/management/ampcode/upstream-api-key",
+		"GET /v0/management/ampcode/restrict-management-to-localhost",
+		"PUT /v0/management/ampcode/restrict-management-to-localhost",
+		"PATCH /v0/management/ampcode/restrict-management-to-localhost",
+		"GET /v0/management/ampcode/model-mappings",
+		"PUT /v0/management/ampcode/model-mappings",
+		"PATCH /v0/management/ampcode/model-mappings",
+		"DELETE /v0/management/ampcode/model-mappings",
+		"GET /v0/management/ampcode/force-model-mappings",
+		"PUT /v0/management/ampcode/force-model-mappings",
+		"PATCH /v0/management/ampcode/force-model-mappings",
+		"GET /v0/management/ampcode/upstream-api-keys",
+		"PUT /v0/management/ampcode/upstream-api-keys",
+		"PATCH /v0/management/ampcode/upstream-api-keys",
+		"DELETE /v0/management/ampcode/upstream-api-keys",
+	}
+	for _, route := range expected {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("missing management route %s", route)
+		}
+	}
+}
+
 func TestVideosRoutesKeepXAINativeAndExposeOpenAIPrefix(t *testing.T) {
 	server := newTestServer(t)
 

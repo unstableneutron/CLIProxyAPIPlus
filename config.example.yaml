@@ -445,6 +445,34 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Amp Integration
+# ampcode:
+#   # Configure upstream URL for Amp CLI OAuth and management features.
+#   upstream-url: "https://ampcode.com"
+#   # Optional: override the Amp upstream API key (otherwise uses env or file).
+#   upstream-api-key: ""
+#   # Map client API keys to separate Amp upstream API keys.
+#   upstream-api-keys:
+#     - upstream-api-key: "amp_key_for_team_a"
+#       api-keys:
+#         - "your-api-key-1"
+#         - "your-api-key-2"
+#     - upstream-api-key: "amp_key_for_team_b"
+#       api-keys:
+#         - "your-api-key-3"
+#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only.
+#   restrict-management-to-localhost: false
+#   # Apply model mappings before checking local API keys.
+#   force-model-mappings: false
+#   # Route unavailable Amp models to models available in the local proxy.
+#   model-mappings:
+#     - from: "claude-opus-4-5-20251101"
+#       to: "gemini-claude-opus-4-5-thinking"
+#     - from: "claude-sonnet-4-5-20250929"
+#       to: "gemini-claude-sonnet-4-5-thinking"
+#     - from: "claude-haiku-4-5-20251001"
+#       to: "gemini-2.5-flash"
+
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai, qoder, iflow, kiro, github-copilot, and plugin providers.
