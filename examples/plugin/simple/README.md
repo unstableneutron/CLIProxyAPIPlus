@@ -87,7 +87,7 @@ All three implementations parse incoming JSON requests for the methods where req
 
 Build from the repository root.
 
-Build all plugin examples, including all three `simple` variants:
+Build all plugin examples:
 
 ```bash
 make -C examples/plugin build
@@ -129,7 +129,6 @@ The plugin ID is the dynamic library basename without the platform extension. Ma
 The host searches:
 
 ```text
-plugins/<GOOS>/<GOARCH>-<variant>
 plugins/<GOOS>/<GOARCH>
 plugins
 ```
@@ -178,11 +177,13 @@ The host still performs the real HTTP request, so proxy handling, transport poli
 
 ## Management API
 
-The native plugin management endpoints remain:
+The native plugin management endpoints are:
 
 ```text
 GET /v0/management/plugins
+DELETE /v0/management/plugins/{pluginID}
 PATCH /v0/management/plugins/{pluginID}/enabled
+GET /v0/management/plugins/{pluginID}/config
 PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```

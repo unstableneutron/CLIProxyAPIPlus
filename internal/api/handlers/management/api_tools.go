@@ -306,11 +306,6 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 			return v
 		}
 	}
-	if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
-		if v := tokenValueFromMetadata(shared.MetadataSnapshot()); v != "" {
-			return v
-		}
-	}
 	return ""
 }
 
@@ -319,12 +314,7 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return "", nil
 	}
 
-	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if provider == "gemini-cli" {
-		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
-		return token, errToken
-	}
-	if provider == "antigravity" {
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
@@ -574,8 +564,8 @@ func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]a
 		if auth.Metadata == nil {
 			auth.Metadata = make(map[string]any)
 		}
-		for k, v := range fields {
-			auth.Metadata[k] = v
+		for key, value := range fields {
+			auth.Metadata[key] = value
 		}
 	}
 }
@@ -823,6 +813,10 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "gemini":
 		if entry := resolveAPIKeyConfig(cfg.GeminiKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "gemini-interactions":
+		if entry := resolveAPIKeyConfig(cfg.InteractionsKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
 	case "claude":

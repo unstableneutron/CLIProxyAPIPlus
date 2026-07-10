@@ -127,7 +127,6 @@ Linux、FreeBSD 或 Windows 使用相同源码目录，平台扩展名以 `examp
 宿主搜索：
 
 ```text
-plugins/<GOOS>/<GOARCH>-<variant>
 plugins/<GOOS>/<GOARCH>
 plugins
 ```
@@ -176,11 +175,13 @@ host.http.do
 
 ## Management API
 
-原生插件管理接口保持不变：
+原生插件管理接口包括：
 
 ```text
 GET /v0/management/plugins
+DELETE /v0/management/plugins/{pluginID}
 PATCH /v0/management/plugins/{pluginID}/enabled
+GET /v0/management/plugins/{pluginID}/config
 PUT /v0/management/plugins/{pluginID}/config
 PATCH /v0/management/plugins/{pluginID}/config
 ```

@@ -18,11 +18,13 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -68,7 +70,7 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	}
 }
 
-func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
+func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
 	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
 		return false
 	}
@@ -261,6 +263,8 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+	var homeClient *home.Client
+	var homePluginSyncReport homeplugins.SyncReport
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -390,7 +394,7 @@ func main() {
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
 		}
-		homeClient := home.New(homeCfg)
+		homeClient = home.New(homeCfg)
 		defer homeClient.Close()
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
@@ -412,6 +416,20 @@ func main() {
 		parsed.Home = homeCfg
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
+		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+		var errHomePlugins error
+		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
+		cancelHomePlugins()
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+		if errHomePlugins != nil {
+			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		}
+		if errHomePlugins != nil {
+			return
+		}
 		cfg = parsed
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
@@ -615,6 +633,7 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -668,11 +687,12 @@ func main() {
 	})
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
-	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
+	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
+	serverOptions := []api.ServerOption(nil)
+	if exampleAPIKeySafeMode {
 		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
-		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; starting warning-only server")
-		cmd.StartExampleAPIKeyWarningServer(cfg, configFilePath, matches)
-		return
+		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; proxy API endpoints disabled until api-keys is updated")
+		serverOptions = append(serverOptions, api.WithExampleAPIKeySafeMode())
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
@@ -689,6 +709,19 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
+	if configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			return
+		}
+	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
 			if exitCode != 0 {
@@ -704,7 +737,7 @@ func main() {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
 	} else if login {
-		// Handle Google/Gemini login
+		// Handle Google/Gemini login.
 		cmd.DoLogin(cfg, projectID, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
@@ -849,7 +882,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost)
+				cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -898,7 +931,6 @@ func main() {
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")
 			}
-
 			if cfg.AuthDir != "" {
 				kiro.InitRateLimiterConfig(cfg)
 				kiro.InitSystemPromptInjectConfig(cfg)
@@ -908,7 +940,7 @@ func main() {
 				defer kiro.StopGlobalRefreshManager()
 			}
 
-			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost)
+			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
 }
