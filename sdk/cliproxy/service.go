@@ -1116,6 +1116,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "bedrock":
+		s.coreManager.RegisterExecutor(executor.NewBedrockExecutor(s.cfg))
 	case "kiro":
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
 	case "kilo":
@@ -1128,6 +1130,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
+	case "commandcode":
+		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(s.cfg))
 	case "qoder":
 		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
 	default:
@@ -2064,6 +2068,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "xai":
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
+	case "bedrock":
+		if entry := s.resolveConfigBedrockProvider(a); entry != nil {
+			models = buildBedrockConfigModels(entry)
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "cursor":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -2090,6 +2102,21 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "codebuddy":
 		models = registry.GetCodeBuddyModels()
+		models = applyExcludedModels(models, excluded)
+	case "commandcode":
+		if entry := s.resolveConfigCommandCodeKey(a); entry != nil && len(entry.Models) > 0 {
+			models = buildCommandCodeConfigModels(entry)
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		} else {
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			models = executor.FetchCommandCodeModels(fetchCtx, a, s.cfg)
+			cancel()
+			if entry := s.resolveConfigCommandCodeKey(a); entry != nil && authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "qoder":
 		models = executor.FetchQoderModels(context.Background(), a, s.cfg)
@@ -2401,6 +2428,53 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	return nil
 }
 
+func (s *Service) resolveConfigCommandCodeKey(auth *coreauth.Auth) *config.CommandCodeKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.CommandCodeKey {
+		entry := &s.cfg.CommandCodeKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigBedrockProvider(auth *coreauth.Auth) *config.BedrockProvider {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrName, attrBase string
+	if auth.Attributes != nil {
+		attrName = strings.TrimSpace(auth.Attributes["bedrock_name"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.Bedrock {
+		entry := &s.cfg.Bedrock[i]
+		if attrName != "" && strings.EqualFold(strings.TrimSpace(entry.Name), attrName) {
+			return entry
+		}
+		if attrBase != "" && strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 	cfg := s.cfg
 	if cfg == nil {
@@ -2415,10 +2489,12 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 }
 
 func (s *Service) effectiveAuthExcludedModels(auth *coreauth.Auth, provider, authKind string, fallback []string) []string {
+	if authExcluded := excludedModelsFromAuthAttributes(auth); len(authExcluded) > 0 {
+		return authExcluded
+	}
 	return mergeExcludedModels(
 		fallback,
 		s.oauthExcludedModels(provider, authKind),
-		excludedModelsFromAuthAttributes(auth),
 	)
 }
 
@@ -2716,6 +2792,35 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+}
+
+func buildCommandCodeConfigModels(entry *config.CommandCodeKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "commandcode", "commandcode")
+}
+
+func buildBedrockConfigModels(entry *config.BedrockProvider) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	models := buildConfigModels(entry.Models, "aws-bedrock", "bedrock")
+	thinkingByAlias := make(map[string]*registry.ThinkingSupport, len(entry.Models)*2)
+	for i := range entry.Models {
+		model := entry.Models[i]
+		if model.Thinking == nil {
+			continue
+		}
+		thinkingByAlias[strings.TrimSpace(model.Name)] = model.Thinking
+		thinkingByAlias[strings.TrimSpace(model.Alias)] = model.Thinking
+	}
+	for _, model := range models {
+		if model != nil && thinkingByAlias[model.ID] != nil {
+			model.Thinking = thinkingByAlias[model.ID]
+		}
+	}
+	return models
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

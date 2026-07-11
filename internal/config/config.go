@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -161,6 +162,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CommandCodeKey defines a list of Command Code API key configurations.
+	CommandCodeKey []CommandCodeKey `yaml:"commandcode-api-key" json:"commandcode-api-key"`
+
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
@@ -185,6 +189,8 @@ type Config struct {
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
+
+	Bedrock []BedrockProvider `yaml:"bedrock" json:"bedrock"`
 
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
@@ -213,6 +219,48 @@ type Config struct {
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// ResponsesStateCapability stores a Codex route's Responses state capability.
+type ResponsesStateCapability string
+
+func (v *ResponsesStateCapability) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil || node.Tag == "!!null" {
+		*v = ""
+		return nil
+	}
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("responses-state must be a scalar")
+	}
+	if node.Tag == "!!bool" {
+		parsed, err := strconv.ParseBool(node.Value)
+		if err != nil {
+			return fmt.Errorf("parse responses-state bool: %w", err)
+		}
+		*v = ResponsesStateCapability(strconv.FormatBool(parsed))
+		return nil
+	}
+	*v = ResponsesStateCapability(strings.TrimSpace(node.Value))
+	return nil
+}
+
+func (v *ResponsesStateCapability) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*v = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*v = ResponsesStateCapability(strings.TrimSpace(s))
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*v = ResponsesStateCapability(strconv.FormatBool(b))
+		return nil
+	}
+	return fmt.Errorf("responses-state must be a string or boolean")
 }
 
 // PluginsConfig holds dynamic plugin system settings.
@@ -325,7 +373,27 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse  bool                  `yaml:"identity-confuse" json:"identity-confuse"`
+	TLSProfile       CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
+	ContinueThinking CodexContinueThinking `yaml:"continue-thinking" json:"continue-thinking"`
+}
+
+// CodexContinueThinking configures optional Codex reasoning truncation folding.
+type CodexContinueThinking struct {
+	Enabled              bool   `yaml:"enabled" json:"enabled"`
+	Method               string `yaml:"method" json:"method"`
+	TruncationStep       int    `yaml:"truncation-step" json:"truncation-step"`
+	MaxRounds            int    `yaml:"max-rounds" json:"max-rounds"`
+	MinTier              int    `yaml:"min-tier" json:"min-tier"`
+	MaxTier              int    `yaml:"max-tier" json:"max-tier"`
+	MaxTotalOutputTokens int64  `yaml:"max-total-output-tokens" json:"max-total-output-tokens"`
+	MarkerText           string `yaml:"marker-text" json:"marker-text"`
+}
+
+// CodexTLSProfileConfig configures transport-specific Codex uTLS profiles.
+type CodexTLSProfileConfig struct {
+	HTTPS     string `yaml:"https" json:"https"`
+	Websocket string `yaml:"websocket" json:"websocket"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -510,6 +578,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -573,6 +644,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -587,6 +661,9 @@ type CodexKey struct {
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
+	// ResponsesState controls whether HTTP/SSE Responses previous_response_id state is supported.
+	ResponsesState ResponsesStateCapability `yaml:"responses-state,omitempty" json:"responses-state,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -595,6 +672,9 @@ type CodexKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// QueryParams optionally adds extra URL query parameters for requests sent with this key.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
@@ -622,11 +702,42 @@ func (m CodexModel) GetName() string       { return m.Name }
 func (m CodexModel) GetAlias() string      { return m.Alias }
 func (m CodexModel) GetForceMapping() bool { return m.ForceMapping }
 
+// CommandCodeKey represents the configuration for a Command Code API key.
+type CommandCodeKey struct {
+	APIKey         string             `yaml:"api-key" json:"api-key"`
+	Label          string             `yaml:"label,omitempty" json:"label,omitempty"`
+	Priority       int                `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Prefix         string             `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	BaseURL        string             `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	ProxyURL       string             `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	Models         []CommandCodeModel `yaml:"models,omitempty" json:"models,omitempty"`
+	Headers        map[string]string  `yaml:"headers,omitempty" json:"headers,omitempty"`
+	ExcludedModels []string           `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+	DisableCooling bool               `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+func (k CommandCodeKey) GetAPIKey() string  { return k.APIKey }
+func (k CommandCodeKey) GetBaseURL() string { return k.BaseURL }
+
+// CommandCodeModel describes a mapping between an alias and the upstream model name.
+type CommandCodeModel struct {
+	Name         string `yaml:"name" json:"name"`
+	Alias        string `yaml:"alias" json:"alias"`
+	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+func (m CommandCodeModel) GetName() string       { return m.Name }
+func (m CommandCodeModel) GetAlias() string      { return m.Alias }
+func (m CommandCodeModel) GetForceMapping() bool { return m.ForceMapping }
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -766,11 +877,17 @@ type OpenAICompatibility struct {
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
+	// APIKeyEnv names an environment variable containing an API key.
+	APIKeyEnv string `yaml:"api-key-env,omitempty" json:"api-key-env,omitempty"`
+
 	// Models defines the model configurations including aliases for routing.
 	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// QueryParams optionally adds extra URL query parameters for requests sent to this provider.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
@@ -780,6 +897,9 @@ type OpenAICompatibility struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -940,6 +1060,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
+	// Sanitize Command Code API keys.
+	cfg.SanitizeCommandCodeKeys()
+
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
@@ -954,6 +1077,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	cfg.SanitizeBedrockProviders()
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
@@ -1156,7 +1281,9 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.APIKeyEnv = strings.TrimSpace(e.APIKeyEnv)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -1177,7 +1304,9 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ResponsesState = ResponsesStateCapability(strings.TrimSpace(string(e.ResponsesState)))
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
 			continue
@@ -1185,6 +1314,34 @@ func (cfg *Config) SanitizeCodexKeys() {
 		out = append(out, e)
 	}
 	cfg.CodexKey = out
+}
+
+// SanitizeCommandCodeKeys deduplicates and normalizes Command Code credentials.
+func (cfg *Config) SanitizeCommandCodeKeys() {
+	if cfg == nil || len(cfg.CommandCodeKey) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.CommandCodeKey))
+	out := cfg.CommandCodeKey[:0]
+	for i := range cfg.CommandCodeKey {
+		entry := cfg.CommandCodeKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.CommandCodeKey = out
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
@@ -1278,11 +1435,20 @@ func looksLikeBcrypt(s string) bool {
 
 // NormalizeHeaders trims header keys and values and removes empty pairs.
 func NormalizeHeaders(headers map[string]string) map[string]string {
-	if len(headers) == 0 {
+	return normalizeStringMap(headers)
+}
+
+// NormalizeQueryParams trims query parameter keys and values and removes empty pairs.
+func NormalizeQueryParams(params map[string]string) map[string]string {
+	return normalizeStringMap(params)
+}
+
+func normalizeStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
 		return nil
 	}
-	clean := make(map[string]string, len(headers))
-	for k, v := range headers {
+	clean := make(map[string]string, len(values))
+	for k, v := range values {
 		key := strings.TrimSpace(k)
 		val := strings.TrimSpace(v)
 		if key == "" || val == "" {

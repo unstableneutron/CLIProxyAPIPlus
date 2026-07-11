@@ -11,6 +11,26 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
+func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
+	detail := ParseGeminiCLIUsage([]byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`))
+	if detail.InputTokens != 11 || detail.OutputTokens != 7 || detail.ReasoningTokens != 3 || detail.TotalTokens != 21 || detail.CachedTokens != 5 {
+		t.Fatalf("unexpected Gemini CLI usage detail: %+v", detail)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_ResponseSnakeCaseUsageMetadata(t *testing.T) {
+	detail, ok := ParseGeminiCLIStreamUsage([]byte(`data: {"response":{"usage_metadata":{"promptTokenCount":13,"candidatesTokenCount":2,"totalTokenCount":15}}}`))
+	if !ok || detail.InputTokens != 13 || detail.OutputTokens != 2 || detail.TotalTokens != 15 {
+		t.Fatalf("unexpected Gemini CLI stream usage: detail=%+v ok=%v", detail, ok)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_IgnoresTrafficTypeOnlyUsageMetadata(t *testing.T) {
+	if detail, ok := ParseGeminiCLIStreamUsage([]byte(`data: {"response":{"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)); ok {
+		t.Fatalf("traffic-only metadata parsed as usage: %+v", detail)
+	}
+}
+
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
 	detail := ParseOpenAIUsage(data)

@@ -20,8 +20,22 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
+
+type snapshotGeminiCLIParser struct{}
+
+func (snapshotGeminiCLIParser) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	if req.Provider != "gemini-cli" {
+		return nil, false, nil
+	}
+	return &coreauth.Auth{
+		ID:       filepath.Base(req.Path),
+		Provider: "gemini-cli",
+		Label:    "user@example.com",
+	}, true, nil
+}
 
 func TestApplyAuthExcludedModelsMeta_APIKey(t *testing.T) {
 	auth := &coreauth.Auth{Attributes: map[string]string{}}
@@ -118,7 +132,7 @@ func TestMatchProvider(t *testing.T) {
 func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	authDir := t.TempDir()
 	metadata := map[string]any{
-		"type":       "gemini",
+		"type":       "gemini-cli",
 		"email":      "user@example.com",
 		"project_id": "proj-a, proj-b",
 		"proxy_url":  "https://proxy",
@@ -149,6 +163,7 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 
 	w := &Watcher{authDir: authDir}
 	w.SetConfig(cfg)
+	w.SetPluginAuthParser(snapshotGeminiCLIParser{})
 
 	auths := w.SnapshotCoreAuths()
 	if len(auths) != 4 {

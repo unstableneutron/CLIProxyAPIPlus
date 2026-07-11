@@ -1200,7 +1200,11 @@ func mapCodexWebsocketReadError(err error) error {
 	return err
 }
 
-func buildCodexWebsocketRequestBody(body []byte, wsURL string) []byte {
+func buildCodexWebsocketRequestBody(body []byte, websocketURL ...string) []byte {
+	wsURL := ""
+	if len(websocketURL) > 0 {
+		wsURL = websocketURL[0]
+	}
 	if len(body) == 0 {
 		return nil
 	}

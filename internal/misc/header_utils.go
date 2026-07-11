@@ -15,21 +15,29 @@ const (
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
 )
 
+func geminiCLIOS() string {
+	if runtime.GOOS == "windows" {
+		return "win32"
+	}
+	return runtime.GOOS
+}
+
+func geminiCLIArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "386":
+		return "x86"
+	default:
+		return runtime.GOARCH
+	}
+}
+
 func GeminiCLIUserAgent(model string) string {
 	if model == "" {
 		model = "unknown"
 	}
-	osName := runtime.GOOS
-	if osName == "windows" {
-		osName = "win32"
-	}
-	arch := runtime.GOARCH
-	if arch == "amd64" {
-		arch = "x64"
-	} else if arch == "386" {
-		arch = "x86"
-	}
-	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)", GeminiCLIVersion, model, osName, arch)
+	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s; terminal)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
 }
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal

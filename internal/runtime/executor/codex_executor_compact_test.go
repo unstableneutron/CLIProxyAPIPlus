@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t *testing.T) {
+func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload string

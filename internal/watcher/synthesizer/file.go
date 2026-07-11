@@ -198,9 +198,21 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		UpdatedAt: now,
 	}
 	applyAuthPriorityAndNote(a, metadata)
+	if provider == "commandcode" {
+		if apiKey := extractCommandCodeAPIKey(metadata); apiKey != "" {
+			a.Attributes["api_key"] = apiKey
+		}
+		if baseURL := extractStringMetadata(metadata, "base_url", "baseURL", "api_base", "apiBase"); baseURL != "" {
+			a.Attributes["base_url"] = baseURL
+		}
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	authKind := "oauth"
+	if provider == "commandcode" && strings.TrimSpace(a.Attributes["api_key"]) != "" {
+		authKind = "apikey"
+	}
+	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, authKind)
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
@@ -263,6 +275,32 @@ func applyAuthPriorityAndNote(auth *coreauth.Auth, metadata map[string]any) {
 			}
 		}
 	}
+}
+
+func extractCommandCodeAPIKey(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	if value := extractStringMetadata(metadata, "api_key", "apiKey", "access_token", "access", "commandcode"); value != "" {
+		return value
+	}
+	if nested, ok := metadata["commandcode"].(map[string]any); ok {
+		return extractStringMetadata(nested, "access", "access_token", "apiKey", "api_key")
+	}
+	return ""
+}
+
+func extractStringMetadata(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if raw, ok := metadata[key]; ok {
+			if value, isString := raw.(string); isString {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual auth entries for multi-project Gemini credentials.

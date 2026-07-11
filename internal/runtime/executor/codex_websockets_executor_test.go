@@ -40,6 +40,28 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"start"}]}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`)
+	call := []byte(`{"type":"function_call","id":"fc-1","call_id":"call-1","name":"tool","arguments":"{}","status":"completed"}`)
+
+	patched := patchCodexCompletedOutput(completed, map[int64][]byte{0: call}, nil)
+	state := &xaiWebsocketIDState{}
+	state.recordTranscriptTurn(request, patched)
+	transcript := state.snapshotTranscriptInput()
+
+	found := false
+	for _, item := range gjson.ParseBytes(transcript).Array() {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call-1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("compaction transcript missing streamed function call: %s", transcript)
+	}
+}
+
 func TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)

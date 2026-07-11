@@ -234,6 +234,27 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
+// Cancel removes a pending OAuth session so background waiters exit without saving credentials.
+// It returns true only when a pending session was cancelled.
+func (s *oauthSessionStore) Cancel(state string) bool {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return false
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Status != "" {
+		return false
+	}
+	delete(s.sessions, state)
+	return true
+}
+
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
@@ -283,6 +304,19 @@ func GetOAuthSessionDetails(state string) (provider string, status string, isPlu
 
 func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
+}
+
+// guardOAuthSessionPendingForSave prevents cancelled or completed flows from persisting credentials.
+func guardOAuthSessionPendingForSave(state, provider string) error {
+	if IsOAuthSessionPending(state, provider) {
+		return nil
+	}
+	return errOAuthSessionNotPending
+}
+
+// CancelOAuthSession cancels a pending OAuth session by state.
+func CancelOAuthSession(state string) bool {
+	return oauthSessions.Cancel(state)
 }
 
 func oauthSessionErrorWithCause(message string, cause error) string {

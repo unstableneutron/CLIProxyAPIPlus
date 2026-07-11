@@ -95,8 +95,26 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
+}
+
+func requestEventConfigFromConfig(cfg *config.Config) logging.FileRequestEventConfig {
+	if cfg == nil {
+		return logging.FileRequestEventConfig{}
+	}
+	requestEvents := cfg.RequestEvents.Normalized()
+	return logging.FileRequestEventConfig{
+		LoggerOptions: logging.RequestEventLoggerOptions{
+			Enabled:              requestEvents.IsEnabled() && !cfg.CommercialMode,
+			QueueSize:            requestEvents.QueueSize,
+			MaxQueuedPayloadSize: int64(requestEvents.MaxQueuedPayloadMB) * 1024 * 1024,
+			FlushInterval:        time.Duration(requestEvents.FlushIntervalMS) * time.Millisecond,
+		},
+		MaxFileSize:     int64(requestEvents.MaxFileSizeMB) * 1024 * 1024,
+		WriteBufferSize: requestEvents.WriteBufferSizeKB * 1024,
+	}
 }
 
 func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
@@ -263,6 +281,12 @@ type Server struct {
 
 	exampleAPIKeySafeModeEnabled bool
 	exampleAPIKeySafeModeActive  atomic.Bool
+
+	// chatGPTBackendPassthroughBaseURL is the upstream base for gated ChatGPT backend passthrough routes.
+	chatGPTBackendPassthroughBaseURL string
+
+	// chatGPTBackendPassthroughClient optionally overrides the upstream HTTP client in tests.
+	chatGPTBackendPassthroughClient *http.Client
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -410,7 +434,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
-	engine.NoRoute(s.pluginManagementNoRoute)
+	engine.NoRoute(s.noRoute)
 
 	// === CLIProxyAPIPlus 扩展: 注册 Kiro OAuth Web 路由 ===
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
@@ -950,6 +974,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
 }
 
@@ -1039,6 +1064,21 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) noRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") || strings.HasPrefix(path, "/v0/resource/plugins/") {
+		s.pluginManagementNoRoute(c)
+		return
+	}
+	s.handleChatGPTBackendPassthroughNoRoute(c)
 }
 
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {
@@ -1829,6 +1869,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {
 		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
 			setter.SetHomeEnabled(cfg.Home.Enabled)
+		}
+	}
+
+	if oldCfg == nil || oldCfg.CommercialMode != cfg.CommercialMode || oldCfg.RequestEvents.Normalized() != cfg.RequestEvents.Normalized() {
+		if setter, ok := s.requestLogger.(interface {
+			ConfigureRequestEvents(logging.FileRequestEventConfig)
+		}); ok {
+			setter.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 		}
 	}
 

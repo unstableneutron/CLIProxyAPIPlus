@@ -2987,148 +2987,53 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestXAIToken(c *gin.Context) {
-	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
-
+	ctx := PopulateAuthContext(context.Background(), c)
 	fmt.Println("Initializing xAI authentication...")
 
-	pkceCodes, errPKCE := xaiauth.GeneratePKCECodes()
-	if errPKCE != nil {
-		log.Errorf("Failed to generate xAI PKCE codes: %v", errPKCE)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
-		return
-	}
-
-	state, errState := misc.GenerateRandomState()
-	if errState != nil {
-		log.Errorf("Failed to generate state parameter: %v", errState)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
-		return
-	}
-
-	nonce, errNonce := misc.GenerateRandomState()
-	if errNonce != nil {
-		log.Errorf("Failed to generate nonce parameter: %v", errNonce)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate nonce parameter"})
-		return
-	}
-
+	state := fmt.Sprintf("xai-%d", time.Now().UnixNano())
 	authSvc := xaiauth.NewXAIAuth(h.cfg)
-	discovery, errDiscover := authSvc.Discover(ctx)
-	if errDiscover != nil {
-		log.Errorf("Failed to discover xAI OAuth endpoints: %v", errDiscover)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to discover oauth endpoints"})
+	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start xAI device flow: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
 		return
 	}
-
-	redirectURI := fmt.Sprintf("http://%s:%d%s", xaiauth.RedirectHost, xaiauth.CallbackPort, xaiauth.RedirectPath)
-	authURL, errAuthURL := xaiauth.BuildAuthorizeURL(xaiauth.AuthorizeURLParams{
-		AuthorizationEndpoint: discovery.AuthorizationEndpoint,
-		RedirectURI:           redirectURI,
-		CodeChallenge:         pkceCodes.CodeChallenge,
-		State:                 state,
-		Nonce:                 nonce,
-	})
-	if errAuthURL != nil {
-		log.Errorf("Failed to generate xAI authorization URL: %v", errAuthURL)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
-
 	RegisterOAuthSession(state, "xai")
 
-	isWebUI := isWebUIRequest(c)
-	var forwarder *callbackForwarder
-	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/xai/callback")
-		if errTarget != nil {
-			log.WithError(errTarget).Error("failed to compute xai callback target")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
-			return
-		}
-		var errStart error
-		if forwarder, errStart = startCallbackForwarder(xaiauth.CallbackPort, "xai", targetURL); errStart != nil {
-			log.WithError(errStart).Error("failed to start xai callback forwarder")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-			return
-		}
-	}
-
 	go func() {
-		if isWebUI {
-			defer stopCallbackForwarderInstance(xaiauth.CallbackPort, forwarder)
-		}
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "xai")
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-xai-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
-		var authCode string
-		for {
-			if !IsOAuthSessionPending(state, "xai") {
-				return
+		bundle, errWaitForAuthorization := authSvc.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if IsOAuthSessionPending(state, "xai") {
+				SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
 			}
-			if time.Now().After(deadline) {
-				log.Error("xai oauth flow timed out")
-				SetOAuthSessionError(state, "OAuth flow timed out")
-				return
-			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
-				var payload map[string]string
-				_ = json.Unmarshal(data, &payload)
-				_ = os.Remove(waitFile)
-				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
-					log.Errorf("xAI authentication failed: %s", errStr)
-					SetOAuthSessionError(state, "Authentication failed: "+errStr)
-					return
-				}
-				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
-					log.Errorf("xAI authentication failed: state mismatch")
-					SetOAuthSessionError(state, "Authentication failed: state mismatch")
-					return
-				}
-				authCode = strings.TrimSpace(payload["code"])
-				if authCode == "" {
-					log.Error("xAI authentication failed: code not found")
-					SetOAuthSessionError(state, "Authentication failed: code not found")
-					return
-				}
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		bundle, errExchange := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI, pkceCodes, discovery.TokenEndpoint)
-		if errExchange != nil {
-			log.Errorf("Failed to exchange xAI token: %v", errExchange)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
 			return
 		}
-
+		if !IsOAuthSessionPending(state, "xai") {
+			return
+		}
 		tokenStorage := authSvc.CreateTokenStorage(bundle)
 		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
-			log.Error("xAI token exchange returned empty access token")
 			SetOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
-
 		fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
 		label := strings.TrimSpace(tokenStorage.Email)
 		if label == "" {
 			label = "xAI"
 		}
-
 		metadata := map[string]any{
-			"type":           "xai",
-			"access_token":   tokenStorage.AccessToken,
-			"refresh_token":  tokenStorage.RefreshToken,
-			"id_token":       tokenStorage.IDToken,
-			"token_type":     tokenStorage.TokenType,
-			"expires_in":     tokenStorage.ExpiresIn,
-			"expired":        tokenStorage.Expire,
-			"last_refresh":   tokenStorage.LastRefresh,
-			"base_url":       tokenStorage.BaseURL,
-			"redirect_uri":   tokenStorage.RedirectURI,
-			"token_endpoint": tokenStorage.TokenEndpoint,
-			"auth_kind":      "oauth",
+			"type": "xai", "access_token": tokenStorage.AccessToken, "refresh_token": tokenStorage.RefreshToken,
+			"id_token": tokenStorage.IDToken, "token_type": tokenStorage.TokenType, "expires_in": tokenStorage.ExpiresIn,
+			"expired": tokenStorage.Expire, "last_refresh": tokenStorage.LastRefresh, "base_url": tokenStorage.BaseURL,
+			"token_endpoint": tokenStorage.TokenEndpoint, "auth_kind": "oauth",
 		}
 		if tokenStorage.Email != "" {
 			metadata["email"] = tokenStorage.Email
@@ -3136,32 +3041,52 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		if tokenStorage.Subject != "" {
 			metadata["sub"] = tokenStorage.Subject
 		}
-
 		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "xai",
-			FileName: fileName,
-			Label:    label,
-			Storage:  tokenStorage,
-			Metadata: metadata,
-			Attributes: map[string]string{
-				"auth_kind": "oauth",
-				"base_url":  tokenStorage.BaseURL,
-			},
+			ID: fileName, Provider: "xai", FileName: fileName, Label: label, Storage: tokenStorage, Metadata: metadata,
+			Attributes: map[string]string{"auth_kind": "oauth", "base_url": tokenStorage.BaseURL},
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "xai"); errGuard != nil {
+			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			log.Errorf("Failed to save xAI token to file: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save token to file")
 			return
 		}
-
 		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use xAI services through this CLI")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	} else {
+		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+// watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.
+func watchOAuthSessionCancel(pollCtx context.Context, cancel context.CancelFunc, state, provider string) {
+	if cancel == nil {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pollCtx.Done():
+			return
+		case <-ticker.C:
+			if !IsOAuthSessionPending(state, provider) {
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 func (h *Handler) RequestQoderToken(c *gin.Context) {
@@ -4009,6 +3934,20 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 		return false, fmt.Errorf("project activation required: %s", errMessage)
 	}
 	return true, nil
+}
+
+// CancelAuthSession cancels a pending callback or device-code flow.
+func (h *Handler) CancelAuthSession(c *gin.Context) {
+	state := strings.TrimSpace(c.Query("state"))
+	if state == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "missing state"})
+		return
+	}
+	if err := ValidateOAuthState(state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": CancelOAuthSession(state)})
 }
 
 func (h *Handler) GetAuthStatus(c *gin.Context) {

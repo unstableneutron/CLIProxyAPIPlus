@@ -833,6 +833,26 @@ func codexClientTestPriority(raw any) int {
 	}
 }
 
+func maxEmbeddedCodexTemplatePriorityForTest(t *testing.T) int {
+	t.Helper()
+
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
+		t.Fatalf("parse codex client models fixture: %v", err)
+	}
+
+	maxPriority := 0
+	for _, model := range payload.Models {
+		priority := codexClientTestPriority(model["priority"])
+		if priority > maxPriority {
+			maxPriority = priority
+		}
+	}
+	return maxPriority
+}
+
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
 	t.Helper()
 
