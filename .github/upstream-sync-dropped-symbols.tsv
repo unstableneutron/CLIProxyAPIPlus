@@ -177,3 +177,5 @@ websocketTurnCoordinatorExecutor.HttpRequest	approved upstream-first Responses f
 websocketTurnCoordinatorExecutor.Identifier	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 websocketTurnCoordinatorExecutor.Refresh	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 websocketTurnCoordinatorExecutor.ReleaseStream	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
+shouldReleaseResponsesWebsocketPinnedAuth	dedicated Responses turn runner now owns pre-commit auth and route recovery
+TestShouldReleaseResponsesWebsocketPinnedAuth	dedicated Responses turn runner tests recovery transitions directly

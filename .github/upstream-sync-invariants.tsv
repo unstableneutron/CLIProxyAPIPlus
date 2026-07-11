@@ -22,3 +22,7 @@ contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponses
 contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
 contains	sdk/api/handlers/openai/openai_responses_handlers.go	isResponsesCompactionTriggerRequest(rawJSON)	responses compaction-trigger streams bypass bootstrap timeout
 contains	sdk/api/handlers/openai/openai_responses_handlers_stream_error_test.go	TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger	responses compaction-trigger stream timeout regression test remains
+contains	sdk/api/handlers/openai/openai_responses_websocket.go	runner.Start(cliCtx	responses websocket handler retains dedicated turn-runner seam
+contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner.go	responsesWebsocketStartupBufferLimit = 1 << 20	responses websocket speculative startup buffer remains bounded to one MiB
+contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner_test.go	TestResponsesWebsocketTurnRunnerNeverRetriesAfterSemanticCommit	responses websocket never retries after downstream semantic commitment
+contains	sdk/cliproxy/executor/types.go	ExcludedAuthIDsMetadataKey	turn-local exact auth exclusion metadata remains available

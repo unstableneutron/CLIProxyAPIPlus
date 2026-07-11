@@ -18,6 +18,9 @@ const RequestPathMetadataKey = "request_path"
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
+// ExcludedAuthIDsMetadataKey carries turn-local auth IDs that selection must skip.
+const ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
+
 // AuthSelectionModelMetadataKey overrides the model used only for auth selection.
 const AuthSelectionModelMetadataKey = "auth_selection_model"
 

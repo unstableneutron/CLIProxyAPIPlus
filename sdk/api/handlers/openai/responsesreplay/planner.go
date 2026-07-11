@@ -2,6 +2,7 @@ package responsesreplay
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,112 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+type Constraints uint8
+
+const (
+	RequireReplay Constraints = 1 << iota
+	OmitEncryptedContent
+	OmitProviderIdentifiers
+)
+
+func (c Constraints) Normalized() Constraints {
+	if c&(OmitEncryptedContent|OmitProviderIdentifiers) != 0 {
+		c |= RequireReplay
+	}
+	return c
+}
+
+type FailureKind uint8
+
+const (
+	FailureNone FailureKind = iota
+	FailurePreviousResponseMissing
+	FailureProviderItemMissing
+	FailureInvalidEncryptedContent
+	FailureAuthOrRoute
+	FailureRequest
+	FailureProtocol
+	FailureCanceled
+	FailureCompactionTakeover
+)
+
+func Advance(current Constraints, kind FailureKind, compact bool) (Constraints, bool) {
+	current = current.Normalized()
+	next := current
+	switch kind {
+	case FailurePreviousResponseMissing:
+		if current&RequireReplay == 0 {
+			next |= RequireReplay
+		} else {
+			next |= OmitProviderIdentifiers
+		}
+	case FailureProviderItemMissing:
+		next |= RequireReplay | OmitProviderIdentifiers
+	case FailureInvalidEncryptedContent:
+		if !compact {
+			next |= RequireReplay | OmitEncryptedContent
+		}
+	}
+	next = next.Normalized()
+	return next, next != current
+}
+
+func RenderWithConstraints(native, replay []byte, constraints Constraints) ([]byte, [32]byte, bool, error) {
+	constraints = constraints.Normalized()
+	base := native
+	if constraints&RequireReplay != 0 {
+		base = replay
+	}
+	if len(bytes.TrimSpace(base)) == 0 || !json.Valid(base) {
+		return nil, [32]byte{}, false, fmt.Errorf("invalid responses replay JSON")
+	}
+	rendered := bytes.Clone(base)
+	if constraints&OmitProviderIdentifiers != 0 {
+		rendered, _ = stripProviderIdentifiers(rendered)
+	}
+	if constraints&OmitEncryptedContent != 0 {
+		rendered, _ = stripNonPortableEncryptedContent(rendered)
+	}
+	if !json.Valid(rendered) {
+		return nil, [32]byte{}, false, fmt.Errorf("rendered responses replay JSON is invalid")
+	}
+	return rendered, sha256.Sum256(rendered), !bytes.Equal(rendered, native), nil
+}
+
+func ClassifyFailure(status int, message string) FailureKind {
+	message = strings.TrimSpace(message)
+	if message != "" && gjson.Valid(message) {
+		payload := []byte(message)
+		if classifyStructuredInvalidEncryptedContent(payload) {
+			return FailureInvalidEncryptedContent
+		}
+		if classifyStructuredPreviousResponse(payload) {
+			return FailurePreviousResponseMissing
+		}
+		if classifyStructuredProviderItem(payload) {
+			return FailureProviderItemMissing
+		}
+	}
+	if invalidEncryptedContentMessage(message) {
+		return FailureInvalidEncryptedContent
+	}
+	if previousResponseNotFoundMessage(message) {
+		return FailurePreviousResponseMissing
+	}
+	if providerItemNotFoundMessage(message) {
+		return FailureProviderItemMissing
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden ||
+		status == http.StatusRequestTimeout || status == http.StatusConflict ||
+		status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+		return FailureAuthOrRoute
+	}
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		return FailureRequest
+	}
+	return FailureProtocol
+}
 
 type Attempt int
 
@@ -276,6 +383,45 @@ func classifyStructuredProviderState(payload []byte) bool {
 	return false
 }
 
+func classifyStructuredPreviousResponse(payload []byte) bool {
+	for _, path := range []string{"error.code", "body.error.code", "code", "response.error.code"} {
+		if strings.TrimSpace(gjson.GetBytes(payload, path).String()) == "previous_response_not_found" {
+			return true
+		}
+	}
+	for _, path := range []string{"error.param", "body.error.param", "param", "response.error.param"} {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String())), "previous_response_id") {
+			return true
+		}
+	}
+	for _, path := range []string{"error.message", "body.error.message", "message", "response.error.message"} {
+		if previousResponseNotFoundMessage(gjson.GetBytes(payload, path).String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyStructuredProviderItem(payload []byte) bool {
+	for _, path := range []string{"error.code", "body.error.code", "code", "response.error.code"} {
+		if strings.TrimSpace(gjson.GetBytes(payload, path).String()) == "item_not_found" {
+			return true
+		}
+	}
+	for _, path := range []string{"error.param", "body.error.param", "param", "response.error.param"} {
+		param := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, path).String()))
+		if (strings.Contains(param, "input") || strings.Contains(param, "output")) && strings.Contains(param, ".id") {
+			return true
+		}
+	}
+	for _, path := range []string{"error.message", "body.error.message", "message", "response.error.message"} {
+		if providerItemNotFoundMessage(gjson.GetBytes(payload, path).String()) {
+			return true
+		}
+	}
+	return false
+}
+
 func providerStateParam(param string) bool {
 	param = strings.ToLower(strings.TrimSpace(param))
 	return strings.Contains(param, "previous_response_id") ||
@@ -292,6 +438,10 @@ func invalidEncryptedContentMessage(message string) bool {
 }
 
 func providerStateNotFoundMessage(message string) bool {
+	return previousResponseNotFoundMessage(message) || providerItemNotFoundMessage(message)
+}
+
+func previousResponseNotFoundMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if strings.Contains(lower, "previous_response_not_found") {
 		return true
@@ -299,6 +449,11 @@ func providerStateNotFoundMessage(message string) bool {
 	if strings.Contains(lower, "previous response") && strings.Contains(lower, "not found") {
 		return true
 	}
+	return false
+}
+
+func providerItemNotFoundMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
 	if !strings.Contains(lower, "item") || !strings.Contains(lower, "not found") {
 		return false
 	}

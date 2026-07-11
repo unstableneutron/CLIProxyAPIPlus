@@ -1713,7 +1713,7 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	}
 }
 
-func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
+func TestResponsesWebsocketDoesNotSubscribeIdleUpstreamDisconnect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketUpstreamDisconnectExecutor{subscribed: make(chan string, 1)}
@@ -1734,19 +1734,21 @@ func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	var sessionID string
 	select {
-	case sessionID = <-executor.subscribed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect subscription")
+	case sessionID := <-executor.subscribed:
+		t.Fatalf("unexpected idle upstream disconnect subscription for %s", sessionID)
+	case <-time.After(100 * time.Millisecond):
 	}
 
-	executor.TriggerDisconnect(sessionID, errors.New("upstream disconnected"))
-
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err = conn.ReadMessage()
-	if err == nil {
-		t.Fatalf("expected downstream websocket to close after upstream disconnect")
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"unsupported"}`)); errWrite != nil {
+		t.Fatalf("write after idle period: %v", errWrite)
+	}
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("downstream websocket closed while idle: %v", errRead)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("payload type = %q, want error: %s", got, payload)
 	}
 }
 
@@ -2523,7 +2525,7 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`,
 		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-3"}]}`,
 	}
-	wantTypes := []string{wsEventTypeCompleted, wsEventTypeError, wsEventTypeCompleted}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeCompleted, wsEventTypeCompleted}
 	for i := range requests {
 		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
 			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
@@ -2535,48 +2537,23 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
 			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wantTypes[i], payload)
 		}
-		if i == 1 && int(gjson.GetBytes(payload, "status").Int()) != http.StatusTooManyRequests {
-			t.Fatalf("quota payload status = %d, want %d: %s", gjson.GetBytes(payload, "status").Int(), http.StatusTooManyRequests, payload)
-		}
 	}
 
-	if got := executor.AuthIDs(); len(got) != 3 || got[0] != "auth-a" || got[1] != "auth-a" || got[2] != "auth-b" {
-		t.Fatalf("selected auth IDs = %v, want [auth-a auth-a auth-b]", got)
+	if got := executor.AuthIDs(); len(got) != 4 || got[0] != "auth-a" || got[1] != "auth-a" || got[2] != "auth-b" || got[3] != "auth-b" {
+		t.Fatalf("selected auth IDs = %v, want [auth-a auth-a auth-b auth-b]", got)
 	}
 
 	authBPayloads := executor.Payloads("auth-b")
-	if len(authBPayloads) != 1 {
-		t.Fatalf("auth-b payload count = %d, want 1", len(authBPayloads))
+	if len(authBPayloads) != 2 {
+		t.Fatalf("auth-b payload count = %d, want 2", len(authBPayloads))
 	}
 	authBPayload := authBPayloads[0]
 	if gjson.GetBytes(authBPayload, "previous_response_id").Exists() {
 		t.Fatalf("previous_response_id leaked after auth failover: %s", authBPayload)
 	}
 	authBInput := gjson.GetBytes(authBPayload, "input").Raw
-	if !strings.Contains(authBInput, `"id":"msg-1"`) || !strings.Contains(authBInput, `"id":"msg-3"`) {
+	if !strings.Contains(authBInput, `"id":"msg-1"`) || !strings.Contains(authBInput, `"id":"msg-2"`) {
 		t.Fatalf("auth-b replay input missing expected transcript items: %s", authBInput)
-	}
-}
-
-func TestShouldReleaseResponsesWebsocketPinnedAuth(t *testing.T) {
-	cases := []struct {
-		name string
-		err  *interfaces.ErrorMessage
-		want bool
-	}{
-		{name: "nil", err: nil, want: false},
-		{name: "request timeout", err: &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: fmt.Errorf("stream closed before response.completed")}, want: true},
-		{name: "service unavailable", err: &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("websocket bootstrap failed")}, want: true},
-		{name: "bad request", err: &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("invalid request")}, want: false},
-		{name: "previous response missing", err: &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("previous_response_not_found")}, want: true},
-		{name: "empty stream", err: &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: fmt.Errorf("empty_stream: upstream stream closed before first payload")}, want: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldReleaseResponsesWebsocketPinnedAuth(tc.err); got != tc.want {
-				t.Fatalf("shouldReleaseResponsesWebsocketPinnedAuth() = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 

@@ -67,6 +67,7 @@ type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type responsesStateModeContextKey struct{}
 type disallowFreeAuthContextKey struct{}
+type excludedAuthIDsContextKey struct{}
 
 // PluginInterceptorHost applies plugin interceptors around handler execution.
 type PluginInterceptorHost interface {
@@ -143,6 +144,21 @@ func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) cont
 	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
 }
 
+// WithAdditionalSelectedAuthIDCallback composes a callback with any existing selection observer.
+func WithAdditionalSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	previous := selectedAuthIDCallbackFromContext(ctx)
+	if previous == nil {
+		return WithSelectedAuthIDCallback(ctx, callback)
+	}
+	return WithSelectedAuthIDCallback(ctx, func(authID string) {
+		previous(authID)
+		callback(authID)
+	})
+}
+
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
 func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
 	sessionID = strings.TrimSpace(sessionID)
@@ -173,6 +189,35 @@ func WithDisallowFreeAuth(ctx context.Context) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, disallowFreeAuthContextKey{}, true)
+}
+
+// WithExcludedAuthIDs returns a child context with normalized turn-local auth exclusions.
+func WithExcludedAuthIDs(ctx context.Context, authIDs []string) context.Context {
+	normalized := normalizeExcludedAuthIDs(authIDs)
+	if len(normalized) == 0 {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, excludedAuthIDsContextKey{}, normalized)
+}
+
+func normalizeExcludedAuthIDs(authIDs []string) []string {
+	seen := make(map[string]struct{}, len(authIDs))
+	normalized := make([]string, 0, len(authIDs))
+	for _, authID := range authIDs {
+		authID = strings.TrimSpace(authID)
+		if authID == "" {
+			continue
+		}
+		if _, ok := seen[authID]; ok {
+			continue
+		}
+		seen[authID] = struct{}{}
+		normalized = append(normalized, authID)
+	}
+	return normalized
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -319,6 +364,11 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
+	}
+	if ctx != nil {
+		if excluded, ok := ctx.Value(excludedAuthIDsContextKey{}).([]string); ok && len(excluded) > 0 {
+			meta[coreexecutor.ExcludedAuthIDsMetadataKey] = append([]string(nil), excluded...)
+		}
 	}
 	return meta
 }
