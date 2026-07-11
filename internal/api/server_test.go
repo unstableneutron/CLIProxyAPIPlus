@@ -337,6 +337,47 @@ func TestManagementPluginsRouteRegistered(t *testing.T) {
 	}
 }
 
+func TestManagementAmpRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+
+	expected := []string{
+		"GET /v0/management/ampcode",
+		"GET /v0/management/ampcode/upstream-url",
+		"PUT /v0/management/ampcode/upstream-url",
+		"PATCH /v0/management/ampcode/upstream-url",
+		"DELETE /v0/management/ampcode/upstream-url",
+		"GET /v0/management/ampcode/upstream-api-key",
+		"PUT /v0/management/ampcode/upstream-api-key",
+		"PATCH /v0/management/ampcode/upstream-api-key",
+		"DELETE /v0/management/ampcode/upstream-api-key",
+		"GET /v0/management/ampcode/restrict-management-to-localhost",
+		"PUT /v0/management/ampcode/restrict-management-to-localhost",
+		"PATCH /v0/management/ampcode/restrict-management-to-localhost",
+		"GET /v0/management/ampcode/model-mappings",
+		"PUT /v0/management/ampcode/model-mappings",
+		"PATCH /v0/management/ampcode/model-mappings",
+		"DELETE /v0/management/ampcode/model-mappings",
+		"GET /v0/management/ampcode/force-model-mappings",
+		"PUT /v0/management/ampcode/force-model-mappings",
+		"PATCH /v0/management/ampcode/force-model-mappings",
+		"GET /v0/management/ampcode/upstream-api-keys",
+		"PUT /v0/management/ampcode/upstream-api-keys",
+		"PATCH /v0/management/ampcode/upstream-api-keys",
+		"DELETE /v0/management/ampcode/upstream-api-keys",
+	}
+	for _, route := range expected {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("missing management route %s", route)
+		}
+	}
+}
+
 func TestVideosRoutesKeepXAINativeAndExposeOpenAIPrefix(t *testing.T) {
 	server := newTestServer(t)
 
@@ -724,8 +765,8 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
-	if got, want := int(codexClientTestPriority(custom["priority"])), maxEmbeddedCodexTemplatePriorityForTest(t)+100; got != want {
-		t.Fatalf("custom priority = %v, want %d", custom["priority"], want)
+	if got := int(codexClientTestPriority(custom["priority"])); got != 143 {
+		t.Fatalf("custom priority = %v, want 143", custom["priority"])
 	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)
@@ -790,26 +831,6 @@ func codexClientTestPriority(raw any) int {
 	default:
 		return -1
 	}
-}
-
-func maxEmbeddedCodexTemplatePriorityForTest(t *testing.T) int {
-	t.Helper()
-
-	var payload struct {
-		Models []map[string]any `json:"models"`
-	}
-	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
-		t.Fatalf("parse codex client models fixture: %v", err)
-	}
-
-	maxPriority := 0
-	for _, model := range payload.Models {
-		priority := codexClientTestPriority(model["priority"])
-		if priority > maxPriority {
-			maxPriority = priority
-		}
-	}
-	return maxPriority
 }
 
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {

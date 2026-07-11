@@ -1195,9 +1195,13 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if len(model.SupportedEndpoints) > 0 {
+			result["supported_endpoints"] = model.SupportedEndpoints
+		}
 		return result
 
-	case "claude":
+	case "claude", "kiro", "antigravity":
+		// Claude, Kiro, and Antigravity all use Claude-compatible format for Claude Code client
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
@@ -1211,6 +1215,29 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["display_name"] = model.DisplayName
 		} else {
 			result["display_name"] = model.ID
+		}
+		// Add thinking support for Claude Code client
+		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
+		// Also add "extended_thinking" for detailed budget info
+		if model.Thinking != nil {
+			result["thinking"] = true
+			result["extended_thinking"] = map[string]any{
+				"supported":       true,
+				"min":             model.Thinking.Min,
+				"max":             model.Thinking.Max,
+				"zero_allowed":    model.Thinking.ZeroAllowed,
+				"dynamic_allowed": model.Thinking.DynamicAllowed,
+			}
+		}
+		// Include context limits so Claude Code can manage conversation
+		// context correctly, especially for Copilot-proxied models whose
+		// real prompt limit (128K-168K) is much lower than the 1M window
+		// that Claude Code may assume for Opus 4.6 with 1M context enabled.
+		if model.ContextLength > 0 {
+			result["context_length"] = model.ContextLength
+		}
+		if model.MaxCompletionTokens > 0 {
+			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
 		maxInput := model.ContextLength
 		if maxInput <= 0 {

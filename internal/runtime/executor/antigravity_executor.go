@@ -53,6 +53,7 @@ const (
 	antigravityGeneratePath                = "/v1internal:generateContent"
 	antigravityClientIDEnv                 = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
 	antigravityClientSecretEnv             = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+	defaultAntigravityAgent                = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
 	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
@@ -2140,7 +2141,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		log.Debugf("antigravity executor: marshal loadCodeAssist request error: %v", errMarshal)
 		return
 	}
-	baseURL := antigravityLoadCodeAssistBaseURL(auth)
+	baseURL := buildBaseURL(auth)
 	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
 	if errReq != nil {
@@ -2433,10 +2434,6 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 		return baseURLs[0]
 	}
 	return antigravityBaseURLDaily
-}
-
-func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
-	return buildBaseURL(auth)
 }
 
 func resolveHost(base string) string {

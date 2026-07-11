@@ -26,7 +26,6 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
-	CommandCode []*ModelInfo `json:"commandcode"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Qoder       []*ModelInfo `json:"qoder"`
 	Antigravity []*ModelInfo `json:"antigravity"`
@@ -48,7 +47,7 @@ func GetGeminiVertexModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Vertex)
 }
 
-// GetGeminiCLIModels returns Gemini model definitions for the Gemini CLI.
+// GetGeminiCLIModels returns model definitions for the Gemini CLI.
 func GetGeminiCLIModels() []*ModelInfo {
 	return cloneModelInfos(getModels().GeminiCLI)
 }
@@ -76,15 +75,6 @@ func GetCodexPlusModels() []*ModelInfo {
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
-}
-
-// GetCommandCodeModels returns the standard Command Code model definitions.
-func GetCommandCodeModels() []*ModelInfo {
-	models := cloneModelInfos(getModels().CommandCode)
-	if len(models) == 0 {
-		return commandCodeBuiltinModelInfos()
-	}
-	return models
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -282,65 +272,6 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	return out
 }
 
-func commandCodeBuiltinModelInfos() []*ModelInfo {
-	return []*ModelInfo{
-		commandCodeModelInfo("deepseek/deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro (CC)", 1000000, 384000, true),
-		commandCodeModelInfo("deepseek/deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash (CC)", 1000000, 384000, true),
-		commandCodeModelInfo("moonshotai/Kimi-K2.7-Code", "moonshotai", "Kimi K2.7 Code (CC)", 262144, 131072, true),
-		commandCodeModelInfo("moonshotai/Kimi-K2.7-Code-Highspeed", "moonshotai", "Kimi K2.7 Code Highspeed (CC)", 262144, 131072, true),
-		commandCodeModelInfo("moonshotai/Kimi-K2.6", "moonshotai", "Kimi K2.6 (CC)", 262144, 131072, true),
-		commandCodeModelInfo("moonshotai/Kimi-K2.5", "moonshotai", "Kimi K2.5 (CC)", 262144, 131072, true),
-		commandCodeModelInfo("zai-org/GLM-5.2", "zai-org", "GLM-5.2 (CC)", 200000, 131072, true),
-		commandCodeModelInfo("zai-org/GLM-5.2-Fast", "zai-org", "GLM-5.2 Fast (CC)", 200000, 131072, true),
-		commandCodeModelInfo("zai-org/GLM-5.1", "zai-org", "GLM-5.1 (CC)", 200000, 131072, true),
-		commandCodeModelInfo("zai-org/GLM-5", "zai-org", "GLM-5 (CC)", 200000, 131072, true),
-		commandCodeModelInfo("MiniMaxAI/MiniMax-M3", "MiniMaxAI", "MiniMax M3 (CC)", 1048576, 131072, true),
-		commandCodeModelInfo("MiniMaxAI/MiniMax-M2.7", "MiniMaxAI", "MiniMax M2.7 (CC)", 1048576, 131072, true),
-		commandCodeModelInfo("MiniMaxAI/MiniMax-M2.5", "MiniMaxAI", "MiniMax M2.5 (CC)", 1048576, 131072, true),
-		commandCodeModelInfo("xiaomi/mimo-v2.5-pro", "xiaomi", "MiMo V2.5 Pro (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("xiaomi/mimo-v2.5", "xiaomi", "MiMo V2.5 (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("Qwen/Qwen3.6-Max-Preview", "Qwen", "Qwen 3.6 Max Preview (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("Qwen/Qwen3.6-Plus", "Qwen", "Qwen 3.6 Plus (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("Qwen/Qwen3.7-Max", "Qwen", "Qwen 3.7 Max (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("Qwen/Qwen3.7-Plus", "Qwen", "Qwen 3.7 Plus (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("stepfun/Step-3.7-Flash", "stepfun", "Step 3.7 Flash (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("stepfun/Step-3.5-Flash", "stepfun", "Step 3.5 Flash (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("nvidia/nemotron-3-ultra-550b-a55b", "nvidia", "Nemotron 3 Ultra 550B A55B (CC)", 1000000, 131072, true),
-		commandCodeModelInfo("claude-opus-4-7", "anthropic", "Claude Opus 4.7 (CC)", 200000, 32000, true),
-		commandCodeModelInfo("claude-opus-4-8", "anthropic", "Claude Opus 4.8 (CC)", 200000, 32000, true),
-		commandCodeModelInfo("claude-sonnet-5", "anthropic", "Claude Sonnet 5 (CC)", 200000, 16384, true),
-		commandCodeModelInfo("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6 (CC)", 200000, 16384, true),
-		commandCodeModelInfo("claude-fable-5", "anthropic", "Claude Fable 5 (CC)", 200000, 16384, true),
-		commandCodeModelInfo("claude-haiku-4-5", "anthropic", "Claude Haiku 4.5 (CC)", 200000, 8192, true),
-		commandCodeModelInfo("gpt-5.5", "openai", "GPT-5.5 (CC)", 256000, 128000, true),
-		commandCodeModelInfo("gpt-5.4", "openai", "GPT-5.4 (CC)", 256000, 128000, true),
-		commandCodeModelInfo("gpt-5.3-codex", "openai", "GPT-5.3 Codex (CC)", 256000, 128000, true),
-		commandCodeModelInfo("gpt-5.4-mini", "openai", "GPT-5.4 Mini (CC)", 256000, 128000, false),
-		commandCodeModelInfo("google/gemini-3.5-flash", "google", "Gemini 3.5 Flash (CC)", 1000000, 65536, true),
-		commandCodeModelInfo("google/gemini-3.1-flash-lite", "google", "Gemini 3.1 Flash Lite (CC)", 1000000, 65536, false),
-		commandCodeModelInfo("sakana/fugu-ultra", "sakana", "Fugu Ultra (CC)", 1000000, 131072, true),
-	}
-}
-
-func commandCodeModelInfo(id, ownedBy, displayName string, contextLength, maxCompletionTokens int, reasoning bool) *ModelInfo {
-	info := &ModelInfo{
-		ID:                  id,
-		Object:              "model",
-		Created:             1776902400,
-		OwnedBy:             ownedBy,
-		Type:                "commandcode",
-		DisplayName:         displayName,
-		Version:             id,
-		ContextLength:       contextLength,
-		MaxCompletionTokens: maxCompletionTokens,
-		SupportedParameters: []string{"tools"},
-	}
-	if reasoning {
-		info.Thinking = &ThinkingSupport{Levels: []string{"low", "medium", "high"}}
-	}
-	return info
-}
-
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
 // It returns nil when the channel is unknown.
 //
@@ -351,7 +282,6 @@ func commandCodeModelInfo(id, ownedBy, displayName string, contextLength, maxCom
 //   - gemini-cli
 //   - aistudio
 //   - codex
-//   - commandcode
 //   - kimi
 //   - antigravity
 //   - xai
@@ -370,8 +300,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
-	case "commandcode", "command-code", "command_code":
-		return GetCommandCodeModels()
 	case "kimi":
 		return GetKimiModels()
 	case "github-copilot":
@@ -420,7 +348,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
-		GetCommandCodeModels(),
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,

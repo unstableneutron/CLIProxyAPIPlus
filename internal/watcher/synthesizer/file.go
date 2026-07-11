@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	geminicli "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -80,6 +81,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
+	if provider == "gemini" {
+		return nil
+	}
 	if ctx.PluginAuthParser != nil {
 		auths, handled, errParse := parsePluginFileAuths(ctx.PluginAuthParser, pluginapi.AuthParseRequest{
 			Provider: provider,
@@ -110,6 +114,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				auth.Attributes[coreauth.AttributePath] = fullPath
 				auth.Attributes[coreauth.AttributeSource] = fullPath
 				auth.Attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+				applyAuthPriorityAndNote(auth, metadata)
 				if disabled {
 					auth.Disabled = true
 					auth.Status = coreauth.StatusDisabled
@@ -122,14 +127,19 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
 			}
+			if len(auths) == 1 && strings.EqualFold(auths[0].Provider, "gemini-cli") {
+				if virtuals := SynthesizeGeminiVirtualAuths(auths[0], metadata, now); len(virtuals) > 0 {
+					for _, virtual := range virtuals {
+						ApplyAuthExcludedModelsMeta(virtual, cfg, perAccountExcluded, "oauth")
+					}
+					return append(auths, virtuals...)
+				}
+			}
 			return auths
 		}
 	}
-	if provider == "" {
+	if provider == "" || provider == "gemini-cli" {
 		return nil
-	}
-	if provider == "gemini" {
-		provider = "gemini-cli"
 	}
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {
@@ -187,41 +197,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	// Read priority from auth file.
-	if rawPriority, ok := metadata["priority"]; ok {
-		switch v := rawPriority.(type) {
-		case float64:
-			a.Attributes["priority"] = strconv.Itoa(int(v))
-		case string:
-			priority := strings.TrimSpace(v)
-			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
-				a.Attributes["priority"] = priority
-			}
-		}
-	}
-	// Read note from auth file.
-	if rawNote, ok := metadata["note"]; ok {
-		if note, isStr := rawNote.(string); isStr {
-			if trimmed := strings.TrimSpace(note); trimmed != "" {
-				a.Attributes["note"] = trimmed
-			}
-		}
-	}
-	if provider == "commandcode" {
-		if apiKey := extractCommandCodeAPIKey(metadata); apiKey != "" {
-			a.Attributes["api_key"] = apiKey
-		}
-		if baseURL := extractStringMetadata(metadata, "base_url", "baseURL", "api_base", "apiBase"); baseURL != "" {
-			a.Attributes["base_url"] = baseURL
-		}
-	}
+	applyAuthPriorityAndNote(a, metadata)
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
-	authKind := "oauth"
-	if provider == "commandcode" && strings.TrimSpace(a.Attributes["api_key"]) != "" {
-		authKind = "apikey"
-	}
-	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, authKind)
+	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
@@ -230,6 +209,22 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 					a.Attributes["plan_type"] = pt
 				}
 			}
+		}
+	}
+	if provider == "qoder" {
+		// Deserialize the on-disk JSON directly into the storage struct so
+		// every persisted field — including the cached model_configs map
+		// written by SaveTokenToFile — survives restarts and hot-reloads.
+		// Field-by-field copying from the metadata map drops nested types
+		// like ModelConfigs (map[string]json.RawMessage) and would force
+		// buildQoderModelConfig to fail with "model config cache is empty"
+		// whenever /algo/api/v2/model/list is unavailable.
+		var storage qoderauth.QoderTokenStorage
+		if errStorage := json.Unmarshal(data, &storage); errStorage == nil {
+			if storage.Type == "" {
+				storage.Type = "qoder"
+			}
+			a.Storage = &storage
 		}
 	}
 	if provider == "gemini-cli" {
@@ -246,8 +241,31 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	return []*coreauth.Auth{a}
 }
 
-// SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.
-// It disables the primary auth and creates one virtual auth per project.
+func applyAuthPriorityAndNote(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || auth.Attributes == nil {
+		return
+	}
+	if rawPriority, ok := metadata["priority"]; ok {
+		switch value := rawPriority.(type) {
+		case float64:
+			auth.Attributes["priority"] = strconv.Itoa(int(value))
+		case string:
+			priority := strings.TrimSpace(value)
+			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
+				auth.Attributes["priority"] = priority
+			}
+		}
+	}
+	if rawNote, ok := metadata["note"]; ok {
+		if note, isString := rawNote.(string); isString {
+			if trimmed := strings.TrimSpace(note); trimmed != "" {
+				auth.Attributes["note"] = trimmed
+			}
+		}
+	}
+}
+
+// SynthesizeGeminiVirtualAuths creates virtual auth entries for multi-project Gemini credentials.
 func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, now time.Time) []*coreauth.Auth {
 	if primary == nil || metadata == nil {
 		return nil
@@ -266,15 +284,13 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 	}
 	primary.Attributes["gemini_virtual_primary"] = "true"
 	primary.Attributes["virtual_children"] = strings.Join(projects, ",")
-	source := primary.Attributes["source"]
-	authPath := primary.Attributes["path"]
-	originalProvider := primary.Provider
-	if originalProvider == "" {
-		originalProvider = "gemini-cli"
+	provider := primary.Provider
+	if provider == "" {
+		provider = "gemini-cli"
 	}
 	label := primary.Label
 	if label == "" {
-		label = originalProvider
+		label = provider
 	}
 	virtuals := make([]*coreauth.Auth, 0, len(projects))
 	for _, projectID := range projects {
@@ -283,15 +299,14 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"gemini_virtual_parent":  primary.ID,
 			"gemini_virtual_project": projectID,
 		}
-		if source != "" {
-			attrs["source"] = source
+		for _, key := range []string{"source", "path", "priority", "note"} {
+			if value := strings.TrimSpace(primary.Attributes[key]); value != "" {
+				attrs[key] = value
+			}
 		}
-		if authPath != "" {
-			attrs["path"] = authPath
-		}
-		for k, v := range primary.Attributes {
-			if strings.HasPrefix(k, "excluded_models") || strings.HasPrefix(k, "oauth_model_alias") || k == "priority" || k == "note" {
-				attrs[k] = v
+		for key, value := range primary.Attributes {
+			if strings.HasPrefix(key, "header:") && strings.TrimSpace(value) != "" {
+				attrs[key] = value
 			}
 		}
 		metadataCopy := map[string]any{
@@ -301,89 +316,56 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
 		}
-		if v, ok := metadata["disable_cooling"]; ok {
-			metadataCopy["disable_cooling"] = v
-		}
-		if v, ok := metadata["refresh_interval_seconds"]; ok {
-			metadataCopy["refresh_interval_seconds"] = v
+		for _, key := range []string{"disable_cooling", "disable-cooling", "request_retry", "request-retry"} {
+			if value, ok := metadata[key]; ok {
+				metadataCopy[strings.ReplaceAll(key, "-", "_")] = value
+			}
 		}
 		if proxy := strings.TrimSpace(primary.ProxyURL); proxy != "" {
 			metadataCopy["proxy_url"] = proxy
 		}
-		virtual := &coreauth.Auth{
+		virtuals = append(virtuals, &coreauth.Auth{
 			ID:         buildGeminiVirtualID(primary.ID, projectID),
-			Provider:   originalProvider,
+			Provider:   provider,
 			Label:      fmt.Sprintf("%s [%s]", label, projectID),
 			Status:     coreauth.StatusActive,
 			Attributes: attrs,
-			ProxyURL:   primary.ProxyURL,
 			Metadata:   metadataCopy,
+			ProxyURL:   primary.ProxyURL,
+			Prefix:     primary.Prefix,
 			CreatedAt:  primary.CreatedAt,
 			UpdatedAt:  primary.UpdatedAt,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
-		}
-		virtuals = append(virtuals, virtual)
+		})
 	}
 	return virtuals
 }
 
-// splitGeminiProjectIDs extracts and deduplicates project IDs from metadata.
 func splitGeminiProjectIDs(metadata map[string]any) []string {
 	raw, _ := metadata["project_id"].(string)
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	result := make([]string, 0)
-	for _, part := range strings.Split(trimmed, ",") {
-		project := strings.TrimSpace(part)
+	seen := make(map[string]struct{})
+	projects := make([]string, 0)
+	for _, item := range strings.Split(raw, ",") {
+		project := strings.TrimSpace(item)
 		if project == "" {
 			continue
 		}
-		if _, ok := seen[project]; ok {
+		if _, exists := seen[project]; exists {
 			continue
 		}
 		seen[project] = struct{}{}
-		result = append(result, project)
+		projects = append(projects, project)
 	}
-	return result
+	return projects
 }
 
-// buildGeminiVirtualID constructs a virtual auth ID from base ID and project ID.
 func buildGeminiVirtualID(baseID, projectID string) string {
 	project := strings.TrimSpace(projectID)
 	if project == "" {
 		project = "project"
 	}
-	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-")
+	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
-}
-
-func extractCommandCodeAPIKey(metadata map[string]any) string {
-	if metadata == nil {
-		return ""
-	}
-	if value := extractStringMetadata(metadata, "api_key", "apiKey", "access_token", "access", "commandcode"); value != "" {
-		return value
-	}
-	if nested, ok := metadata["commandcode"].(map[string]any); ok {
-		return extractStringMetadata(nested, "access", "access_token", "apiKey", "api_key")
-	}
-	return ""
-}
-
-func extractStringMetadata(metadata map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if raw, ok := metadata[key]; ok {
-			if value, okString := raw.(string); okString {
-				if trimmed := strings.TrimSpace(value); trimmed != "" {
-					return trimmed
-				}
-			}
-		}
-	}
-	return ""
 }
 
 func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {

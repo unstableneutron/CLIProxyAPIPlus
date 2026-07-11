@@ -635,7 +635,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		APIKeyEntries  *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models         *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers        *map[string]string                  `json:"headers"`
-		QueryParams    *map[string]string                  `json:"query-params"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -698,9 +697,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.QueryParams != nil {
-		entry.QueryParams = config.NormalizeQueryParams(*body.Value.QueryParams)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
@@ -1043,6 +1039,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
 	if len(normalized) == 0 {
+		// Only delete if channel exists, otherwise just create empty entry
 		if h.cfg.OAuthModelAlias != nil {
 			if _, ok := h.cfg.OAuthModelAlias[channel]; ok {
 				delete(h.cfg.OAuthModelAlias, channel)
@@ -1053,6 +1050,7 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 				return
 			}
 		}
+		// Create new channel with empty aliases
 		if h.cfg.OAuthModelAlias == nil {
 			h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 		}
@@ -1084,6 +1082,9 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
+	// Set to nil instead of deleting the key so that the "explicitly disabled"
+	// marker survives config reload and prevents SanitizeOAuthModelAlias from
+	// re-injecting default aliases (fixes #222).
 	h.cfg.OAuthModelAlias[channel] = nil
 	h.persist(c)
 }
@@ -1131,10 +1132,8 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
-		ResponsesState *string              `json:"responses-state"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
-		QueryParams    *map[string]string   `json:"query-params"`
 		ExcludedModels *[]string            `json:"excluded-models"`
 	}
 	var body struct {
@@ -1187,17 +1186,11 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
-	if body.Value.ResponsesState != nil {
-		entry.ResponsesState = config.ResponsesStateCapability(strings.TrimSpace(*body.Value.ResponsesState))
-	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.QueryParams != nil {
-		entry.QueryParams = config.NormalizeQueryParams(*body.Value.QueryParams)
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
@@ -1328,7 +1321,6 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.QueryParams = config.NormalizeQueryParams(entry.QueryParams)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {
 		return
@@ -1394,6 +1386,7 @@ func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[s
 	return cfg.OAuthModelAlias
 }
 
+// GetAmpCode returns the complete ampcode configuration.
 func (h *Handler) GetAmpCode(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"ampcode": config.AmpCode{}})
@@ -1402,6 +1395,7 @@ func (h *Handler) GetAmpCode(c *gin.Context) {
 	c.JSON(200, gin.H{"ampcode": h.cfg.AmpCode})
 }
 
+// GetAmpUpstreamURL returns the ampcode upstream URL.
 func (h *Handler) GetAmpUpstreamURL(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"upstream-url": ""})
@@ -1410,15 +1404,18 @@ func (h *Handler) GetAmpUpstreamURL(c *gin.Context) {
 	c.JSON(200, gin.H{"upstream-url": h.cfg.AmpCode.UpstreamURL})
 }
 
+// PutAmpUpstreamURL updates the ampcode upstream URL.
 func (h *Handler) PutAmpUpstreamURL(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.AmpCode.UpstreamURL = strings.TrimSpace(v) })
 }
 
+// DeleteAmpUpstreamURL clears the ampcode upstream URL.
 func (h *Handler) DeleteAmpUpstreamURL(c *gin.Context) {
 	h.cfg.AmpCode.UpstreamURL = ""
 	h.persist(c)
 }
 
+// GetAmpUpstreamAPIKey returns the ampcode upstream API key.
 func (h *Handler) GetAmpUpstreamAPIKey(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"upstream-api-key": ""})
@@ -1427,15 +1424,18 @@ func (h *Handler) GetAmpUpstreamAPIKey(c *gin.Context) {
 	c.JSON(200, gin.H{"upstream-api-key": h.cfg.AmpCode.UpstreamAPIKey})
 }
 
+// PutAmpUpstreamAPIKey updates the ampcode upstream API key.
 func (h *Handler) PutAmpUpstreamAPIKey(c *gin.Context) {
 	h.updateStringField(c, func(v string) { h.cfg.AmpCode.UpstreamAPIKey = strings.TrimSpace(v) })
 }
 
+// DeleteAmpUpstreamAPIKey clears the ampcode upstream API key.
 func (h *Handler) DeleteAmpUpstreamAPIKey(c *gin.Context) {
 	h.cfg.AmpCode.UpstreamAPIKey = ""
 	h.persist(c)
 }
 
+// GetAmpRestrictManagementToLocalhost returns the localhost restriction setting.
 func (h *Handler) GetAmpRestrictManagementToLocalhost(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"restrict-management-to-localhost": true})
@@ -1444,10 +1444,12 @@ func (h *Handler) GetAmpRestrictManagementToLocalhost(c *gin.Context) {
 	c.JSON(200, gin.H{"restrict-management-to-localhost": h.cfg.AmpCode.RestrictManagementToLocalhost})
 }
 
+// PutAmpRestrictManagementToLocalhost updates the localhost restriction setting.
 func (h *Handler) PutAmpRestrictManagementToLocalhost(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.RestrictManagementToLocalhost = v })
 }
 
+// GetAmpModelMappings returns the ampcode model mappings.
 func (h *Handler) GetAmpModelMappings(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"model-mappings": []config.AmpModelMapping{}})
@@ -1456,6 +1458,7 @@ func (h *Handler) GetAmpModelMappings(c *gin.Context) {
 	c.JSON(200, gin.H{"model-mappings": h.cfg.AmpCode.ModelMappings})
 }
 
+// PutAmpModelMappings replaces all ampcode model mappings.
 func (h *Handler) PutAmpModelMappings(c *gin.Context) {
 	var body struct {
 		Value []config.AmpModelMapping `json:"value"`
@@ -1468,6 +1471,7 @@ func (h *Handler) PutAmpModelMappings(c *gin.Context) {
 	h.persist(c)
 }
 
+// PatchAmpModelMappings adds or updates model mappings.
 func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 	var body struct {
 		Value []config.AmpModelMapping `json:"value"`
@@ -1478,8 +1482,8 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 	}
 
 	existing := make(map[string]int)
-	for i, m := range h.cfg.AmpCode.ModelMappings {
-		existing[strings.TrimSpace(m.From)] = i
+	for i, mapping := range h.cfg.AmpCode.ModelMappings {
+		existing[strings.TrimSpace(mapping.From)] = i
 	}
 
 	for _, newMapping := range body.Value {
@@ -1494,6 +1498,7 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 	h.persist(c)
 }
 
+// DeleteAmpModelMappings removes specified model mappings by "from" field.
 func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	var body struct {
 		Value []string `json:"value"`
@@ -1510,15 +1515,16 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	}
 
 	newMappings := make([]config.AmpModelMapping, 0, len(h.cfg.AmpCode.ModelMappings))
-	for _, m := range h.cfg.AmpCode.ModelMappings {
-		if !toRemove[strings.TrimSpace(m.From)] {
-			newMappings = append(newMappings, m)
+	for _, mapping := range h.cfg.AmpCode.ModelMappings {
+		if !toRemove[strings.TrimSpace(mapping.From)] {
+			newMappings = append(newMappings, mapping)
 		}
 	}
 	h.cfg.AmpCode.ModelMappings = newMappings
 	h.persist(c)
 }
 
+// GetAmpForceModelMappings returns whether model mappings are forced.
 func (h *Handler) GetAmpForceModelMappings(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"force-model-mappings": false})
@@ -1527,10 +1533,12 @@ func (h *Handler) GetAmpForceModelMappings(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-mappings": h.cfg.AmpCode.ForceModelMappings})
 }
 
+// PutAmpForceModelMappings updates the force model mappings setting.
 func (h *Handler) PutAmpForceModelMappings(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.ForceModelMappings = v })
 }
 
+// GetAmpUpstreamAPIKeys returns the ampcode upstream API keys mapping.
 func (h *Handler) GetAmpUpstreamAPIKeys(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{"upstream-api-keys": []config.AmpUpstreamAPIKeyEntry{}})
@@ -1539,6 +1547,7 @@ func (h *Handler) GetAmpUpstreamAPIKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"upstream-api-keys": h.cfg.AmpCode.UpstreamAPIKeys})
 }
 
+// PutAmpUpstreamAPIKeys replaces all ampcode upstream API key mappings.
 func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
@@ -1547,11 +1556,11 @@ func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	normalized := normalizeAmpUpstreamAPIKeyEntries(body.Value)
-	h.cfg.AmpCode.UpstreamAPIKeys = normalized
+	h.cfg.AmpCode.UpstreamAPIKeys = normalizeAmpUpstreamAPIKeyEntries(body.Value)
 	h.persist(c)
 }
 
+// PatchAmpUpstreamAPIKeys adds or updates upstream API key entries by upstream key.
 func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
@@ -1585,6 +1594,7 @@ func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 	h.persist(c)
 }
 
+// DeleteAmpUpstreamAPIKeys removes specified upstream API key entries.
 func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 	var body struct {
 		Value []string `json:"value"`
@@ -1593,12 +1603,10 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-
 	if body.Value == nil {
 		c.JSON(400, gin.H{"error": "missing value"})
 		return
 	}
-
 	if len(body.Value) == 0 {
 		h.cfg.AmpCode.UpstreamAPIKeys = nil
 		h.persist(c)
@@ -1607,11 +1615,9 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 
 	toRemove := make(map[string]bool)
 	for _, key := range body.Value {
-		trimmed := strings.TrimSpace(key)
-		if trimmed == "" {
-			continue
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
+			toRemove[trimmed] = true
 		}
-		toRemove[trimmed] = true
 	}
 	if len(toRemove) == 0 {
 		c.JSON(400, gin.H{"error": "empty value"})
@@ -1638,10 +1644,9 @@ func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) 
 		if upstreamKey == "" {
 			continue
 		}
-		apiKeys := normalizeAPIKeysList(entry.APIKeys)
 		out = append(out, config.AmpUpstreamAPIKeyEntry{
 			UpstreamAPIKey: upstreamKey,
-			APIKeys:        apiKeys,
+			APIKeys:        normalizeAPIKeysList(entry.APIKeys),
 		})
 	}
 	if len(out) == 0 {
@@ -1655,9 +1660,8 @@ func normalizeAPIKeysList(keys []string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		trimmed := strings.TrimSpace(k)
-		if trimmed != "" {
+	for _, key := range keys {
+		if trimmed := strings.TrimSpace(key); trimmed != "" {
 			out = append(out, trimmed)
 		}
 	}

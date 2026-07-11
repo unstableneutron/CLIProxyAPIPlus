@@ -743,6 +743,9 @@ func main() {
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
+	} else if login {
+		// Handle Google/Gemini login.
+		cmd.DoLogin(cfg, projectID, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -935,7 +938,6 @@ func main() {
 			} else if cfg.Home.Enabled {
 				log.Info("Home mode: remote model updates disabled")
 			}
-
 			if cfg.AuthDir != "" {
 				kiro.InitRateLimiterConfig(cfg)
 				kiro.InitSystemPromptInjectConfig(cfg)

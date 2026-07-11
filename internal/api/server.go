@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v7/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -38,6 +38,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -94,27 +95,8 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-	logger.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
-}
-
-func requestEventConfigFromConfig(cfg *config.Config) logging.FileRequestEventConfig {
-	if cfg == nil {
-		return logging.FileRequestEventConfig{}
-	}
-	requestEvents := cfg.RequestEvents.Normalized()
-	enabled := requestEvents.IsEnabled() && !cfg.CommercialMode
-	return logging.FileRequestEventConfig{
-		LoggerOptions: logging.RequestEventLoggerOptions{
-			Enabled:              enabled,
-			QueueSize:            requestEvents.QueueSize,
-			MaxQueuedPayloadSize: int64(requestEvents.MaxQueuedPayloadMB) * 1024 * 1024,
-			FlushInterval:        time.Duration(requestEvents.FlushIntervalMS) * time.Millisecond,
-		},
-		MaxFileSize:     int64(requestEvents.MaxFileSizeMB) * 1024 * 1024,
-		WriteBufferSize: requestEvents.WriteBufferSizeKB * 1024,
-	}
 }
 
 func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
@@ -124,7 +106,6 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 	sdkCfg := cfg.SDKConfig
 	if cfg.CommercialMode {
 		sdkCfg.RequestLog = false
-		sdkCfg.RequestEvents.Enabled = false
 	}
 	return &sdkCfg
 }
@@ -239,14 +220,6 @@ type Server struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
-	// chatGPTBackendPassthroughBaseURL is the upstream base for gated ChatGPT
-	// backend passthrough. Empty means https://chatgpt.com.
-	chatGPTBackendPassthroughBaseURL string
-
-	// chatGPTBackendPassthroughClient optionally overrides the upstream HTTP
-	// client for tests. Production requests use the existing uTLS client path.
-	chatGPTBackendPassthroughClient *http.Client
-
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
@@ -266,7 +239,7 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
-	// ampModule is the Amp routing module for model mapping hot-reload
+	// ampModule owns fork-maintained Amp routing and configuration reload behavior.
 	ampModule *ampmodule.AmpModule
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
@@ -411,16 +384,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Setup routes
 	s.setupRoutes()
 
-	// Register Amp module using V2 interface with Context
+	// Keep the fork-owned Amp module registered after the upstream server setup.
 	s.ampModule = ampmodule.NewLegacy(accessManager, AuthMiddleware(accessManager))
-	ctx := modules.Context{
+	moduleContext := modules.Context{
 		Engine:         engine,
 		BaseHandler:    s.handlers,
 		Config:         cfg,
 		AuthMiddleware: AuthMiddleware(accessManager),
 	}
-	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
-		log.Errorf("Failed to register Amp module: %v", err)
+	if errRegisterModule := modules.RegisterModule(moduleContext, s.ampModule); errRegisterModule != nil {
+		log.Errorf("failed to register Amp module: %v", errRegisterModule)
 	}
 
 	// Apply additional router configurators from options
@@ -437,7 +410,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
-	engine.NoRoute(s.noRoute)
+	engine.NoRoute(s.pluginManagementNoRoute)
+
+	// === CLIProxyAPIPlus 扩展: 注册 Kiro OAuth Web 路由 ===
+	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
+	kiroOAuthHandler.RegisterRoutes(engine)
+	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
 
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
@@ -618,6 +596,11 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+	// Event logging endpoint - handles Claude Code telemetry requests
+	// Returns 200 OK to prevent 404 errors in logs
+	s.engine.POST("/api/event_logging/batch", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -650,6 +633,34 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	s.engine.GET("/gitlab/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gitlab", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/google/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
@@ -659,6 +670,48 @@ func (s *Server) setupRoutes() {
 		}
 		if state != "" {
 			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/xai/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "xai", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/kiro/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
+	s.engine.GET("/iflow/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
+		if state != "" {
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "iflow", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -720,10 +773,10 @@ func (s *Server) registerManagementRoutes() {
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
-		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
@@ -771,6 +824,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
+
+		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
@@ -882,12 +937,19 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
-		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/gitlab-auth-url", s.mgmt.RequestGitLabToken)
 		mgmt.POST("/gitlab-auth-url", s.mgmt.RequestGitLabPATToken)
+		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
+		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
+		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
+		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
+		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
+		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
-		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
 }
 
@@ -977,21 +1039,6 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatus(http.StatusNotFound)
-}
-
-func (s *Server) noRoute(c *gin.Context) {
-	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
-		if c != nil {
-			c.AbortWithStatus(http.StatusNotFound)
-		}
-		return
-	}
-	path := c.Request.URL.Path
-	if path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") || strings.HasPrefix(path, "/v0/resource/plugins/") {
-		s.pluginManagementNoRoute(c)
-		return
-	}
-	s.handleChatGPTBackendPassthroughNoRoute(c)
 }
 
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {
@@ -1712,11 +1759,6 @@ func (s *Server) Stop(ctx context.Context) error {
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
-	if closer, ok := s.requestLogger.(interface{ Close(context.Context) error }); ok {
-		if errClose := closer.Close(context.Background()); errClose != nil {
-			log.WithError(errClose).Warn("failed to close request logger")
-		}
-	}
 
 	log.Debug("API server stopped")
 	return nil
@@ -1730,6 +1772,7 @@ func (s *Server) Stop(ctx context.Context) error {
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/v0/management") {
+			c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
 			c.Next()
 			return
 		}
@@ -1789,14 +1832,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg == nil || oldCfg.CommercialMode != cfg.CommercialMode || oldCfg.RequestEvents.Normalized() != cfg.RequestEvents.Normalized() {
-		if setter, ok := s.requestLogger.(interface {
-			ConfigureRequestEvents(logging.FileRequestEventConfig)
-		}); ok {
-			setter.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
-		}
-	}
-
 	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
@@ -1804,6 +1839,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	}
 
@@ -1902,19 +1938,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.mgmt.SetPluginHost(s.pluginHost)
 	}
 	s.refreshPluginManagementRoutes()
-
-	// Notify Amp module only when Amp config has changed.
-	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)
-	if ampConfigChanged {
-		if s.ampModule != nil {
-			log.Debugf("triggering amp module config update")
-			if err := s.ampModule.OnConfigUpdated(cfg); err != nil {
-				log.Errorf("failed to update Amp module config: %v", err)
-			}
-		} else {
-			log.Warnf("amp module is nil, skipping config update")
-		}
-	}
 
 	// Count client sources from configuration and auth store.
 	authEntries := 0

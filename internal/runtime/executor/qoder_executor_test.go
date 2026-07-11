@@ -295,11 +295,23 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 	}
 }
 
+func TestWaitForQoderUsageRecord_RequiresMatchingAuthID(t *testing.T) {
+	const expectedAuthID = "qoder-stream-usage-auth"
+	records := make(chan usage.Record, 2)
+	records <- usage.Record{Provider: "qoder", AuthID: "prior-qoder-auth", Model: "auto"}
+	records <- usage.Record{Provider: "qoder", AuthID: expectedAuthID, Model: "auto"}
+
+	record := waitForQoderUsageRecord(t, records, expectedAuthID, "auto")
+	if record.AuthID != expectedAuthID {
+		t.Fatalf("AuthID = %q, want %q", record.AuthID, expectedAuthID)
+	}
+}
+
 func TestExecuteStream_PublishesFailureRecordForUpstreamStatus(t *testing.T) {
 	executor := NewQoderExecutor(&config.Config{})
 	storage := testQoderStorageWithModelConfig()
 	authRecord := &cliproxyauth.Auth{
-		ID:       "qoder-status-failure-auth",
+		ID:       "qoder-test-auth",
 		Provider: "qoder",
 		Storage:  storage,
 	}
@@ -338,7 +350,7 @@ func TestExecuteStream_EnsuresUsageRecordForRawDoneWithoutUsage(t *testing.T) {
 	executor := NewQoderExecutor(&config.Config{})
 	storage := testQoderStorageWithModelConfig()
 	authRecord := &cliproxyauth.Auth{
-		ID:       "qoder-raw-done-auth",
+		ID:       "qoder-test-auth",
 		Provider: "qoder",
 		Storage:  storage,
 	}
@@ -377,7 +389,7 @@ func TestExecuteStream_PublishesFailureRecordForStreamEnvelopeStatus(t *testing.
 	executor := NewQoderExecutor(&config.Config{})
 	storage := testQoderStorageWithModelConfig()
 	authRecord := &cliproxyauth.Auth{
-		ID:       "qoder-envelope-failure-auth",
+		ID:       "qoder-test-auth",
 		Provider: "qoder",
 		Storage:  storage,
 	}
@@ -460,7 +472,7 @@ func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Re
 	}
 }
 
-func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID string, model string) usage.Record {
+func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID, model string) usage.Record {
 	t.Helper()
 	timeout := time.After(2 * time.Second)
 	for {
@@ -470,7 +482,7 @@ func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID s
 				return record
 			}
 		case <-timeout:
-			t.Fatalf("timed out waiting for Qoder usage record for auth %q model %q", authID, model)
+			t.Fatalf("timed out waiting for Qoder usage record for auth %q and model %q", authID, model)
 		}
 	}
 }
