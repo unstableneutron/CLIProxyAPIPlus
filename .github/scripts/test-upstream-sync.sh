@@ -742,6 +742,7 @@ test_publication_workflows_are_reusable_and_checked() {
   local dockerfile=${SCRIPT_DIR}/../../Dockerfile
 
   assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
+  assert_contains "${VALIDATOR}" "UPSTREAM_SYNC_TOOLING_MODE=auto"
 
   assert_contains "${release}" "workflow_call:"
   assert_contains "${release}" "expected_commit:"
