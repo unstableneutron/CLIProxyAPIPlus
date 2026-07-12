@@ -247,6 +247,7 @@ test_validation_driver_modes_tooling_and_artifacts() {
       UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
       UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
       UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_TOOLING_MODE=auto \
       "${VALIDATOR}" --mode quick --plan "${plan_out}" --report-dir "${root}/quick"
   )
 
@@ -269,6 +270,7 @@ test_validation_driver_modes_tooling_and_artifacts() {
       UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
       UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
       UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_TOOLING_MODE=auto \
       "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${root}/full"
   )
 
@@ -291,6 +293,7 @@ test_validation_driver_modes_tooling_and_artifacts() {
       UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
       UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
       UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_TOOLING_MODE=auto \
       "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${root}/tooling"
   )
   for gate in helper-tests shellcheck actionlint; do
@@ -317,6 +320,7 @@ test_validation_failure_preserves_all_logs() {
       UPSTREAM_SYNC_SYMBOL_CMD=true \
       UPSTREAM_SYNC_BUILD_CMD="printf 'intentional build failure\\n'; false" \
       UPSTREAM_SYNC_TEST_CMD="printf 'tests still ran\\n'" \
+      UPSTREAM_SYNC_TOOLING_MODE=auto \
       "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${report_dir}"
     status=$?
     set -e
