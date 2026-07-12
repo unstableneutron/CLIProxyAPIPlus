@@ -771,6 +771,7 @@ test_publication_workflows_are_reusable_and_checked() {
   local docker=${SCRIPT_DIR}/../workflows/docker-image.yml
   local recovery=${SCRIPT_DIR}/../workflows/sync-release-tag.yml
   local dockerfile=${SCRIPT_DIR}/../../Dockerfile
+  local dockerignore=${SCRIPT_DIR}/../../.dockerignore
 
   assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
   assert_contains "${VALIDATOR}" "UPSTREAM_SYNC_TOOLING_MODE=auto"
@@ -810,6 +811,9 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${dockerfile}" "debian:bookworm@sha256:30482e873082e906a4908c10529180aefb6f77620aea7404b909829fadc5d168"
   assert_contains "${dockerfile}" "--mount=type=cache,target=/go/pkg/mod"
   assert_contains "${dockerfile}" "--mount=type=cache,target=/root/.cache/go-build"
+  assert_contains "${dockerignore}" "dist"
+  assert_contains "${dockerignore}" "scratch"
+  assert_contains "${dockerignore}" "test-output"
 }
 
 test_detects_original_ahead_of_plus() {

@@ -8,6 +8,9 @@ docker-compose.yml
 .gitignore
 .goreleaser.yml
 Dockerfile
+dist
+scratch
+test-output
 
 # Documentation and license
 docs

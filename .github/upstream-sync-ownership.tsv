@@ -2,6 +2,7 @@
 # Paths ending with "/" match the full subtree.
 fork-owned	.gitattributes
 fork-owned	.ccs-fork-upstream.env
+fork-owned	.dockerignore
 fork-owned	README-ccs-fork.md
 fork-owned	docker-compose.yml
 fork-owned	.github/scripts/upstream-sync.sh
