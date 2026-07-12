@@ -1,6 +1,7 @@
 # class	path
 # Paths ending with "/" match the full subtree.
 fork-owned	.gitattributes
+fork-owned	.ccs-fork-upstream.env
 fork-owned	README-ccs-fork.md
 fork-owned	docker-compose.yml
 fork-owned	.github/scripts/upstream-sync.sh
@@ -40,5 +41,6 @@ fork-owned	sdk/auth/gemini.go
 fork-owned	internal/runtime/executor/commandcode_executor.go
 fork-owned	internal/runtime/executor/commandcode_executor_test.go
 fork-owned	internal/registry/commandcode_models_test.go
+fork-owned	internal/registry/models/models.json
 fork-owned	internal/watcher/synthesizer/commandcode_config_test.go
 fork-owned	sdk/cliproxy/service_commandcode_executor_binding_test.go

@@ -537,6 +537,8 @@ test_provenance_recommends_owner_specific_actions() {
   (
     cd "${fork}"
     FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    GITHUB_OUTPUT="${root}/materialize.out" "${HELPER}" materialize "${plan_out}" >/dev/null
+    cat "${root}/materialize.out" >> "${plan_out}"
     UPSTREAM_SYNC_REPORT_DIR="${report_dir}" \
       GITHUB_OUTPUT="${root}/provenance.out" \
       "${HELPER}" report-provenance "${plan_out}" HEAD >/dev/null
@@ -544,12 +546,41 @@ test_provenance_recommends_owner_specific_actions() {
 
   local tsv=${report_dir}/provenance.tsv
   local markdown=${report_dir}/provenance.md
-  assert_contains "${tsv}" $'.github/workflows/fork.yml\tfork-owned\tfork\tpreserve-fork\tfalse'
-  assert_contains "${tsv}" $'internal/auth/copilot/provider.go\tplus-owned\tplus\taccept-plus\tfalse'
   assert_contains "${tsv}" $'shared-original.txt\tshared-hotspot\toriginal\treview-original-update\tfalse'
-  assert_contains "${tsv}" $'shared-plus.txt\tshared-hotspot\tplus\tinherited-plus\tfalse'
   assert_contains "${tsv}" $'shared-both.txt\tshared-hotspot\toriginal,plus\tmanual-compose\ttrue'
+  assert_not_contains "${tsv}" ".github/workflows/fork.yml"
+  assert_not_contains "${tsv}" "shared-plus.txt"
   assert_contains "${markdown}" "Manual composition required: **yes**"
+  rm -rf "${root}"
+}
+
+test_provenance_ignores_historical_overlap_for_represented_sources() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local materialize_out=${root}/materialize.out
+  local report_dir=${root}/reports
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream refs/tags/v7.1.66:refs/tags/v7.1.66
+    run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    run_git push -q origin main
+    FORCE_REBUILD=true GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    GITHUB_OUTPUT="${materialize_out}" "${HELPER}" materialize "${plan_out}" >/dev/null
+    cat "${materialize_out}" >> "${plan_out}"
+    "${HELPER}" record-state "${plan_out}" >/dev/null
+    UPSTREAM_SYNC_REPORT_DIR="${report_dir}" \
+      GITHUB_OUTPUT="${root}/provenance.out" \
+      "${HELPER}" report-provenance "${plan_out}" HEAD >/dev/null
+  )
+
+  assert_contains "${root}/provenance.out" "manual_composition_required=false"
+  if awk -F'\t' 'NR > 1 && $5 == "true" { found = 1 } END { exit !found }' "${report_dir}/provenance.tsv"; then
+    fail "represented source history produced a manual-composition row"
+  fi
   rm -rf "${root}"
 }
 
@@ -1275,6 +1306,7 @@ main() {
   test_freshness_rejects_changed_origin_main
   test_freshness_can_ignore_only_fork_base_drift
   test_provenance_recommends_owner_specific_actions
+  test_provenance_ignores_historical_overlap_for_represented_sources
   test_shared_conflict_aborts_without_side_checkout
   test_report_renderer_includes_required_evidence
   test_report_renderer_handles_no_optional_conflicts

@@ -1076,22 +1076,46 @@ cmd_report_provenance() {
     plus_selected=${plus_head_commit}
   fi
 
-  local root original_paths plus_paths fork_paths candidate_paths all_paths shared_base
+  local root original_paths plus_paths original_delta_paths plus_delta_paths
+  local fork_paths candidate_paths manual_paths all_paths
+  local shared_base original_base plus_base conflict_files unsafe_plus_head_paths
   root=$(mktemp -d)
   PROVENANCE_TEMP_ROOT=${root}
   trap 'if [ -n "${PROVENANCE_TEMP_ROOT:-}" ]; then rm -rf "${PROVENANCE_TEMP_ROOT}"; fi' EXIT
   original_paths="${root}/original.paths"
   plus_paths="${root}/plus.paths"
+  original_delta_paths="${root}/original-delta.paths"
+  plus_delta_paths="${root}/plus-delta.paths"
   fork_paths="${root}/fork.paths"
   candidate_paths="${root}/candidate.paths"
+  manual_paths="${root}/manual.paths"
   all_paths="${root}/all.paths"
   shared_base=$(git merge-base "${original_commit}" "${plus_selected}")
+  original_base=$(git merge-base "${base_fork_commit}" "${original_commit}")
+  plus_base=$(git merge-base "${base_fork_commit}" "${plus_selected}")
 
   git -c diff.renames=false diff --name-only "${shared_base}" "${original_commit}" > "${original_paths}"
   git -c diff.renames=false diff --name-only "${shared_base}" "${plus_selected}" > "${plus_paths}"
-  git -c diff.renames=false diff --name-only "${plus_selected}" "${base_fork_commit}" > "${fork_paths}"
+  git -c diff.renames=false diff --name-only "${original_base}" "${original_commit}" > "${original_delta_paths}"
+  git -c diff.renames=false diff --name-only "${plus_base}" "${plus_selected}" > "${plus_delta_paths}"
+  git rev-list --no-merges "${base_fork_commit}" --not "${original_commit}" "${plus_selected}" \
+    | while IFS= read -r commit; do
+        [ -n "${commit}" ] || continue
+        git -c diff.renames=false diff-tree --root --no-commit-id --name-only -r "${commit}"
+      done \
+    | sort -u > "${fork_paths}"
   git -c diff.renames=false diff --name-only "${base_fork_commit}" "${candidate_ref}" > "${candidate_paths}"
-  sort -u "${original_paths}" "${plus_paths}" "${fork_paths}" "${candidate_paths}" > "${all_paths}"
+  conflict_files=$(phase_output_value "${plan_file}" conflict_files)
+  unsafe_plus_head_paths=$(phase_output_value "${plan_file}" unsafe_plus_head_delta_paths)
+  printf '%s\n%s\n' "${conflict_files}" "${unsafe_plus_head_paths}" \
+    | tr ',' '\n' \
+    | sed '/^[[:space:]]*$/d' \
+    | sort -u > "${manual_paths}"
+  sort -u \
+    "${original_delta_paths}" \
+    "${plus_delta_paths}" \
+    "${candidate_paths}" \
+    "${manual_paths}" > "${all_paths}"
 
   local report_dir tsv markdown
   report_dir=${UPSTREAM_SYNC_REPORT_DIR:-/tmp/upstream-sync-report}
@@ -1100,7 +1124,9 @@ cmd_report_provenance() {
   markdown="${report_dir%/}/provenance.md"
   printf 'path\towner\tprovenance\taction\tmanual_composition\n' > "${tsv}"
 
-  local path owner provenance action manual original_changed plus_changed fork_changed candidate_changed
+  local path owner provenance action manual
+  local original_changed plus_changed fork_changed candidate_changed
+  local original_delta plus_delta manual_path
   local manual_required=false
   while IFS= read -r path; do
     [ -n "${path}" ] || continue
@@ -1110,6 +1136,9 @@ cmd_report_provenance() {
     plus_changed=false
     fork_changed=false
     candidate_changed=false
+    original_delta=false
+    plus_delta=false
+    manual_path=false
 
     if provenance_contains_path "${original_paths}" "${path}"; then
       provenance=$(append_provenance_source "${provenance}" original)
@@ -1129,6 +1158,15 @@ cmd_report_provenance() {
         provenance=candidate
       fi
     fi
+    if provenance_contains_path "${original_delta_paths}" "${path}"; then
+      original_delta=true
+    fi
+    if provenance_contains_path "${plus_delta_paths}" "${path}"; then
+      plus_delta=true
+    fi
+    if provenance_contains_path "${manual_paths}" "${path}"; then
+      manual_path=true
+    fi
     [ -n "${provenance}" ] || provenance=unchanged
 
     action="verify-candidate"
@@ -1141,14 +1179,15 @@ cmd_report_provenance() {
         action="accept-plus"
         ;;
       *)
-        if { [ "${original_changed}" = true ] && { [ "${plus_changed}" = true ] || [ "${fork_changed}" = true ]; }; } \
-          || { [ "${plus_changed}" = true ] && [ "${fork_changed}" = true ]; }; then
+        if [ "${manual_path}" = true ] \
+          || { [ "${original_delta}" = true ] && { [ "${plus_changed}" = true ] || [ "${fork_changed}" = true ]; }; } \
+          || { [ "${plus_delta}" = true ] && { [ "${original_changed}" = true ] || [ "${fork_changed}" = true ]; }; }; then
           action="manual-compose"
           manual=true
           manual_required=true
-        elif [ "${original_changed}" = true ]; then
+        elif [ "${original_delta}" = true ]; then
           action="review-original-update"
-        elif [ "${plus_changed}" = true ]; then
+        elif [ "${plus_delta}" = true ]; then
           action="inherited-plus"
         elif [ "${fork_changed}" = true ]; then
           action="preserve-fork"
