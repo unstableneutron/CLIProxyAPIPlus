@@ -741,8 +741,10 @@ test_v2_workflow_contract_is_candidate_first_and_manual_only() {
 
   assert_contains "${workflow}" "workflow_dispatch:"
   assert_contains "${workflow}" "options: [shadow, promote]"
-  assert_contains "${workflow}" "base_ref:"
   assert_contains "${workflow}" "force_candidate:"
+  assert_contains "${workflow}" "ref: main"
+  assert_contains "${workflow}" "Reject forced promotion"
+  assert_contains "${workflow}" "inputs.mode == 'promote' && inputs.force_candidate"
   assert_contains "${workflow}" "materialize"
   assert_contains "${workflow}" "record-state"
   assert_contains "${workflow}" "check-freshness"
@@ -763,6 +765,7 @@ test_v2_workflow_contract_is_candidate_first_and_manual_only() {
   assert_not_contains "${workflow}" "schedule:"
   assert_not_contains "${workflow}" "gh issue"
   assert_not_contains "${workflow}" "force_pr"
+  assert_not_contains "${workflow}" "base_ref:"
   assert_not_contains "${workflow}" "upstream-sync/pending-overlay"
 }
 

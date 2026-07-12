@@ -12,13 +12,8 @@ on:
         default: shadow
         type: choice
         options: [shadow, promote]
-      base_ref:
-        description: Fork ref used as the candidate base
-        required: true
-        default: main
-        type: string
       force_candidate:
-        description: Build a candidate even when the selected refs are represented
+        description: Shadow-only candidate build when selected refs are represented
         required: false
         default: false
         type: boolean
@@ -44,8 +39,7 @@ jobs:
   candidate:
     if: >-
       github.repository == 'unstableneutron/CLIProxyAPIPlus' &&
-      github.actor == 'unstableneutron' &&
-      (inputs.mode != 'promote' || inputs.base_ref == 'main')
+      github.actor == 'unstableneutron'
     runs-on: ubuntu-24.04
     outputs:
       acceptable: ${{ steps.result.outputs.acceptable }}
@@ -61,7 +55,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-          ref: ${{ inputs.base_ref }}
+          ref: main
+
+      - name: Reject forced promotion
+        if: inputs.mode == 'promote' && inputs.force_candidate
+        run: |
+          echo "force_candidate is only valid for shadow runs." >&2
+          exit 1
 
       - name: Configure candidate repository
         run: |
