@@ -1191,6 +1191,9 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
   local fork=${root}/fork
   local origin=${root}/origin.git
   local out=${root}/replay.out
+  local clean_home=${root}/clean-home
+  mkdir -p "${clean_home}/.config"
+  run_git config --file "${clean_home}/.gitconfig" user.useConfigOnly true
 
   new_repo "${original}"
   commit_file "${original}" README.md base "original base"
@@ -1225,7 +1228,9 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
 
   (
     cd "${fork}"
-    UPSTREAM_SYNC_REPLAY_BUILD_CMD=true \
+    HOME="${clean_home}" \
+      XDG_CONFIG_HOME="${clean_home}/.config" \
+      UPSTREAM_SYNC_REPLAY_BUILD_CMD=true \
       UPSTREAM_SYNC_REPLAY_TEST_CMD=true \
       "${HELPER}" replay-plan > "${out}" 2>&1
   )

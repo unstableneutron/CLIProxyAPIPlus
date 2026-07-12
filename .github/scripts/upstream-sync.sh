@@ -1252,6 +1252,8 @@ cmd_replay_plan() {
   replay_dir="${root}/repo"
   validator="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/validate-upstream-sync.sh"
   git clone -q "$(pwd)" "${replay_dir}"
+  git -C "${replay_dir}" config user.name 'cliproxy-upstream-sync[bot]'
+  git -C "${replay_dir}" config user.email cliproxy-upstream-sync@users.noreply.github.com
 
   local remote_name remote_url
   for remote_name in "${ORIGIN_REMOTE}" "${ORIGINAL_REMOTE}" "${PLUS_REMOTE}" "${MODELS_REMOTE}"; do
