@@ -352,6 +352,8 @@ jobs:
 
       - name: Configure promotion repository
         run: |
+          git config user.name "cliproxy-upstream-sync[bot]"
+          git config user.email "cliproxy-upstream-sync@users.noreply.github.com"
           git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
           git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
 

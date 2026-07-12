@@ -766,6 +766,14 @@ test_v2_workflow_contract_is_candidate_first_and_manual_only() {
   assert_contains "${workflow}" 'STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"'
   assert_contains "${workflow}" '--main-policy descendant'
   assert_equal \
+    "2" \
+    "$(grep -Fc 'git config user.name "cliproxy-upstream-sync[bot]"' "${workflow}")" \
+    "git user.name configuration count"
+  assert_equal \
+    "2" \
+    "$(grep -Fc 'git config user.email "cliproxy-upstream-sync@users.noreply.github.com"' "${workflow}")" \
+    "git user.email configuration count"
+  assert_equal \
     "1" \
     "$(grep -c 'validate-upstream-sync.sh --mode full' "${workflow}")" \
     "full validation invocation count"
