@@ -178,6 +178,7 @@ test_materialize_uses_namespaced_refs_without_network() {
   run_git -C "${fork}" merge-base --is-ancestor "${plus_tag_commit}" HEAD
   assert_equal "${candidate_branch}" "$(run_git -C "${fork}" branch --show-current)" "materialized branch"
   assert_contains "${materialize_out}" "conflicts=false"
+  assert_contains "${fork}/internal/registry/models/models.json" "models-1"
   rm -rf "${root}"
 }
 

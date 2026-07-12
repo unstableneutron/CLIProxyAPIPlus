@@ -694,6 +694,20 @@ verify_snapshot_commit() {
   [ "${actual}" = "${expected}" ] || die "snapshot ref ${ref} moved: expected ${expected}, got ${actual}"
 }
 
+apply_models_snapshot() {
+  local fingerprint=$1
+  local target=internal/registry/models/models.json
+
+  mkdir -p "$(dirname -- "${target}")"
+  git show "$(snapshot_ref "${fingerprint}" models):models.json" > "${target}"
+  git add "${target}"
+  if ! git diff --cached --quiet -- "${target}"; then
+    git commit \
+      -m "Update snapshotted model catalog" \
+      -m "Record the exact models repository snapshot selected by this upstream sync plan before validation."
+  fi
+}
+
 cmd_materialize() {
   require_ownership_manifest
 
@@ -761,6 +775,8 @@ cmd_materialize() {
   if [ "${original_conflicts}" = true ] || [ "${plus_tag_conflicts}" = true ] || [ "${plus_head_conflicts}" = true ]; then
     conflicts=true
   fi
+
+  apply_models_snapshot "${fingerprint}"
 
   write_kv candidate_branch "${candidate_branch}"
   write_kv candidate_sha "$(git rev-parse HEAD)"
@@ -850,7 +866,8 @@ cmd_merge_ref() {
   write_env "${key}_OVERLAY_AT_RISK_SUMMARY" "${overlay_at_risk_summary}"
 
   if [ -z "${conflict_paths}" ]; then
-    echo "[!] ${phase} merge failed without conflict paths; leaving branch for inspection."
+    git merge --abort 2>/dev/null || true
+    echo "[!] ${phase} merge failed without conflict paths; aborted to the pre-merge commit."
     return 0
   fi
 

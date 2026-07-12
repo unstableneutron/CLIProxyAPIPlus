@@ -148,19 +148,6 @@ jobs:
           cat "${MATERIALIZE_FILE}" >> "${SYNC_WORK_DIR}/plan.out"
           cat "${MATERIALIZE_FILE}" >> "${STEP_OUTPUT}"
 
-      - name: Apply snapshotted models catalog
-        if: steps.plan.outputs.has_changes == 'true'
-        env:
-          MODELS_SNAPSHOT_REF: ${{ steps.plan.outputs.models_snapshot_ref }}
-        run: |
-          git show "${MODELS_SNAPSHOT_REF}:models.json" > internal/registry/models/models.json
-          git add internal/registry/models/models.json
-          if ! git diff --cached --quiet; then
-            git commit \
-              -m "Update snapshotted model catalog" \
-              -m "Record the exact models repository snapshot selected by this upstream sync plan before validation."
-          fi
-
       - name: Record candidate state
         if: steps.plan.outputs.has_changes == 'true'
         run: .github/scripts/upstream-sync.sh record-state "${SYNC_WORK_DIR}/plan.out"
