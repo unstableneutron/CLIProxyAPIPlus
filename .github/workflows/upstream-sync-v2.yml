@@ -4,6 +4,8 @@ name: Upstream Sync v2
 # recorded, validated, and either retained for review or promoted unchanged.
 
 on:
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -39,7 +41,7 @@ jobs:
   candidate:
     if: >-
       github.repository == 'unstableneutron/CLIProxyAPIPlus' &&
-      github.actor == 'unstableneutron'
+      (github.event_name == 'schedule' || github.actor == 'unstableneutron')
     runs-on: ubuntu-24.04
     outputs:
       acceptable: ${{ steps.result.outputs.acceptable }}
@@ -101,7 +103,7 @@ jobs:
         env:
           EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODE: ${{ inputs.mode }}
+          MODE: ${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}
           PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}
           PLAN_ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
           PLAN_PLUS_HEAD_COMMIT: ${{ steps.plan.outputs.plus_head }}
@@ -290,7 +292,7 @@ jobs:
             origin "HEAD:refs/heads/${BRANCH}"
 
       - name: Open or update blocked candidate PR
-        if: always() && inputs.mode == 'promote' && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'promote') && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'
         env:
           BRANCH: ${{ steps.plan.outputs.candidate_branch }}
           EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
@@ -332,7 +334,7 @@ jobs:
 
   promote:
     needs: candidate
-    if: inputs.mode == 'promote' && needs.candidate.outputs.has_changes == 'true' && needs.candidate.outputs.acceptable == 'true'
+    if: (github.event_name == 'schedule' || inputs.mode == 'promote') && needs.candidate.outputs.has_changes == 'true' && needs.candidate.outputs.acceptable == 'true'
     runs-on: ubuntu-24.04
     outputs:
       commit: ${{ steps.tag.outputs.commit }}

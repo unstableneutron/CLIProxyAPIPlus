@@ -11,11 +11,14 @@ This is the CCS-maintained fork of `router-for-me/CLIProxyAPIPlus`, snapshotted 
 
 ## Upstream Sync
 
-Daily GitHub Action (`.github/workflows/upstream-sync.yml`) merges from `router-for-me/CLIProxyAPI` (original, still MIT, still public). Plus-only provider directories are guarded by `.gitattributes merge=ours` — upstream can never touch them.
+The daily candidate-first workflow (`.github/workflows/upstream-sync-v2.yml`) snapshots exact commits from `router-for-me/CLIProxyAPI`, the retained Plus source, and the model catalog. It materializes and validates one candidate SHA, then promotes that same SHA through tag, release, and multi-architecture Docker publication.
 
-- **Clean merge + gates green** → auto fast-forward to `main`.
-- **Conflicts OR build/test fails** → opens PR labeled `upstream-sync`.
-- Manual trigger: Actions → "Upstream Sync" → Run workflow.
+- **Clean candidate + all gates green** → fast-forward `main`, publish the expected fork tag, and attach an independently verifiable release receipt.
+- **Conflict, ownership hotspot, stale source, or failing gate** → retain the fingerprinted candidate and open a review PR without mutating `main` or release artifacts.
+- **Already represented target** → verify the existing tag, release, Docker digest, and receipt without rebuilding.
+- Manual trigger: Actions → "Upstream Sync v2" → choose `shadow` or `promote`.
+
+The retired workflow is retained at `.github/workflows-disabled/upstream-sync.yml` only as a rollback reference; GitHub does not execute workflows outside `.github/workflows/`.
 
 ## What NOT to pull in
 

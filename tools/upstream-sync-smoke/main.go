@@ -250,13 +250,21 @@ func runResponses(ctx context.Context, cfg responsesConfig) (result smokeResult,
 func responsesPayload(cfg responsesConfig, stream bool) ([]byte, error) {
 	payload := map[string]any{
 		"model":             cfg.Model,
-		"input":             "Reply exactly with " + cfg.Marker,
+		"input":             responsesMessageInput("Reply exactly with " + cfg.Marker),
 		"max_output_tokens": 64,
 	}
 	if stream {
 		payload["stream"] = true
 	}
 	return json.Marshal(payload)
+}
+
+func responsesMessageInput(text string) []map[string]any {
+	return []map[string]any{{
+		"type":    "message",
+		"role":    "user",
+		"content": text,
+	}}
 }
 
 func newAuthorizedRequest(ctx context.Context, method, target, apiKey string, body []byte) (*http.Request, error) {
@@ -490,7 +498,7 @@ func runCompact(ctx context.Context, baseURL, model, apiKey string, client *http
 	}
 	payload, errMarshal := json.Marshal(map[string]any{
 		"model": model,
-		"input": "Create a compact checkpoint for this smoke test.",
+		"input": responsesMessageInput("Create a compact checkpoint for this smoke test."),
 	})
 	if errMarshal != nil {
 		return result, fmt.Errorf("encode compact request: %w", errMarshal)

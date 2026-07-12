@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -24,8 +25,24 @@ func TestWebSocketSmokeStopsAtResponseCompleted(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		_, requestPayload, errRead := conn.ReadMessage()
+		if errRead != nil {
 			t.Errorf("read request: %v", errRead)
+			return
+		}
+		var request map[string]any
+		if errUnmarshal := json.Unmarshal(requestPayload, &request); errUnmarshal != nil {
+			t.Errorf("decode request: %v", errUnmarshal)
+			return
+		}
+		input, ok := request["input"].([]any)
+		if !ok || len(input) != 1 {
+			t.Errorf("websocket input = %#v, want one-item list", request["input"])
+			return
+		}
+		message, ok := input[0].(map[string]any)
+		if !ok || message["type"] != "message" || message["role"] != "user" || message["content"] != "Reply exactly with "+marker {
+			t.Errorf("websocket input message = %#v, want canonical user message", input[0])
 			return
 		}
 		if errWrite := conn.WriteJSON(map[string]any{
@@ -142,6 +159,37 @@ func TestMarkerValidationRejectsWrongOutput(t *testing.T) {
 	}
 	if result.MarkerMatched || result.Outcome != outcomeFailed {
 		t.Fatalf("unexpected marker failure result: %+v", result)
+	}
+}
+
+func TestCompactSmokeUsesListInput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if errDecode := json.NewDecoder(r.Body).Decode(&request); errDecode != nil {
+			t.Errorf("decode compact request: %v", errDecode)
+			return
+		}
+		input, ok := request["input"].([]any)
+		if !ok || len(input) != 1 {
+			t.Errorf("compact input = %#v, want one-item list", request["input"])
+			return
+		}
+		message, ok := input[0].(map[string]any)
+		if !ok || message["type"] != "message" || message["role"] != "user" || message["content"] != "Create a compact checkpoint for this smoke test." {
+			t.Errorf("compact input message = %#v, want canonical user message", input[0])
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"type":"response.compaction","output":[]}`)
+	}))
+	defer server.Close()
+
+	result, err := runCompact(context.Background(), server.URL, "test-model", "test-key", server.Client())
+	if err != nil {
+		t.Fatalf("compact smoke failed: %v", err)
+	}
+	if result.TerminalEvent != "response.compacted" || result.Outcome != outcomePassed {
+		t.Fatalf("unexpected compact result: %+v", result)
 	}
 }
 

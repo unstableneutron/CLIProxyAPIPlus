@@ -736,11 +736,26 @@ test_report_renderer_rejects_missing_required_plan_field() {
   rm -rf "${root}"
 }
 
-test_v2_workflow_contract_is_candidate_first_and_manual_only() {
+test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   local workflow=${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml
+  local legacy_active=${SCRIPT_DIR}/../workflows/upstream-sync.yml
+  local legacy_disabled=${SCRIPT_DIR}/../workflows-disabled/upstream-sync.yml
 
+  if [ -e "${legacy_active}" ]; then
+    fail "legacy upstream sync workflow is still active"
+  fi
+  if [ ! -f "${legacy_disabled}" ]; then
+    fail "disabled legacy upstream sync workflow is missing"
+  fi
+
+  assert_contains "${workflow}" "schedule:"
+  assert_contains "${workflow}" "cron: '17 3 * * *'"
   assert_contains "${workflow}" "workflow_dispatch:"
   assert_contains "${workflow}" "options: [shadow, promote]"
+  assert_contains "${workflow}" "github.event_name == 'schedule' || github.actor == 'unstableneutron'"
+  assert_contains "${workflow}" "github.event_name == 'schedule' || inputs.mode == 'promote'"
+  # shellcheck disable=SC2016 # The workflow expression is asserted literally.
+  assert_contains "${workflow}" "MODE: \${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}"
   assert_contains "${workflow}" "force_candidate:"
   assert_contains "${workflow}" "ref: main"
   assert_contains "${workflow}" "Reject forced promotion"
@@ -777,7 +792,7 @@ test_v2_workflow_contract_is_candidate_first_and_manual_only() {
     "1" \
     "$(grep -c 'validate-upstream-sync.sh --mode full' "${workflow}")" \
     "full validation invocation count"
-  assert_not_contains "${workflow}" "schedule:"
+  assert_contains "${legacy_disabled}" "name: Upstream Sync"
   assert_not_contains "${workflow}" "gh issue"
   assert_not_contains "${workflow}" "force_pr"
   assert_not_contains "${workflow}" "base_ref:"
@@ -1371,7 +1386,7 @@ main() {
   test_report_renderer_includes_required_evidence
   test_report_renderer_handles_no_optional_conflicts
   test_report_renderer_rejects_missing_required_plan_field
-  test_v2_workflow_contract_is_candidate_first_and_manual_only
+  test_v2_workflow_contract_is_candidate_first_and_scheduled
   test_publication_workflows_are_reusable_and_checked
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources

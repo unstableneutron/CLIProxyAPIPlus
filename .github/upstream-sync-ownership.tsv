@@ -16,6 +16,7 @@ fork-owned	.github/upstream-sync-dropped-symbols.tsv
 fork-owned	.github/upstream-sync-ownership.tsv
 fork-owned	.github/upstream-sync-invariants.tsv
 fork-owned	.github/workflows/
+fork-owned	.github/workflows-disabled/
 fork-owned	tools/upstream-sync-smoke/
 
 plus-owned	internal/auth/codebuddy/
