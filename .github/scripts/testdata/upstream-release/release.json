@@ -1,0 +1,16 @@
+{
+  "url": "https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/v7.2.67-unstableneutron.0",
+  "isDraft": false,
+  "isPrerelease": false,
+  "assets": [
+    {
+      "name": "checksums.txt"
+    },
+    {
+      "name": "CLIProxyAPIPlus_v7.2.67-unstableneutron.0_linux_amd64_no-plugin.tar.gz"
+    },
+    {
+      "name": "CLIProxyAPIPlus_v7.2.67-unstableneutron.0_linux_aarch64_no-plugin.tar.gz"
+    }
+  ]
+}

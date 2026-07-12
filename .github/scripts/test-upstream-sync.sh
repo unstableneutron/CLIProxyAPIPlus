@@ -23,6 +23,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file=$1
+  local unexpected=$2
+  if grep -Fq -- "${unexpected}" "${file}"; then
+    echo "--- ${file} ---" >&2
+    grep -Fn -- "${unexpected}" "${file}" >&2 || true
+    fail "expected ${file} not to contain: ${unexpected}"
+  fi
+}
+
 output_value() {
   local file=$1
   local key=$2
@@ -455,6 +465,30 @@ test_freshness_rejects_changed_origin_main() {
   rm -rf "${root}"
 }
 
+test_freshness_can_ignore_only_fork_base_drift() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null)
+  commit_file "${fork}" concurrent.txt concurrent "move fork main"
+  run_git -C "${fork}" push -q origin main
+
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_ALLOW_FORK_BASE_DRIFT=true \
+      GITHUB_OUTPUT="${freshness_out}" \
+      "${HELPER}" check-freshness "${plan_out}" >/dev/null
+  )
+
+  assert_contains "${freshness_out}" "fresh=true"
+  assert_contains "${freshness_out}" "stale_reasons="
+  rm -rf "${root}"
+}
+
 test_provenance_recommends_owner_specific_actions() {
   local root
   root=$(mktemp -d)
@@ -664,6 +698,81 @@ test_report_renderer_rejects_missing_required_plan_field() {
     fail "renderer accepted a plan missing required snapshot fields"
   fi
   rm -rf "${root}"
+}
+
+test_v2_workflow_contract_is_candidate_first_and_manual_only() {
+  local workflow=${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml
+
+  assert_contains "${workflow}" "workflow_dispatch:"
+  assert_contains "${workflow}" "options: [shadow, promote]"
+  assert_contains "${workflow}" "base_ref:"
+  assert_contains "${workflow}" "force_candidate:"
+  assert_contains "${workflow}" "materialize"
+  assert_contains "${workflow}" "record-state"
+  assert_contains "${workflow}" "check-freshness"
+  assert_contains "${workflow}" "validate-upstream-sync.sh --mode full"
+  assert_contains "${workflow}" "--force-with-lease"
+  assert_contains "${workflow}" "gh pr create"
+  assert_contains "${workflow}" "git push origin HEAD:main"
+  # shellcheck disable=SC2016 # The workflow expression is asserted literally.
+  assert_contains "${workflow}" 'git push origin "refs/tags/${TAG}"'
+  assert_contains "${workflow}" "verify-upstream-release.sh"
+  assert_contains "${workflow}" "gh release download"
+  assert_contains "${workflow}" "gh release upload"
+  assert_contains "${workflow}" "upstream-sync-receipt.json"
+  assert_equal \
+    "1" \
+    "$(grep -c 'validate-upstream-sync.sh --mode full' "${workflow}")" \
+    "full validation invocation count"
+  assert_not_contains "${workflow}" "schedule:"
+  assert_not_contains "${workflow}" "gh issue"
+  assert_not_contains "${workflow}" "force_pr"
+  assert_not_contains "${workflow}" "upstream-sync/pending-overlay"
+}
+
+test_publication_workflows_are_reusable_and_checked() {
+  local release=${SCRIPT_DIR}/../workflows/release.yaml
+  local docker=${SCRIPT_DIR}/../workflows/docker-image.yml
+  local recovery=${SCRIPT_DIR}/../workflows/sync-release-tag.yml
+  local dockerfile=${SCRIPT_DIR}/../../Dockerfile
+
+  assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
+
+  assert_contains "${release}" "workflow_call:"
+  assert_contains "${release}" "expected_commit:"
+  assert_contains "${release}" "release_url:"
+  assert_contains "${release}" "asset_names_json:"
+  assert_contains "${release}" "release_commit:"
+  assert_contains "${release}" "goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94"
+  assert_contains "${release}" "version: v2.17.0"
+  assert_not_contains "${release}" "version: latest"
+
+  assert_contains "${docker}" "workflow_call:"
+  assert_contains "${docker}" "publish_latest:"
+  assert_contains "${docker}" "runner: ubuntu-24.04-arm"
+  assert_contains "${docker}" "platform: linux/arm64"
+  assert_contains "${docker}" "runner: ubuntu-24.04"
+  assert_contains "${docker}" "platform: linux/amd64"
+  # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
+  assert_contains "${docker}" 'cache-from: type=gha,scope=cliproxy-${{ matrix.arch }}'
+  # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
+  assert_contains "${docker}" 'cache-to: type=gha,mode=max,scope=cliproxy-${{ matrix.arch }}'
+  assert_contains "${docker}" "push-by-digest=true"
+  assert_not_contains "${docker}" "setup-qemu-action"
+  assert_not_contains "${docker}" "Refresh models catalog"
+
+  assert_contains "${recovery}" "uses: ./.github/workflows/release.yaml"
+  assert_contains "${recovery}" "uses: ./.github/workflows/docker-image.yml"
+  assert_contains "${recovery}" "verify-upstream-release.sh"
+  assert_contains "${recovery}" "gh release upload"
+  assert_contains "${recovery}" "upstream-sync-receipt.json"
+  assert_not_contains "${recovery}" "gh workflow run"
+
+  assert_contains "${dockerfile}" "# syntax=docker/dockerfile:1"
+  assert_contains "${dockerfile}" "golang:1.26-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113"
+  assert_contains "${dockerfile}" "debian:bookworm@sha256:30482e873082e906a4908c10529180aefb6f77620aea7404b909829fadc5d168"
+  assert_contains "${dockerfile}" "--mount=type=cache,target=/go/pkg/mod"
+  assert_contains "${dockerfile}" "--mount=type=cache,target=/root/.cache/go-build"
 }
 
 test_detects_original_ahead_of_plus() {
@@ -1158,11 +1267,14 @@ main() {
   test_freshness_rejects_moved_plus_head
   test_freshness_rejects_moved_models_head
   test_freshness_rejects_changed_origin_main
+  test_freshness_can_ignore_only_fork_base_drift
   test_provenance_recommends_owner_specific_actions
   test_shared_conflict_aborts_without_side_checkout
   test_report_renderer_includes_required_evidence
   test_report_renderer_handles_no_optional_conflicts
   test_report_renderer_rejects_missing_required_plan_field
+  test_v2_workflow_contract_is_candidate_first_and_manual_only
+  test_publication_workflows_are_reusable_and_checked
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
   test_includes_safe_plus_head_delta

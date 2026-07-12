@@ -971,8 +971,13 @@ cmd_record_state() {
 
 cmd_check_freshness() {
   local plan_file=${1:-}
+  local allow_fork_base_drift=${UPSTREAM_SYNC_ALLOW_FORK_BASE_DRIFT:-false}
   [ -n "${plan_file}" ] || die "check-freshness requires plan-output-file"
   [ -f "${plan_file}" ] || die "plan output not found: ${plan_file}"
+  case "${allow_fork_base_drift}" in
+    true|false) ;;
+    *) die "UPSTREAM_SYNC_ALLOW_FORK_BASE_DRIFT must be true or false" ;;
+  esac
 
   local original_tag plus_tag
   local expected_original expected_plus_tag expected_plus_head expected_models expected_fork_main
@@ -996,7 +1001,9 @@ cmd_check_freshness() {
   [ "${actual_plus_tag}" = "${expected_plus_tag}" ] || reasons="${reasons}plus-tag-moved"$'\n'
   [ "${actual_plus_head}" = "${expected_plus_head}" ] || reasons="${reasons}plus-head-moved"$'\n'
   [ "${actual_models}" = "${expected_models}" ] || reasons="${reasons}models-head-moved"$'\n'
-  [ "${actual_fork_main}" = "${expected_fork_main}" ] || reasons="${reasons}fork-main-moved"$'\n'
+  if [ "${allow_fork_base_drift}" != true ] && [ "${actual_fork_main}" != "${expected_fork_main}" ]; then
+    reasons="${reasons}fork-main-moved"$'\n'
+  fi
 
   write_kv actual_original_commit "${actual_original}"
   write_kv actual_plus_tag_commit "${actual_plus_tag}"

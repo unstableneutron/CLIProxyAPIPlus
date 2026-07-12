@@ -7,10 +7,14 @@ fork-owned	.github/scripts/upstream-sync.sh
 fork-owned	.github/scripts/test-upstream-sync.sh
 fork-owned	.github/scripts/validate-upstream-sync.sh
 fork-owned	.github/scripts/render-upstream-sync-report.sh
+fork-owned	.github/scripts/verify-upstream-release.sh
+fork-owned	.github/scripts/test-verify-upstream-release.sh
+fork-owned	.github/scripts/testdata/upstream-release/
 fork-owned	.github/upstream-sync-dropped-symbols.tsv
 fork-owned	.github/upstream-sync-ownership.tsv
 fork-owned	.github/upstream-sync-invariants.tsv
 fork-owned	.github/workflows/
+fork-owned	tools/upstream-sync-smoke/
 
 plus-owned	internal/auth/codebuddy/
 plus-owned	internal/auth/copilot/

@@ -1,51 +1,159 @@
-name: Dispatch Existing Release Tag
+name: Recover Existing Release Tag
 
-# Manual recovery helper only. Automatic upstream sync/tag creation lives in
-# upstream-sync.yml so validation, tagging, and downstream dispatch agree on
-# the same unstableneutron run-number tag.
+# Manual recovery for an accepted tag. It invokes the same checked reusable
+# publishers as upstream-sync-v2; it does not fire detached workflow runs.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing fork tag to release, e.g. v7.1.21-unstableneutron.123'
+        description: Existing accepted fork tag to republish
         required: true
+        type: string
+      expected_commit:
+        description: Expected peeled tag commit; empty resolves from the tag
+        required: false
+        default: ''
         type: string
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
+  packages: write
 
 concurrency:
-  group: dispatch-release-tag-${{ inputs.tag }}
+  group: recover-release-tag-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  dispatch:
-    runs-on: ubuntu-latest
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      expected_commit: ${{ steps.resolve.outputs.expected_commit }}
+      plan_fingerprint: ${{ steps.resolve.outputs.plan_fingerprint }}
+      publish_latest: ${{ steps.resolve.outputs.publish_latest }}
+      sync_id: ${{ steps.resolve.outputs.sync_id }}
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v4
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
 
-      - name: Validate tag exists
+      - name: Resolve accepted tag identity
+        id: resolve
+        env:
+          EXPECTED_COMMIT_INPUT: ${{ inputs.expected_commit }}
+          TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
-          git fetch --force --tags
-          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+          git fetch --force origin main --tags
+          if ! git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
             echo "Tag ${TAG} does not exist in this repository." >&2
             exit 1
           fi
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
+          EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
+          if [ -z "${EXPECTED_COMMIT}" ]; then
+            EXPECTED_COMMIT="${TAG_COMMIT}"
+          fi
+          if [ "${TAG_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "Tag ${TAG} resolves to ${TAG_COMMIT}, expected ${EXPECTED_COMMIT}." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "Tag ${TAG} is not reachable from accepted origin/main." >&2
+            exit 1
+          fi
+          STATE="$(git show "${TAG_COMMIT}:.ccs-fork-upstream.env")"
+          SYNC_ID="$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' <<< "${STATE}")"
+          PLAN_FINGERPRINT="$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' <<< "${STATE}")"
+          if [ -z "${SYNC_ID}" ] || [ -z "${PLAN_FINGERPRINT}" ]; then
+            echo "Tag ${TAG} does not contain schema-v2 upstream sync state." >&2
+            exit 1
+          fi
+          LATEST_TAG="$({
+            git tag --merged origin/main --list 'v*-unstableneutron.*'
+            git tag --merged origin/main --list 'v*.unstableneutron.*'
+          } | sort -Vu | tail -n 1)"
+          PUBLISH_LATEST=false
+          if [ "${TAG}" = "${LATEST_TAG}" ]; then
+            PUBLISH_LATEST=true
+          fi
+          {
+            echo "expected_commit=${EXPECTED_COMMIT}"
+            echo "plan_fingerprint=${PLAN_FINGERPRINT}"
+            echo "publish_latest=${PUBLISH_LATEST}"
+            echo "sync_id=${SYNC_ID}"
+          } >> "${GITHUB_OUTPUT}"
 
-      - name: Dispatch release and Docker workflows
+  release:
+    needs: resolve
+    uses: ./.github/workflows/release.yaml
+    with:
+      tag: ${{ inputs.tag }}
+      expected_commit: ${{ needs.resolve.outputs.expected_commit }}
+    secrets: inherit
+
+  docker:
+    needs: [resolve, release]
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      tag: ${{ inputs.tag }}
+      expected_commit: ${{ needs.resolve.outputs.expected_commit }}
+      publish_latest: ${{ needs.resolve.outputs.publish_latest == 'true' }}
+    secrets: inherit
+
+  verify:
+    needs: [resolve, release, docker]
+    if: needs.release.result == 'success' && needs.docker.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+
+      - name: Verify recovered release and image
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.expected_commit }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.docker.outputs.image_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.docker.outputs.image }}
+          PLAN_FINGERPRINT: ${{ needs.resolve.outputs.plan_fingerprint }}
+          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
+          SYNC_ID: ${{ needs.resolve.outputs.sync_id }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          .github/scripts/verify-upstream-release.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --expected-sync-id "${SYNC_ID}" \
+            --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
+            --image "${IMAGE}" \
+            --require-latest-parity "${PUBLISH_LATEST}" \
+            --receipt upstream-sync-receipt.json
+          RECEIPT_DIGEST="$(jq -r '.image_digest' upstream-sync-receipt.json)"
+          if [ "${RECEIPT_DIGEST}" != "${EXPECTED_IMAGE_DIGEST}" ]; then
+            echo "Verified digest ${RECEIPT_DIGEST} does not match publisher output ${EXPECTED_IMAGE_DIGEST}." >&2
+            exit 1
+          fi
+
+      - name: Attach recovered receipt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
-          gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref main -f tag="${TAG}"
-          gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref main -f tag="${TAG}"
+          gh release upload "${TAG}" upstream-sync-receipt.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: recovered-upstream-sync-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upstream-sync-receipt.json
+          if-no-files-found: error
+          retention-days: 90

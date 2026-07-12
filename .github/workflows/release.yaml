@@ -1,70 +1,151 @@
 name: goreleaser
 
 on:
-  push:
-    # run only against tags
-    tags:
-      - 'v*-unstableneutron.*'
-      - 'v*.unstableneutron.*'
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing fork tag to publish
+        required: true
+        type: string
+      expected_commit:
+        description: Commit the tag and release must represent
+        required: true
+        type: string
+    outputs:
+      release_url:
+        description: Published GitHub release URL
+        value: ${{ jobs.release.outputs.release_url }}
+      asset_names_json:
+        description: JSON array of published release asset names
+        value: ${{ jobs.release.outputs.asset_names_json }}
+      release_commit:
+        description: Peeled commit represented by the release tag
+        value: ${{ jobs.release.outputs.release_commit }}
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing fork tag to release, for example v7.1.21-unstableneutron.123
+        description: Existing fork tag to publish
+        required: true
+        type: string
+      expected_commit:
+        description: Expected peeled tag commit; empty resolves from the tag
         required: false
+        default: ''
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: goreleaser-${{ inputs.tag || github.ref_name }}
+  group: goreleaser-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  goreleaser:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_url: ${{ steps.verify.outputs.release_url }}
+      asset_names_json: ${{ steps.verify.outputs.asset_names_json }}
+      release_commit: ${{ steps.verify.outputs.release_commit }}
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
-      - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '>=1.26.0'
-          cache: true
-      - name: Generate Build Metadata
-        run: |
-          VERSION="${{ inputs.tag }}"
-          if [ -z "$VERSION" ]; then
-            VERSION="${GITHUB_REF_NAME}"
-          fi
+          ref: ${{ inputs.tag }}
 
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Resolve and verify release identity
+        id: identity
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_COMMIT_INPUT: ${{ inputs.expected_commit }}
+        run: |
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
+          EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
+          if [ -z "${EXPECTED_COMMIT}" ]; then
+            EXPECTED_COMMIT="${TAG_COMMIT}"
+          fi
+          if [ "$(git rev-parse HEAD)" != "${EXPECTED_COMMIT}" ]; then
+            echo "Checkout does not match expected commit ${EXPECTED_COMMIT}." >&2
+            exit 1
+          fi
+          if [ "${TAG_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "Tag ${TAG} resolves to ${TAG_COMMIT}, expected ${EXPECTED_COMMIT}." >&2
+            exit 1
+          fi
+          {
+            echo "tag_commit=${TAG_COMMIT}"
+            echo "expected_commit=${EXPECTED_COMMIT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # actions/setup-go v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Generate reproducible build metadata
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "VERSION=${TAG}"
+            echo "COMMIT=$(git rev-parse --short=12 HEAD)"
+            echo "BUILD_DATE=$(git show -s --format=%cI HEAD)"
+          } >> "${GITHUB_ENV}"
+
       - name: Check existing release
-        id: release
+        id: existing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "[i] ${VERSION} release already exists; skipping GoReleaser."
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
-      - uses: goreleaser/goreleaser-action@v4
-        if: steps.release.outputs.exists != 'true'
+
+      # goreleaser/goreleaser-action v7.2.3
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
+        if: steps.existing.outputs.exists != 'true'
         with:
           distribution: goreleaser
-          version: latest
-          args: release --clean --skip=validate
+          version: v2.17.0
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+
+      - name: Verify release and expose outputs
+        id: verify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+        run: |
+          RELEASE_JSON="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json url,assets)"
+          ASSET_NAMES_JSON="$(jq -c '[.assets[].name]' <<< "${RELEASE_JSON}")"
+          if ! jq -e 'index("checksums.txt") != null' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
+            echo "Release ${TAG} is missing checksums.txt." >&2
+            exit 1
+          fi
+          if ! jq -e 'any(.[]; startswith("CLIProxyAPIPlus_"))' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
+            echo "Release ${TAG} has no CLIProxyAPIPlus-branded archive." >&2
+            exit 1
+          fi
+          if jq -e 'any(.[]; startswith("CLIProxyAPI_"))' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
+            echo "Release ${TAG} contains an upstream-branded archive." >&2
+            exit 1
+          fi
+          {
+            echo "release_url=$(jq -r '.url' <<< "${RELEASE_JSON}")"
+            echo "asset_names_json=${ASSET_NAMES_JSON}"
+            echo "release_commit=${EXPECTED_COMMIT}"
+          } >> "${GITHUB_OUTPUT}"
