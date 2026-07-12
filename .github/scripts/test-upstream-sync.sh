@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 HELPER="${SCRIPT_DIR}/upstream-sync.sh"
+VALIDATOR="${SCRIPT_DIR}/validate-upstream-sync.sh"
+RENDERER="${SCRIPT_DIR}/render-upstream-sync-report.sh"
 export UPSTREAM_SYNC_OWNERSHIP_FILE="${UPSTREAM_SYNC_OWNERSHIP_FILE:-${SCRIPT_DIR}/../upstream-sync-ownership.tsv}"
+export MODELS_REMOTE="${MODELS_REMOTE:-models-upstream}"
 
 fail() {
   echo "[FAIL] $*" >&2
@@ -17,6 +20,31 @@ assert_contains() {
     echo "--- ${file} ---" >&2
     cat "${file}" >&2
     fail "expected ${file} to contain: ${expected}"
+  fi
+}
+
+output_value() {
+  local file=$1
+  local key=$2
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
+}
+
+assert_output_key() {
+  local file=$1
+  local key=$2
+  local value
+  value=$(output_value "${file}" "${key}")
+  if [ -z "${value}" ]; then
+    fail "expected non-empty ${key} in ${file}"
+  fi
+}
+
+assert_equal() {
+  local expected=$1
+  local actual=$2
+  local description=$3
+  if [ "${expected}" != "${actual}" ]; then
+    fail "${description}: expected ${expected}, got ${actual}"
   fi
 }
 
@@ -56,6 +84,7 @@ setup_base_graph() {
   local root=$1
   local original=${root}/original
   local plus=${root}/plus
+  local models=${root}/models
   local fork=${root}/fork
   local origin=${root}/origin.git
 
@@ -71,15 +100,570 @@ setup_base_graph() {
   commit_file "${fork}" internal/runtime/executor/fork.go fork-change "fork change"
   run_git -C "${fork}" tag v7.1.45-0.unstableneutron.0
 
+  new_repo "${models}"
+  commit_file "${models}" models.json models-1 "models base"
+
   run_git clone -q --bare "${fork}" "${origin}"
   run_git -C "${fork}" remote set-url origin "${origin}"
   run_git -C "${fork}" remote add original-upstream "${original}"
   run_git -C "${fork}" remote add plus-upstream "${plus}"
+  run_git -C "${fork}" remote add models-upstream "${models}"
 
   commit_file "${original}" README.md original-66 "original v7.1.66"
   run_git -C "${original}" tag v7.1.66
 
   printf '%s\n' "${fork}"
+}
+
+test_plan_emits_exact_snapshot_and_candidate_branch() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+
+  local key
+  for key in base_fork_commit models_commit plan_fingerprint candidate_branch expected_fork_tag; do
+    assert_output_key "${out}" "${key}"
+  done
+
+  local fingerprint
+  fingerprint=$(output_value "${out}" plan_fingerprint)
+  for key in original plus-tag plus-head models; do
+    run_git -C "${fork}" rev-parse --verify "refs/upstream-sync/${fingerprint}/${key}" >/dev/null
+  done
+
+  assert_contains "${out}" "candidate_branch=upstream-sync/original-v7.1.66_plus-v7.1.45-0-"
+  rm -rf "${root}"
+}
+
+test_materialize_uses_namespaced_refs_without_network() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local materialize_out=${root}/materialize.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    run_git remote set-url origin "${root}/missing-origin.git"
+    run_git remote set-url original-upstream "${root}/missing-original.git"
+    run_git remote set-url plus-upstream "${root}/missing-plus.git"
+    run_git remote set-url models-upstream "${root}/missing-models.git"
+    GITHUB_OUTPUT="${materialize_out}" "${HELPER}" materialize "${plan_out}" >/dev/null
+  )
+
+  local original_commit plus_tag_commit candidate_branch
+  original_commit=$(output_value "${plan_out}" original_head)
+  plus_tag_commit=$(output_value "${plan_out}" plus_tag_head)
+  candidate_branch=$(output_value "${plan_out}" candidate_branch)
+  run_git -C "${fork}" merge-base --is-ancestor "${original_commit}" HEAD
+  run_git -C "${fork}" merge-base --is-ancestor "${plus_tag_commit}" HEAD
+  assert_equal "${candidate_branch}" "$(run_git -C "${fork}" branch --show-current)" "materialized branch"
+  assert_contains "${materialize_out}" "conflicts=false"
+  rm -rf "${root}"
+}
+
+test_same_target_produces_same_plan_fingerprint() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local first=${root}/first.out
+  local second=${root}/second.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${first}" "${HELPER}" plan >/dev/null
+    FORCE_REBUILD=false GITHUB_OUTPUT="${second}" "${HELPER}" plan >/dev/null
+  )
+
+  assert_equal \
+    "$(output_value "${first}" plan_fingerprint)" \
+    "$(output_value "${second}" plan_fingerprint)" \
+    "stable plan fingerprint"
+  rm -rf "${root}"
+}
+
+test_moved_target_produces_new_plan_fingerprint() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local models=${root}/models
+  local first=${root}/first.out
+  local second=${root}/second.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${first}" "${HELPER}" plan >/dev/null
+  )
+  commit_file "${models}" models.json models-2 "move models head"
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${second}" "${HELPER}" plan >/dev/null
+  )
+
+  if [ "$(output_value "${first}" plan_fingerprint)" = "$(output_value "${second}" plan_fingerprint)" ]; then
+    fail "moving a selected target did not change the plan fingerprint"
+  fi
+  rm -rf "${root}"
+}
+
+test_validation_driver_modes_tooling_and_artifacts() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local calls=${root}/calls.log
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+
+    UPSTREAM_SYNC_INVARIANT_CMD="printf 'invariants\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SYMBOL_CMD="printf 'symbols\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_BUILD_CMD="printf 'build\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_TEST_CMD="printf 'tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      "${VALIDATOR}" --mode quick --plan "${plan_out}" --report-dir "${root}/quick"
+  )
+
+  assert_contains "${calls}" "invariants"
+  assert_contains "${calls}" "symbols"
+  if grep -Eq '^(build|tests|helper-tests|shellcheck|actionlint)$' "${calls}"; then
+    fail "quick validation ran a full or tooling gate"
+  fi
+  assert_contains "${root}/quick/validation.env" "OVERALL_STATUS=passed"
+  assert_contains "${root}/quick/validation.env" "BUILD_STATUS=skipped"
+  assert_contains "${root}/quick/validation.json" '"overall_status": "passed"'
+
+  : > "${calls}"
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_INVARIANT_CMD="printf 'invariants\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SYMBOL_CMD="printf 'symbols\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_BUILD_CMD="printf 'build\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_TEST_CMD="printf 'tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${root}/full"
+  )
+
+  local gate
+  for gate in invariants symbols build tests; do
+    assert_equal "1" "$(grep -c "^${gate}$" "${calls}")" "${gate} execution count"
+  done
+  if grep -Eq '^(helper-tests|shellcheck|actionlint)$' "${calls}"; then
+    fail "unchanged candidate ran tooling validation"
+  fi
+
+  commit_file "${fork}" .github/scripts/tooling-marker.sh marker "change sync tooling"
+  : > "${calls}"
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_INVARIANT_CMD=true \
+      UPSTREAM_SYNC_SYMBOL_CMD=true \
+      UPSTREAM_SYNC_BUILD_CMD=true \
+      UPSTREAM_SYNC_TEST_CMD=true \
+      UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${root}/tooling"
+  )
+  for gate in helper-tests shellcheck actionlint; do
+    assert_equal "1" "$(grep -c "^${gate}$" "${calls}")" "${gate} execution count"
+  done
+  assert_contains "${root}/tooling/validation.env" "TOOLING_REQUIRED=true"
+
+  rm -rf "${root}"
+}
+
+test_validation_failure_preserves_all_logs() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local report_dir=${root}/failed
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    set +e
+    UPSTREAM_SYNC_INVARIANT_CMD=true \
+      UPSTREAM_SYNC_SYMBOL_CMD=true \
+      UPSTREAM_SYNC_BUILD_CMD="printf 'intentional build failure\\n'; false" \
+      UPSTREAM_SYNC_TEST_CMD="printf 'tests still ran\\n'" \
+      "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${report_dir}"
+    status=$?
+    set -e
+    if [ "${status}" -eq 0 ]; then
+      fail "validation passed despite a failed build gate"
+    fi
+  )
+
+  assert_contains "${report_dir}/build.log" "intentional build failure"
+  assert_contains "${report_dir}/tests.log" "tests still ran"
+  assert_contains "${report_dir}/validation.env" "OVERALL_STATUS=failed"
+  assert_contains "${report_dir}/validation.env" "BUILD_STATUS=failed"
+  [ -f "${report_dir}/validation.json" ] || fail "failed validation did not write validation.json"
+  rm -rf "${root}"
+}
+
+test_record_state_writes_schema_v2_before_validation() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    GITHUB_OUTPUT="${root}/materialize.out" "${HELPER}" materialize "${plan_out}" >/dev/null
+    "${HELPER}" record-state "${plan_out}"
+  )
+
+  local state=${fork}/.ccs-fork-upstream.env
+  assert_contains "${state}" "SCHEMA_VERSION=2"
+  assert_contains "${state}" "SYNC_ID=$(output_value "${plan_out}" safe_sync_id)"
+  assert_contains "${state}" "PLAN_FINGERPRINT=$(output_value "${plan_out}" plan_fingerprint)"
+  assert_contains "${state}" "BASE_FORK_COMMIT=$(output_value "${plan_out}" base_fork_commit)"
+  assert_contains "${state}" "MODELS_REPOSITORY=router-for-me/models"
+  assert_contains "${state}" "MODELS_COMMIT=$(output_value "${plan_out}" models_commit)"
+  assert_contains "${state}" "EXPECTED_FORK_TAG=$(output_value "${plan_out}" expected_fork_tag)"
+  assert_contains "${state}" "CANDIDATE_BRANCH=$(output_value "${plan_out}" candidate_branch)"
+  assert_equal \
+    "Record upstream sync candidate state" \
+    "$(run_git -C "${fork}" log -1 --format=%s)" \
+    "candidate state commit subject"
+  if [ -n "$(run_git -C "${fork}" status --porcelain)" ]; then
+    fail "record-state left the candidate dirty"
+  fi
+  rm -rf "${root}"
+}
+
+assert_freshness_failure() {
+  local fork=$1
+  local plan_out=$2
+  local freshness_out=$3
+  local reason=$4
+
+  set +e
+  (
+    cd "${fork}"
+    GITHUB_OUTPUT="${freshness_out}" "${HELPER}" check-freshness "${plan_out}" >/dev/null
+  )
+  local status=$?
+  set -e
+  if [ "${status}" -eq 0 ]; then
+    fail "freshness passed despite ${reason}"
+  fi
+  assert_contains "${freshness_out}" "fresh=false"
+  assert_contains "${freshness_out}" "stale_reasons=${reason}"
+}
+
+test_freshness_passes_for_unchanged_snapshot() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    GITHUB_OUTPUT="${freshness_out}" "${HELPER}" check-freshness "${plan_out}" >/dev/null
+  )
+
+  assert_contains "${freshness_out}" "fresh=true"
+  assert_contains "${freshness_out}" "stale_reasons="
+  rm -rf "${root}"
+}
+
+test_freshness_rejects_moved_original_tag() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local original=${root}/original
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null)
+  commit_file "${original}" moved-original.txt moved "move original tag target"
+  run_git -C "${original}" tag -f v7.1.66 >/dev/null
+  assert_freshness_failure "${fork}" "${plan_out}" "${freshness_out}" original-tag-moved
+  rm -rf "${root}"
+}
+
+test_freshness_rejects_moved_plus_head() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plus=${root}/plus
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null)
+  commit_file "${plus}" internal/auth/copilot/moved.go moved "move Plus head"
+  assert_freshness_failure "${fork}" "${plan_out}" "${freshness_out}" plus-head-moved
+  rm -rf "${root}"
+}
+
+test_freshness_rejects_moved_models_head() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local models=${root}/models
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null)
+  commit_file "${models}" models.json moved-models "move models head"
+  assert_freshness_failure "${fork}" "${plan_out}" "${freshness_out}" models-head-moved
+  rm -rf "${root}"
+}
+
+test_freshness_rejects_changed_origin_main() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local freshness_out=${root}/freshness.out
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null)
+  commit_file "${fork}" concurrent.txt concurrent "move fork main"
+  run_git -C "${fork}" push -q origin main
+  assert_freshness_failure "${fork}" "${plan_out}" "${freshness_out}" fork-main-moved
+  rm -rf "${root}"
+}
+
+test_provenance_recommends_owner_specific_actions() {
+  local root
+  root=$(mktemp -d)
+  local original=${root}/original
+  local plus=${root}/plus
+  local models=${root}/models
+  local fork=${root}/fork
+  local origin=${root}/origin.git
+  local plan_out=${root}/plan.out
+  local report_dir=${root}/reports
+
+  new_repo "${original}"
+  commit_file "${original}" shared-original.txt base "add original-only base"
+  commit_file "${original}" shared-plus.txt base "add Plus-only base"
+  commit_file "${original}" shared-both.txt base "add shared base"
+  commit_file "${original}" internal/auth/copilot/provider.go base "add Plus-owned base"
+  commit_file "${original}" .github/workflows/fork.yml base "add fork-owned base"
+  run_git -C "${original}" tag v7.1.45
+
+  clone_for_fork "${original}" "${plus}"
+  commit_file "${plus}" shared-plus.txt plus "Plus changes shared path"
+  commit_file "${plus}" shared-both.txt plus "Plus changes contested path"
+  commit_file "${plus}" internal/auth/copilot/provider.go plus "Plus changes owned path"
+  run_git -C "${plus}" tag v7.1.45-0
+
+  clone_for_fork "${plus}" "${fork}"
+  commit_file "${fork}" .github/workflows/fork.yml fork "fork changes owned path"
+  run_git clone -q --bare "${fork}" "${origin}"
+  run_git -C "${fork}" remote set-url origin "${origin}"
+  run_git -C "${fork}" remote add original-upstream "${original}"
+  run_git -C "${fork}" remote add plus-upstream "${plus}"
+
+  new_repo "${models}"
+  commit_file "${models}" models.json models "add models"
+  run_git -C "${fork}" remote add models-upstream "${models}"
+
+  commit_file "${original}" shared-original.txt original "original changes shared path"
+  commit_file "${original}" shared-both.txt original "original changes contested path"
+  run_git -C "${original}" tag v7.1.66
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    UPSTREAM_SYNC_REPORT_DIR="${report_dir}" \
+      GITHUB_OUTPUT="${root}/provenance.out" \
+      "${HELPER}" report-provenance "${plan_out}" HEAD >/dev/null
+  )
+
+  local tsv=${report_dir}/provenance.tsv
+  local markdown=${report_dir}/provenance.md
+  assert_contains "${tsv}" $'.github/workflows/fork.yml\tfork-owned\tfork\tpreserve-fork\tfalse'
+  assert_contains "${tsv}" $'internal/auth/copilot/provider.go\tplus-owned\tplus\taccept-plus\tfalse'
+  assert_contains "${tsv}" $'shared-original.txt\tshared-hotspot\toriginal\treview-original-update\tfalse'
+  assert_contains "${tsv}" $'shared-plus.txt\tshared-hotspot\tplus\tinherited-plus\tfalse'
+  assert_contains "${tsv}" $'shared-both.txt\tshared-hotspot\toriginal,plus\tmanual-compose\ttrue'
+  assert_contains "${markdown}" "Manual composition required: **yes**"
+  rm -rf "${root}"
+}
+
+test_shared_conflict_aborts_without_side_checkout() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local original=${root}/original
+  local out=${root}/merge.out
+  local log=${root}/merge.log
+  local before
+
+  commit_file "${original}" internal/runtime/executor/fork.go original-change "original conflicts with fork overlay"
+  run_git -C "${original}" tag v7.1.67
+  before=$(run_git -C "${fork}" rev-parse HEAD)
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream refs/tags/v7.1.67:refs/tags/v7.1.67
+    GITHUB_OUTPUT="${out}" "${HELPER}" merge-ref original refs/tags/v7.1.67 > "${log}" 2>&1
+  )
+
+  assert_contains "${out}" "conflicts=true"
+  assert_contains "${log}" "requires manual composition"
+  assert_equal "${before}" "$(run_git -C "${fork}" rev-parse HEAD)" "shared conflict branch head"
+  assert_equal "fork-change" "$(cat "${fork}/internal/runtime/executor/fork.go")" "shared conflict worktree content"
+  if [ -n "$(run_git -C "${fork}" status --porcelain)" ]; then
+    fail "shared conflict left an unresolved worktree"
+  fi
+  rm -rf "${root}"
+}
+
+test_report_renderer_includes_required_evidence() {
+  local root
+  root=$(mktemp -d)
+  local plan=${root}/plan.out
+  local validation=${root}/validation.env
+  local provenance=${root}/provenance.tsv
+  local report=${root}/report.md
+
+  cat > "${plan}" <<'EOF'
+safe_sync_id=original-v7.2.67_plus-v7.2.62-5
+base_fork_commit=1111111111111111111111111111111111111111
+original_tag=v7.2.67
+original_head=2222222222222222222222222222222222222222
+plus_tag=v7.2.62-5
+plus_tag_head=3333333333333333333333333333333333333333
+plus_head=4444444444444444444444444444444444444444
+plus_head_included=true
+models_commit=5555555555555555555555555555555555555555
+plan_fingerprint=6666666666666666666666666666666666666666
+candidate_branch=upstream-sync/original-v7.2.67_plus-v7.2.62-5-666666666666
+expected_fork_tag=v7.2.67-unstableneutron.1
+fresh=false
+stale_reasons=models-head-moved
+conflicts=true
+conflict_files=sdk/shared.go
+workflow_url=https://github.com/unstableneutron/CLIProxyAPIPlus/actions/runs/123
+EOF
+  cat > "${validation}" <<'EOF'
+OVERALL_STATUS=failed
+INVARIANTS_STATUS=passed
+SYMBOL_SURVIVAL_STATUS=passed
+BUILD_STATUS=failed
+TESTS_STATUS=passed
+HELPER_TESTS_STATUS=passed
+SHELLCHECK_STATUS=passed
+ACTIONLINT_STATUS=passed
+EOF
+  cat > "${provenance}" <<'EOF'
+path	owner	provenance	action	manual_composition
+sdk/shared.go	shared-hotspot	original,plus	manual-compose	true
+sdk/fork.go	fork-owned	fork	preserve-fork	false
+EOF
+
+  "${RENDERER}" --plan "${plan}" --validation "${validation}" --provenance "${provenance}" --output "${report}"
+
+  assert_contains "${report}" "v7.2.67"
+  assert_contains "${report}" "2222222222222222222222222222222222222222"
+  assert_contains "${report}" "3333333333333333333333333333333333333333"
+  assert_contains "${report}" "4444444444444444444444444444444444444444"
+  assert_contains "${report}" "5555555555555555555555555555555555555555"
+  assert_contains "${report}" "6666666666666666666666666666666666666666"
+  assert_contains "${report}" "upstream-sync/original-v7.2.67_plus-v7.2.62-5-666666666666"
+  assert_contains "${report}" "v7.2.67-unstableneutron.1"
+  assert_contains "${report}" "Fresh: **false**"
+  assert_contains "${report}" "models-head-moved"
+  assert_contains "${report}" "sdk/shared.go"
+  assert_contains "${report}" "shared-hotspot"
+  assert_contains "${report}" "manual-compose"
+  assert_contains "${report}" "Manual composition required: **yes**"
+  # shellcheck disable=SC2016
+  assert_contains "${report}" 'Build | `failed`'
+  assert_contains "${report}" "https://github.com/unstableneutron/CLIProxyAPIPlus/actions/runs/123"
+  rm -rf "${root}"
+}
+
+test_report_renderer_handles_no_optional_conflicts() {
+  local root
+  root=$(mktemp -d)
+  local plan=${root}/plan.out
+  local validation=${root}/validation.env
+  local provenance=${root}/provenance.tsv
+  local report=${root}/report.md
+
+  cat > "${plan}" <<'EOF'
+safe_sync_id=sync-id
+base_fork_commit=1111111111111111111111111111111111111111
+original_tag=v7.2.67
+original_head=2222222222222222222222222222222222222222
+plus_tag=v7.2.62-5
+plus_tag_head=3333333333333333333333333333333333333333
+plus_head=3333333333333333333333333333333333333333
+plus_head_included=false
+models_commit=5555555555555555555555555555555555555555
+plan_fingerprint=6666666666666666666666666666666666666666
+candidate_branch=upstream-sync/sync-id-666666666666
+expected_fork_tag=v7.2.67-unstableneutron.0
+EOF
+  cat > "${validation}" <<'EOF'
+OVERALL_STATUS=passed
+INVARIANTS_STATUS=passed
+SYMBOL_SURVIVAL_STATUS=passed
+BUILD_STATUS=passed
+TESTS_STATUS=passed
+HELPER_TESTS_STATUS=skipped
+SHELLCHECK_STATUS=skipped
+ACTIONLINT_STATUS=skipped
+EOF
+  printf 'path\towner\tprovenance\taction\tmanual_composition\n' > "${provenance}"
+
+  "${RENDERER}" --plan "${plan}" --validation "${validation}" --provenance "${provenance}" --output "${report}"
+  assert_contains "${report}" "Conflicts: **None**"
+  assert_contains "${report}" "Manual composition required: **no**"
+  assert_contains "${report}" "Workflow: None"
+  rm -rf "${root}"
+}
+
+test_report_renderer_rejects_missing_required_plan_field() {
+  local root
+  root=$(mktemp -d)
+  local plan=${root}/plan.out
+  local validation=${root}/validation.env
+  local provenance=${root}/provenance.tsv
+
+  printf 'original_tag=v7.2.67\n' > "${plan}"
+  printf 'OVERALL_STATUS=passed\n' > "${validation}"
+  printf 'path\towner\tprovenance\taction\tmanual_composition\n' > "${provenance}"
+  if "${RENDERER}" --plan "${plan}" --validation "${validation}" --provenance "${provenance}" --output "${root}/report.md" 2>/dev/null; then
+    fail "renderer accepted a plan missing required snapshot fields"
+  fi
+  rm -rf "${root}"
 }
 
 test_detects_original_ahead_of_plus() {
@@ -281,6 +865,7 @@ test_original_merge_reports_owned_clobber_without_text_conflict() {
   root=$(mktemp -d)
   local original=${root}/original
   local plus=${root}/plus
+  local models=${root}/models
   local fork=${root}/fork
   local out=${root}/merge.out
 
@@ -409,6 +994,7 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
   root=$(mktemp -d)
   local original=${root}/original
   local plus=${root}/plus
+  local models=${root}/models
   local fork=${root}/fork
   local origin=${root}/origin.git
   local out=${root}/replay.out
@@ -422,6 +1008,9 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
   clone_for_fork "${original}" "${plus}"
   run_git -C "${plus}" tag v7.1.45-0
 
+  new_repo "${models}"
+  commit_file "${models}" models.json models-1 "models base"
+
   clone_for_fork "${plus}" "${fork}"
   mkdir -p "${fork}/.github"
   printf '\n' > "${fork}/.github/upstream-sync-invariants.tsv"
@@ -434,6 +1023,7 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
   run_git -C "${fork}" remote set-url origin "${origin}"
   run_git -C "${fork}" remote add original-upstream "${original}"
   run_git -C "${fork}" remote add plus-upstream "${plus}"
+  run_git -C "${fork}" remote add models-upstream "${models}"
 
   commit_file "${original}" original-conflict.txt original-new "original new conflict"
   run_git -C "${original}" tag v7.1.66
@@ -556,6 +1146,23 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
 }
 
 main() {
+  test_plan_emits_exact_snapshot_and_candidate_branch
+  test_materialize_uses_namespaced_refs_without_network
+  test_same_target_produces_same_plan_fingerprint
+  test_moved_target_produces_new_plan_fingerprint
+  test_validation_driver_modes_tooling_and_artifacts
+  test_validation_failure_preserves_all_logs
+  test_record_state_writes_schema_v2_before_validation
+  test_freshness_passes_for_unchanged_snapshot
+  test_freshness_rejects_moved_original_tag
+  test_freshness_rejects_moved_plus_head
+  test_freshness_rejects_moved_models_head
+  test_freshness_rejects_changed_origin_main
+  test_provenance_recommends_owner_specific_actions
+  test_shared_conflict_aborts_without_side_checkout
+  test_report_renderer_includes_required_evidence
+  test_report_renderer_handles_no_optional_conflicts
+  test_report_renderer_rejects_missing_required_plan_field
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
   test_includes_safe_plus_head_delta

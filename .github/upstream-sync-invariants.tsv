@@ -1,28 +1,28 @@
-# check	path	pattern	description
-contains	sdk/api/handlers/openai/openai_responses_websocket.go	stripUnsupportedResponsesWebsocketInputItemMetadata	responses websocket input item metadata sanitizer remains
-contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestStripsInputItemMetadata	responses websocket metadata sanitizer regression test remains
-contains	internal/runtime/executor/gemini_cli_executor.go	type GeminiCLIExecutor	Gemini CLI executor remains present
-contains	sdk/api/handlers/gemini/gemini-cli_handlers.go	GeminiCLIAPIHandler	Gemini CLI SDK handler surface remains present
-contains	sdk/auth/gemini.go	GeminiAuthenticator	Gemini CLI SDK auth surface remains present
-contains	internal/translator/init.go	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini-cli/openai/chat-completions"	Gemini CLI translator registrations remain present
-contains	sdk/translator/formats.go	GeminiCLI	Gemini CLI SDK translator format remains present
-contains	internal/registry/model_definitions.go	CommandCode	CommandCode model registry bucket remains present
-contains	internal/registry/model_definitions.go	commandcode	CommandCode model type aliases remain present
-contains	sdk/cliproxy/service.go	case "commandcode":	CommandCode executor registration remains present
-contains	internal/watcher/synthesizer/config.go	synthesizeCommandCodeKeys	CommandCode config synthesizer remains present
-contains	internal/watcher/synthesizer/config.go	synthesizeKiroKeys	Kiro config synthesizer remains present
-contains	internal/api/server.go	mgmt.GET("/ampcode"	Amp route registration remains present
-contains	internal/api/server.go	mgmt.GET("/codex-api-key"	Codex management route registration remains present
-contains	internal/api/server.go	mgmt.GET("/auth-files"	management auth-file route registration remains present
-contains	internal/registry/model_definitions_test.go	TestAntigravityWebSearchModelForRequiresRequestedModelCapability	Antigravity web-search regression test remains present
-contains	internal/registry/model_definitions_test.go	TestGetKiroModelsReturnsStaticFallbackSet	Kiro fallback model regression test remains present
-contains	internal/runtime/executor/codex_websockets_executor.go	patchCodexCompletedOutput	Codex websocket executor patches empty completed output before transcript recording
-contains	internal/runtime/executor/codex_websockets_executor_test.go	TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction	Codex websocket compaction transcript regression test remains
-contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
-contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
-contains	sdk/api/handlers/openai/openai_responses_handlers.go	isResponsesCompactionTriggerRequest(rawJSON)	responses compaction-trigger streams bypass bootstrap timeout
-contains	sdk/api/handlers/openai/openai_responses_handlers_stream_error_test.go	TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger	responses compaction-trigger stream timeout regression test remains
-contains	sdk/api/handlers/openai/openai_responses_websocket.go	runner.Start(cliCtx	responses websocket handler retains dedicated turn-runner seam
-contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner.go	responsesWebsocketStartupBufferLimit = 1 << 20	responses websocket speculative startup buffer remains bounded to one MiB
-contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner_test.go	TestResponsesWebsocketTurnRunnerNeverRetriesAfterSemanticCommit	responses websocket never retries after downstream semantic commitment
-contains	sdk/cliproxy/executor/types.go	ExcludedAuthIDsMetadataKey	turn-local exact auth exclusion metadata remains available
+# feature	check	path	pattern	description
+responses-websocket	contains	sdk/api/handlers/openai/openai_responses_websocket.go	stripUnsupportedResponsesWebsocketInputItemMetadata	responses websocket input item metadata sanitizer remains
+responses-websocket	contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestStripsInputItemMetadata	responses websocket metadata sanitizer regression test remains
+gemini-cli	contains	internal/runtime/executor/gemini_cli_executor.go	type GeminiCLIExecutor	Gemini CLI executor remains present
+gemini-cli	contains	sdk/api/handlers/gemini/gemini-cli_handlers.go	GeminiCLIAPIHandler	Gemini CLI SDK handler surface remains present
+gemini-cli	contains	sdk/auth/gemini.go	GeminiAuthenticator	Gemini CLI SDK auth surface remains present
+gemini-cli	contains	internal/translator/init.go	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini-cli/openai/chat-completions"	Gemini CLI translator registrations remain present
+gemini-cli	contains	sdk/translator/formats.go	GeminiCLI	Gemini CLI SDK translator format remains present
+commandcode	contains	internal/registry/model_definitions.go	CommandCode	CommandCode model registry bucket remains present
+commandcode	contains	internal/registry/model_definitions.go	commandcode	CommandCode model type aliases remain present
+commandcode	contains	sdk/cliproxy/service.go	case "commandcode":	CommandCode executor registration remains present
+commandcode	contains	internal/watcher/synthesizer/config.go	synthesizeCommandCodeKeys	CommandCode config synthesizer remains present
+kiro	contains	internal/watcher/synthesizer/config.go	synthesizeKiroKeys	Kiro config synthesizer remains present
+amp	contains	internal/api/server.go	mgmt.GET("/ampcode"	Amp route registration remains present
+management-api	contains	internal/api/server.go	mgmt.GET("/codex-api-key"	Codex management route registration remains present
+management-api	contains	internal/api/server.go	mgmt.GET("/auth-files"	management auth-file route registration remains present
+antigravity	contains	internal/registry/model_definitions_test.go	TestAntigravityWebSearchModelForRequiresRequestedModelCapability	Antigravity web-search regression test remains present
+kiro	contains	internal/registry/model_definitions_test.go	TestGetKiroModelsReturnsStaticFallbackSet	Kiro fallback model regression test remains present
+codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_executor.go	patchCodexCompletedOutput	Codex websocket executor patches empty completed output before transcript recording
+codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_executor_test.go	TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction	Codex websocket compaction transcript regression test remains
+responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
+responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
+responses-compaction	contains	sdk/api/handlers/openai/openai_responses_handlers.go	isResponsesCompactionTriggerRequest(rawJSON)	responses compaction-trigger streams bypass bootstrap timeout
+responses-compaction	contains	sdk/api/handlers/openai/openai_responses_handlers_stream_error_test.go	TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger	responses compaction-trigger stream timeout regression test remains
+responses-websocket-failover	contains	sdk/api/handlers/openai/openai_responses_websocket.go	runner.Start(cliCtx	responses websocket handler retains dedicated turn-runner seam
+responses-websocket-failover	contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner.go	responsesWebsocketStartupBufferLimit = 1 << 20	responses websocket speculative startup buffer remains bounded to one MiB
+responses-websocket-failover	contains	sdk/api/handlers/openai/openai_responses_websocket_turn_runner_test.go	TestResponsesWebsocketTurnRunnerNeverRetriesAfterSemanticCommit	responses websocket never retries after downstream semantic commitment
+responses-websocket-failover	contains	sdk/cliproxy/executor/types.go	ExcludedAuthIDsMetadataKey	turn-local exact auth exclusion metadata remains available
