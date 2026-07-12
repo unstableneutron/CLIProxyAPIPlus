@@ -1325,6 +1325,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
+	// Callers read the returned header map immediately, so freeze it before handoff.
+	headersReady := make(chan struct{})
+	var headersReadyOnce sync.Once
+	markHeadersReady := func() {
+		headersReadyOnce.Do(func() { close(headersReady) })
+	}
 	streamHeaderInitialized := false
 	streamHeadersCommitted := false
 
@@ -1394,6 +1400,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		defer markHeadersReady()
 		if streamCanceledBeforeRead {
 			return
 		}
@@ -1534,6 +1541,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 					}
 					sentPayload = true
 					streamHeadersCommitted = true
+					markHeadersReady()
 					if okSendData := sendData(payload); !okSendData {
 						return
 					}
@@ -1546,6 +1554,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			return
 		}
 	}()
+	<-headersReady
 	return dataChan, upstreamHeaders, errChan
 }
 

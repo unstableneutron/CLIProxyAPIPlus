@@ -54,6 +54,42 @@ type blockingFirstChunkExecutor struct {
 	chunks  chan coreexecutor.StreamChunk
 }
 
+type signalingResponseRecorder struct {
+	*httptest.ResponseRecorder
+	flushed chan struct{}
+	once    sync.Once
+}
+
+func newSignalingResponseRecorder() *signalingResponseRecorder {
+	return &signalingResponseRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		flushed:          make(chan struct{}),
+	}
+}
+
+func (r *signalingResponseRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.once.Do(func() { close(r.flushed) })
+}
+
+func waitForResponseFlush(t *testing.T, recorder *signalingResponseRecorder) {
+	t.Helper()
+	select {
+	case <-recorder.flushed:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not flush the streaming response")
+	}
+}
+
+func waitForHandlerExit(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not exit after request cancellation")
+	}
+}
+
 func (e *blockingFirstChunkExecutor) Identifier() string { return "codex" }
 
 func (e *blockingFirstChunkExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -154,7 +190,7 @@ func TestHandleStreamingResponseCommitsSSEWhileBootstrapWaits(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, executor := newBlockingBootstrapResponsesHandler(t, &sdkconfig.SDKConfig{})
 
-	recorder := httptest.NewRecorder()
+	recorder := newSignalingResponseRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
@@ -171,14 +207,7 @@ func TestHandleStreamingResponseCommitsSSEWhileBootstrapWaits(t *testing.T) {
 		t.Fatal("upstream bootstrap did not start")
 	}
 
-	time.Sleep(500 * time.Millisecond)
-	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
-		t.Fatalf("expected SSE content type while bootstrap waits, got %q", got)
-	}
-	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
-		t.Fatalf("expected bootstrap heartbeat before upstream first byte, got body %q", body)
-	}
-
+	waitForResponseFlush(t, recorder)
 	select {
 	case <-done:
 		t.Fatal("handler returned before request cancellation")
@@ -186,10 +215,13 @@ func TestHandleStreamingResponseCommitsSSEWhileBootstrapWaits(t *testing.T) {
 	}
 
 	cancelReq()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after request cancellation")
+	waitForHandlerExit(t, done)
+
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected SSE content type while bootstrap waits, got %q", got)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
+		t.Fatalf("expected bootstrap heartbeat before upstream first byte, got body %q", body)
 	}
 }
 
@@ -199,7 +231,7 @@ func TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger(t *test
 		Streaming: sdkconfig.StreamingConfig{BootstrapTimeoutSeconds: 1},
 	})
 
-	recorder := httptest.NewRecorder()
+	recorder := newSignalingResponseRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
@@ -215,21 +247,19 @@ func TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger(t *test
 	case <-time.After(time.Second):
 		t.Fatal("upstream bootstrap did not start")
 	}
+	waitForResponseFlush(t, recorder)
 	time.Sleep(1200 * time.Millisecond)
-	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
-		t.Fatalf("expected bootstrap heartbeat while compact waits, got body %q", body)
-	}
 	select {
 	case <-done:
-		t.Fatalf("handler returned before request cancellation; body=%q", recorder.Body.String())
+		t.Fatal("handler returned before request cancellation")
 	default:
 	}
 
 	cancelReq()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after request cancellation")
+	waitForHandlerExit(t, done)
+
+	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
+		t.Fatalf("expected bootstrap heartbeat while compact waits, got body %q", body)
 	}
 }
 
@@ -238,7 +268,7 @@ func TestHandleStreamingResponseCommitsSSEWhileFirstChunkWaits(t *testing.T) {
 	h, executor := newBlockingFirstChunkResponsesHandler(t, &sdkconfig.SDKConfig{})
 	defer close(executor.chunks)
 
-	recorder := httptest.NewRecorder()
+	recorder := newSignalingResponseRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
@@ -255,14 +285,7 @@ func TestHandleStreamingResponseCommitsSSEWhileFirstChunkWaits(t *testing.T) {
 		t.Fatal("upstream stream did not start")
 	}
 
-	time.Sleep(500 * time.Millisecond)
-	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
-		t.Fatalf("expected SSE content type while first chunk waits, got %q", got)
-	}
-	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
-		t.Fatalf("expected bootstrap heartbeat before upstream first chunk, got body %q", body)
-	}
-
+	waitForResponseFlush(t, recorder)
 	select {
 	case <-done:
 		t.Fatal("handler returned before request cancellation")
@@ -270,10 +293,13 @@ func TestHandleStreamingResponseCommitsSSEWhileFirstChunkWaits(t *testing.T) {
 	}
 
 	cancelReq()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after request cancellation")
+	waitForHandlerExit(t, done)
+
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected SSE content type while first chunk waits, got %q", got)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
+		t.Fatalf("expected bootstrap heartbeat before upstream first chunk, got body %q", body)
 	}
 }
 
@@ -281,7 +307,7 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 	gin.SetMode(gin.TestMode)
 	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 
-	recorder := httptest.NewRecorder()
+	recorder := newSignalingResponseRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
@@ -329,21 +355,17 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 		close(done)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	waitForResponseFlush(t, recorder)
+	cancelReq()
+	close(data)
+	close(errs)
+	waitForHandlerExit(t, done)
+
 	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
 		t.Fatalf("expected SSE content type while returned stream waits, got %q", got)
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, ": stream-start") {
 		t.Fatalf("expected bootstrap heartbeat before returned stream first chunk, got body %q", body)
-	}
-
-	cancelReq()
-	close(data)
-	close(errs)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after request cancellation")
 	}
 }
 
@@ -351,7 +373,7 @@ func TestHandleStreamingResponseViaChatCommitsSSEWhileBootstrapWaits(t *testing.
 	gin.SetMode(gin.TestMode)
 	h, executor := newBlockingBootstrapResponsesHandler(t, &sdkconfig.SDKConfig{})
 
-	recorder := httptest.NewRecorder()
+	recorder := newSignalingResponseRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
@@ -372,7 +394,10 @@ func TestHandleStreamingResponseViaChatCommitsSSEWhileBootstrapWaits(t *testing.
 		t.Fatal("upstream bootstrap did not start")
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	waitForResponseFlush(t, recorder)
+	cancelReq()
+	waitForHandlerExit(t, done)
+
 	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
 		t.Fatalf("expected SSE content type while bootstrap waits, got %q", got)
 	}
@@ -380,12 +405,6 @@ func TestHandleStreamingResponseViaChatCommitsSSEWhileBootstrapWaits(t *testing.
 		t.Fatalf("expected bootstrap heartbeat before upstream first byte, got body %q", body)
 	}
 
-	cancelReq()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after request cancellation")
-	}
 }
 
 func TestHandleStreamingResponseBootstrapTimeoutWritesResponsesErrorChunk(t *testing.T) {
