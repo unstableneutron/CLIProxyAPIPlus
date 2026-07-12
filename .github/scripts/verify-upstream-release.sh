@@ -11,6 +11,7 @@ EXPECTED_COMMIT=""
 EXPECTED_SYNC_ID=""
 EXPECTED_PLAN_FINGERPRINT=""
 IMAGE_INPUT=""
+MAIN_POLICY=exact
 REQUIRE_LATEST_PARITY=""
 RECEIPT=""
 
@@ -41,6 +42,11 @@ while [ "$#" -gt 0 ]; do
       IMAGE_INPUT=$2
       shift 2
       ;;
+    --main-policy)
+      [ "$#" -ge 2 ] || die "--main-policy requires a value"
+      MAIN_POLICY=$2
+      shift 2
+      ;;
     --require-latest-parity)
       [ "$#" -ge 2 ] || die "--require-latest-parity requires a value"
       REQUIRE_LATEST_PARITY=$2
@@ -61,6 +67,10 @@ done
 [[ "${EXPECTED_PLAN_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "--expected-plan-fingerprint must be a 40-character lowercase hash"
 [ -n "${IMAGE_INPUT}" ] || die "--image is required"
+case "${MAIN_POLICY}" in
+  exact|descendant) ;;
+  *) die "--main-policy must be exact or descendant" ;;
+esac
 case "${REQUIRE_LATEST_PARITY}" in
   true|false) ;;
   *) die "--require-latest-parity must be true or false" ;;
@@ -83,8 +93,18 @@ else
 fi
 
 MAIN_COMMIT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
-[ "${MAIN_COMMIT}" = "${EXPECTED_COMMIT}" ] \
-  || die "main resolves to ${MAIN_COMMIT}, expected ${EXPECTED_COMMIT}"
+if [ "${MAIN_POLICY}" = exact ]; then
+  [ "${MAIN_COMMIT}" = "${EXPECTED_COMMIT}" ] \
+    || die "main resolves to ${MAIN_COMMIT}, expected ${EXPECTED_COMMIT}"
+else
+  COMPARE_STATUS=$(gh api \
+    "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_COMMIT}...${MAIN_COMMIT}" \
+    --jq .status)
+  case "${COMPARE_STATUS}" in
+    identical|ahead) ;;
+    *) die "main ${MAIN_COMMIT} does not descend from ${EXPECTED_COMMIT}" ;;
+  esac
+fi
 
 TAG_COMMIT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
 [ "${TAG_COMMIT}" = "${EXPECTED_COMMIT}" ] \
@@ -140,7 +160,7 @@ trap 'rm -f "${RECEIPT_TEMP}"' EXIT
 jq -n \
   --arg sync_id "${EXPECTED_SYNC_ID}" \
   --arg plan_fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
-  --arg main_commit "${MAIN_COMMIT}" \
+  --arg main_commit "${EXPECTED_COMMIT}" \
   --arg tag "${TAG}" \
   --arg tag_commit "${TAG_COMMIT}" \
   --arg release_url "${RELEASE_URL}" \

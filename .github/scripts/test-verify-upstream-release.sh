@@ -34,6 +34,9 @@ case "${1:-}:${2:-}" in
   api:*commits/*)
     printf '%s\n' "${STUB_TAG_COMMIT}"
     ;;
+  api:*compare/*)
+    printf '%s\n' "${STUB_COMPARE_STATUS}"
+    ;;
   release:view)
     cat "${STUB_RELEASE_JSON}"
     ;;
@@ -67,6 +70,8 @@ run_verifier() {
   local release_json=${6:-${FIXTURES}/release.json}
   local image_json=${7:-${FIXTURES}/image-index.json}
   local latest_json=${8:-${image_json}}
+  local main_policy=${9:-exact}
+  local compare_status=${10:-ahead}
 
   PATH="${root}/bin:${PATH}" \
     GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
@@ -76,14 +81,40 @@ run_verifier() {
     STUB_RELEASE_JSON="${release_json}" \
     STUB_IMAGE_INDEX_JSON="${image_json}" \
     STUB_LATEST_INDEX_JSON="${latest_json}" \
+    STUB_COMPARE_STATUS="${compare_status}" \
     "${VERIFIER}" \
       --tag "${TAG}" \
       --expected-commit "${COMMIT}" \
       --expected-sync-id "${SYNC_ID}" \
       --expected-plan-fingerprint "${FINGERPRINT}" \
       --image "${IMAGE}" \
+      --main-policy "${main_policy}" \
       --require-latest-parity "${require_latest}" \
       --receipt "${receipt}"
+}
+
+test_allows_verified_main_descendant_when_requested() {
+  local root
+  root=$(mktemp -d)
+  make_stubs "${root}"
+  local descendant=cccccccccccccccccccccccccccccccccccccccc
+  local receipt=${root}/descendant.json
+
+  run_verifier \
+    "${root}" "${receipt}" false \
+    "${descendant}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${FIXTURES}/image-index.json" \
+    descendant ahead
+  jq -e --arg commit "${COMMIT}" \
+    '.main_commit == $commit and .tag_commit == $commit' \
+    "${receipt}" >/dev/null || fail "descendant verification rewrote release identity"
+
+  expect_failure \
+    "${root}" "${root}/diverged.json" "does not descend from" \
+    false "${descendant}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${FIXTURES}/image-index.json" \
+    descendant diverged
+  rm -rf "${root}"
 }
 
 expect_failure() {
@@ -190,6 +221,7 @@ main() {
   [ -x "${VERIFIER}" ] || fail "verifier is missing or not executable: ${VERIFIER}"
   test_writes_receipt_after_success
   test_rejects_main_or_tag_mismatch
+  test_allows_verified_main_descendant_when_requested
   test_rejects_wrong_release_branding
   test_rejects_missing_required_platforms
   test_latest_parity_is_conditional

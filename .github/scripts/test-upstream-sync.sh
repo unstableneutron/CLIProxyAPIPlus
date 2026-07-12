@@ -758,6 +758,13 @@ test_v2_workflow_contract_is_candidate_first_and_manual_only() {
   assert_contains "${workflow}" "gh release download"
   assert_contains "${workflow}" "gh release upload"
   assert_contains "${workflow}" "upstream-sync-receipt.json"
+  # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
+  assert_contains "${workflow}" 'refs/tags/${EXPECTED_FORK_TAG}:.ccs-fork-upstream.env'
+  # shellcheck disable=SC2016 # The workflow expression is asserted literally.
+  assert_contains "${workflow}" 'PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}'
+  # shellcheck disable=SC2016 # The workflow shell assignment is asserted literally.
+  assert_contains "${workflow}" 'STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"'
+  assert_contains "${workflow}" '--main-policy descendant'
   assert_equal \
     "1" \
     "$(grep -c 'validate-upstream-sync.sh --mode full' "${workflow}")" \
@@ -844,12 +851,15 @@ test_noops_when_latest_fork_tag_represents_both_sources() {
   root=$(mktemp -d)
   local fork
   fork=$(setup_base_graph "${root}")
+  local models_commit
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
   local out=${root}/plan.out
 
   (
     cd "${fork}"
     run_git fetch -q original-upstream main --tags
     run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    commit_file "${fork}" .ccs-fork-upstream.env "MODELS_COMMIT=${models_commit}" "record models provenance"
     run_git tag v7.1.66-unstableneutron.0
     run_git push -q origin main --tags
     FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
@@ -857,6 +867,36 @@ test_noops_when_latest_fork_tag_represents_both_sources() {
 
   assert_contains "${out}" "has_changes=false"
   assert_contains "${out}" "latest_fork_tag=v7.1.66-unstableneutron.0"
+}
+
+test_detects_models_only_drift_after_represented_sources() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local models=${root}/models
+  local represented_models_commit
+  represented_models_commit=$(run_git -C "${models}" rev-parse HEAD)
+  local out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream main --tags
+    run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    commit_file "${fork}" .ccs-fork-upstream.env "MODELS_COMMIT=${represented_models_commit}" "record models provenance"
+    run_git tag v7.1.66-unstableneutron.0
+    run_git push -q origin main --tags
+  )
+  commit_file "${models}" models.json models-2 "move models head"
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+
+  assert_contains "${out}" "has_changes=true"
+  assert_contains "${out}" "expected_fork_tag=v7.1.66-unstableneutron.1"
+  assert_contains "${out}" "target_drift=true"
+  assert_contains "${out}" "Models commit"
 }
 
 test_includes_safe_plus_head_delta() {
@@ -1322,6 +1362,7 @@ main() {
   test_publication_workflows_are_reusable_and_checked
   test_detects_original_ahead_of_plus
   test_noops_when_latest_fork_tag_represents_both_sources
+  test_detects_models_only_drift_after_represented_sources
   test_includes_safe_plus_head_delta
   test_blocks_unsafe_plus_head_delta
   test_original_merge_protects_plus_owned_paths

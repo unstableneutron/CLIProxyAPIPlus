@@ -102,20 +102,48 @@ jobs:
           EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODE: ${{ inputs.mode }}
+          PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}
+          PLAN_ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
+          PLAN_PLUS_HEAD_COMMIT: ${{ steps.plan.outputs.plus_head }}
+          PLAN_PLUS_HEAD_INCLUDED: ${{ steps.plan.outputs.plus_head_included }}
+          PLAN_PLUS_TAG_COMMIT: ${{ steps.plan.outputs.plus_tag_head }}
         run: |
           RECEIPT_DIR="${SYNC_WORK_DIR}/represented-release"
           mkdir -p "${RECEIPT_DIR}"
-          STATE_SYNC_ID="$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' .ccs-fork-upstream.env)"
-          STATE_FINGERPRINT="$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)"
+          git fetch --force origin "refs/tags/${EXPECTED_FORK_TAG}:refs/tags/${EXPECTED_FORK_TAG}"
+          TAG_COMMIT="$(git rev-parse "refs/tags/${EXPECTED_FORK_TAG}^{}")"
+          STATE_FILE="${RECEIPT_DIR}/expected-state.env"
           set +e
+          git show "refs/tags/${EXPECTED_FORK_TAG}:.ccs-fork-upstream.env" > "${STATE_FILE}"
+          STATE_EXIT=$?
           gh release download "${EXPECTED_FORK_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern upstream-sync-receipt.json \
             --dir "${RECEIPT_DIR}"
           DOWNLOAD_EXIT=$?
           set -e
-          if [ -z "${STATE_SYNC_ID}" ] || \
+
+          state_value() {
+            local key=$1
+            awk -F= -v key="${key}" \
+              '$1 == key { sub(/^[^=]*=/, ""); print; exit }' \
+              "${STATE_FILE}"
+          }
+          STATE_SYNC_ID="$(state_value SYNC_ID)"
+          STATE_FINGERPRINT="$(state_value PLAN_FINGERPRINT)"
+          STATE_ORIGINAL_COMMIT="$(state_value ORIGINAL_COMMIT)"
+          STATE_PLUS_TAG_COMMIT="$(state_value PLUS_TAG_COMMIT)"
+          STATE_PLUS_HEAD_COMMIT="$(state_value PLUS_HEAD_COMMIT)"
+          STATE_PLUS_HEAD_INCLUDED="$(state_value PLUS_HEAD_INCLUDED)"
+          STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"
+          if [ "${STATE_EXIT}" -ne 0 ] || \
+             [ -z "${STATE_SYNC_ID}" ] || \
              [ -z "${STATE_FINGERPRINT}" ] || \
+             [ -z "${STATE_ORIGINAL_COMMIT}" ] || \
+             [ -z "${STATE_PLUS_TAG_COMMIT}" ] || \
+             [ -z "${STATE_PLUS_HEAD_COMMIT}" ] || \
+             [ -z "${STATE_PLUS_HEAD_INCLUDED}" ] || \
+             [ -z "${STATE_MODELS_COMMIT}" ] || \
              [ "${DOWNLOAD_EXIT}" -ne 0 ]; then
             if [ "${MODE}" = shadow ]; then
               echo "Legacy release without a v2 receipt; shadow verification made no changes." >> "${GITHUB_STEP_SUMMARY}"
@@ -124,12 +152,21 @@ jobs:
             echo "Represented release lacks v2 state or upstream-sync-receipt.json." >&2
             exit 1
           fi
+          if [ "${STATE_ORIGINAL_COMMIT}" != "${PLAN_ORIGINAL_COMMIT}" ] || \
+             [ "${STATE_PLUS_TAG_COMMIT}" != "${PLAN_PLUS_TAG_COMMIT}" ] || \
+             [ "${STATE_PLUS_HEAD_COMMIT}" != "${PLAN_PLUS_HEAD_COMMIT}" ] || \
+             [ "${STATE_PLUS_HEAD_INCLUDED}" != "${PLAN_PLUS_HEAD_INCLUDED}" ] || \
+             [ "${STATE_MODELS_COMMIT}" != "${PLAN_MODELS_COMMIT}" ]; then
+            echo "Represented release state does not match the selected exact refs." >&2
+            exit 1
+          fi
           .github/scripts/verify-upstream-release.sh \
             --tag "${EXPECTED_FORK_TAG}" \
-            --expected-commit "$(git rev-parse HEAD)" \
+            --expected-commit "${TAG_COMMIT}" \
             --expected-sync-id "${STATE_SYNC_ID}" \
             --expected-plan-fingerprint "${STATE_FINGERPRINT}" \
             --image ghcr.io/unstableneutron/cli-proxy-api-plus \
+            --main-policy descendant \
             --require-latest-parity true \
             --receipt "${RECEIPT_DIR}/verified-receipt.json"
           diff -u \

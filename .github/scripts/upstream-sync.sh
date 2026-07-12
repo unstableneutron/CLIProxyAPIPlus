@@ -459,6 +459,15 @@ recorded_state_value() {
   awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
 }
 
+state_value_at_ref() {
+  local ref=$1
+  local key=$2
+  [ -n "${ref}" ] || return 0
+  git show "${ref}:.ccs-fork-upstream.env" 2>/dev/null \
+    | awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' \
+    || true
+}
+
 append_drift_line() {
   local label=$1
   local old=$2
@@ -544,10 +553,11 @@ cmd_plan() {
   fi
   next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
 
-  local latest_fork_commit=""
+  local latest_fork_commit="" latest_fork_models_commit=""
   if [ -n "${latest_fork_tag}" ]; then
     fetch_snapshot_ref "${ORIGIN_REMOTE}" "refs/tags/${latest_fork_tag}" "${planning_key}" latest-fork >/dev/null
     latest_fork_commit=$(git rev-parse "$(snapshot_ref "${planning_key}" latest-fork)^{commit}")
+    latest_fork_models_commit=$(state_value_at_ref "${latest_fork_commit}" MODELS_COMMIT)
   fi
 
   local blocked=false block_reason="" plus_head_included=false
@@ -580,7 +590,8 @@ cmd_plan() {
 
   local has_changes=true
   if [ "${force_rebuild}" != true ] && [ "${blocked}" != true ] && [ -n "${latest_fork_commit}" ]; then
-    if commit_contains_all "${latest_fork_commit}" "${selected_targets[@]}"; then
+    if commit_contains_all "${latest_fork_commit}" "${selected_targets[@]}" \
+      && [ "${latest_fork_models_commit}" = "${models_commit}" ]; then
       has_changes=false
     fi
   fi
@@ -629,7 +640,8 @@ cmd_plan() {
     "$(append_drift_line "Plus tag" "$(recorded_state_value PLUS_TAG)" "${plus_tag}")" \
     "$(append_drift_line "Plus tag commit" "$(recorded_state_value PLUS_TAG_COMMIT)" "${plus_tag_commit}")" \
     "$(append_drift_line "Plus head commit" "$(recorded_state_value PLUS_HEAD_COMMIT)" "${plus_head_commit}")" \
-    "$(append_drift_line "Plus head included" "$(recorded_state_value PLUS_HEAD_INCLUDED)" "${plus_head_included}")"; do
+    "$(append_drift_line "Plus head included" "$(recorded_state_value PLUS_HEAD_INCLUDED)" "${plus_head_included}")" \
+    "$(append_drift_line "Models commit" "$(recorded_state_value MODELS_COMMIT)" "${models_commit}")"; do
     [ -n "${drift_line}" ] || continue
     drift_summary="${drift_summary}${drift_line}"$'\n'
   done
@@ -652,6 +664,7 @@ cmd_plan() {
   write_kv block_reason "${block_reason}"
   write_kv fork_tag_prefix "${fork_tag_prefix}"
   write_kv latest_fork_tag "${latest_fork_tag}"
+  write_kv latest_fork_models_commit "${latest_fork_models_commit}"
   write_kv latest_fork_suffix "${latest_fork_suffix}"
   write_kv next_fork_tag "${next_fork_tag}"
   write_kv expected_fork_tag "${expected_fork_tag}"
