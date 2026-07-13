@@ -44,15 +44,17 @@ type BedrockAuth struct {
 type BedrockModel struct {
 	Name         string                    `yaml:"name" json:"name"`
 	Alias        string                    `yaml:"alias" json:"alias"`
+	DisplayName  string                    `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 	ForceMapping bool                      `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 	API          string                    `yaml:"api,omitempty" json:"api,omitempty"`
 	StreamAPI    string                    `yaml:"stream-api,omitempty" json:"stream-api,omitempty"`
 	Thinking     *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
-func (m BedrockModel) GetName() string       { return m.Name }
-func (m BedrockModel) GetAlias() string      { return m.Alias }
-func (m BedrockModel) GetForceMapping() bool { return m.ForceMapping }
+func (m BedrockModel) GetName() string        { return m.Name }
+func (m BedrockModel) GetAlias() string       { return m.Alias }
+func (m BedrockModel) GetDisplayName() string { return m.DisplayName }
+func (m BedrockModel) GetForceMapping() bool  { return m.ForceMapping }
 
 func (p BedrockProvider) ResolvedAPIKey() string {
 	if key := strings.TrimSpace(p.Auth.APIKey); key != "" {

@@ -33,8 +33,18 @@ openai-compatibility:
       - name: compat-upstream
         alias: compat-alias
         display-name: Compatibility Name
+commandcode-api-key:
+  - models:
+      - name: commandcode-upstream
+        alias: commandcode-alias
+        display-name: CommandCode Name
+bedrock:
+  - models:
+      - name: bedrock-upstream
+        alias: bedrock-alias
+        display-name: Bedrock Name
 `
-	const jsonConfig = `{"codex-api-key":[{"models":[{"name":"codex-upstream","alias":"codex-alias","display-name":"Codex Name"}]}],"claude-api-key":[{"models":[{"name":"claude-upstream","alias":"claude-alias","display-name":"Claude Name"}]}],"gemini-api-key":[{"models":[{"name":"gemini-upstream","alias":"gemini-alias","display-name":"Gemini Name"}]}],"vertex-api-key":[{"models":[{"name":"vertex-upstream","alias":"vertex-alias","display-name":"Vertex Name"}]}],"openai-compatibility":[{"models":[{"name":"compat-upstream","alias":"compat-alias","display-name":"Compatibility Name"}]}]}`
+	const jsonConfig = `{"codex-api-key":[{"models":[{"name":"codex-upstream","alias":"codex-alias","display-name":"Codex Name"}]}],"claude-api-key":[{"models":[{"name":"claude-upstream","alias":"claude-alias","display-name":"Claude Name"}]}],"gemini-api-key":[{"models":[{"name":"gemini-upstream","alias":"gemini-alias","display-name":"Gemini Name"}]}],"vertex-api-key":[{"models":[{"name":"vertex-upstream","alias":"vertex-alias","display-name":"Vertex Name"}]}],"openai-compatibility":[{"models":[{"name":"compat-upstream","alias":"compat-alias","display-name":"Compatibility Name"}]}],"commandcode-api-key":[{"models":[{"name":"commandcode-upstream","alias":"commandcode-alias","display-name":"CommandCode Name"}]}],"bedrock":[{"models":[{"name":"bedrock-upstream","alias":"bedrock-alias","display-name":"Bedrock Name"}]}]}`
 
 	for _, tt := range []struct {
 		name   string
@@ -72,6 +82,12 @@ openai-compatibility:
 			}
 			if got := cfg.OpenAICompatibility[0].Models[0].DisplayName; got != "Compatibility Name" {
 				t.Fatalf("OpenAI compatibility display name = %q", got)
+			}
+			if got := cfg.CommandCodeKey[0].Models[0].DisplayName; got != "CommandCode Name" {
+				t.Fatalf("CommandCode display name = %q", got)
+			}
+			if got := cfg.Bedrock[0].Models[0].DisplayName; got != "Bedrock Name" {
+				t.Fatalf("Bedrock display name = %q", got)
 			}
 		})
 	}

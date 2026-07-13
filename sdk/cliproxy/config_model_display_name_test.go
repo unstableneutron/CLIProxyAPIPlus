@@ -48,6 +48,24 @@ func TestBuildConfigModelsDisplayName(t *testing.T) {
 				}}})[0]
 			},
 		},
+		{
+			name: "commandcode",
+			want: "CommandCode Catalog Name",
+			got: func() *ModelInfo {
+				return buildCommandCodeConfigModels(&config.CommandCodeKey{Models: []config.CommandCodeModel{{
+					Name: "commandcode-upstream", Alias: "commandcode-catalog", DisplayName: "CommandCode Catalog Name",
+				}}})[0]
+			},
+		},
+		{
+			name: "bedrock",
+			want: "Bedrock Catalog Name",
+			got: func() *ModelInfo {
+				return buildBedrockConfigModels(&config.BedrockProvider{Models: []config.BedrockModel{{
+					Name: "bedrock-upstream", Alias: "bedrock-catalog", DisplayName: "Bedrock Catalog Name",
+				}}})[0]
+			},
+		},
 	}
 
 	for _, tt := range tests {

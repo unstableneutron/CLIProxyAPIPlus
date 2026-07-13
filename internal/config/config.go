@@ -731,12 +731,14 @@ func (k CommandCodeKey) GetBaseURL() string { return k.BaseURL }
 type CommandCodeModel struct {
 	Name         string `yaml:"name" json:"name"`
 	Alias        string `yaml:"alias" json:"alias"`
+	DisplayName  string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 	ForceMapping bool   `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
-func (m CommandCodeModel) GetName() string       { return m.Name }
-func (m CommandCodeModel) GetAlias() string      { return m.Alias }
-func (m CommandCodeModel) GetForceMapping() bool { return m.ForceMapping }
+func (m CommandCodeModel) GetName() string        { return m.Name }
+func (m CommandCodeModel) GetAlias() string       { return m.Alias }
+func (m CommandCodeModel) GetDisplayName() string { return m.DisplayName }
+func (m CommandCodeModel) GetForceMapping() bool  { return m.ForceMapping }
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
