@@ -130,6 +130,8 @@ responsesWebsocketSyntheticPrewarmResponseID	approved upstream-first Responses f
 responsesWebsocketUpstreamAttempt	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 sanitizeResponsesWebsocketPortableReplay	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 startXAICallbackServer	original v7.2.67 replaced xAI browser callback OAuth with device authorization
+removeXAIEncryptedReasoningInclude	original v7.2.71 intentionally preserves reasoning.encrypted_content requests for xAI encrypted-reasoning replay, covered by executor include-preservation tests
+xaiInputHasValidReasoningEncryptedContent	original v7.2.71 replaced the all-or-nothing valid-blob guard with exact encrypted-content deduplication so distinct cached reasoning can replay safely
 stripResponsesWebsocketReasoningEncryptedContent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 stripResponsesWebsocketReasoningEncryptedInclude	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 waitForEncryptedContentExecutorPayloadContaining	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
