@@ -1003,9 +1003,20 @@ func xaiBaseURLSource(baseURL string) string {
 	}
 }
 
+func xaiBaseURLForLog(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<redacted>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 // logXAIResolvedBaseURL emits a console log for the resolved upstream base URL.
 func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
-	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
+	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", xaiBaseURLForLog(baseURL), xaiBaseURLSource(baseURL))
 }
 
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {

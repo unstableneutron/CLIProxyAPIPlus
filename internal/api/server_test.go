@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,9 +27,11 @@ import (
 )
 
 type codexSearchCaptureExecutor struct {
-	request *http.Request
-	body    []byte
-	authIDs []string
+	request        *http.Request
+	body           []byte
+	authIDs        []string
+	statusByAuth   map[string]int
+	responseByAuth map[string]string
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -75,11 +78,35 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 		return nil, err
 	}
 	e.body = body
+	statusCode := e.statusByAuth[selected.ID]
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	responseBody := e.responseByAuth[selected.ID]
+	if responseBody == "" {
+		responseBody = `{"results":[{"url":"https://example.com"}]}`
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`)),
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}, nil
+}
+
+type codexSearchFailoverSelector struct {
+	preferredID string
+}
+
+func (s *codexSearchFailoverSelector) Pick(_ context.Context, _ string, _ string, _ coreexecutor.Options, auths []*auth.Auth) (*auth.Auth, error) {
+	for _, candidate := range auths {
+		if candidate != nil && candidate.ID == s.preferredID {
+			return candidate, nil
+		}
+	}
+	if len(auths) == 0 {
+		return nil, nil
+	}
+	return auths[0], nil
 }
 
 func newTestServer(t *testing.T) *Server {
@@ -275,6 +302,45 @@ func TestCodexAlphaSearchUsesRequestIDForSessionAffinity(t *testing.T) {
 	}
 	if got, want := executor.authIDs[2], executor.authIDs[0]; got != want {
 		t.Fatalf("session-affinity auth = %q, want %q", got, want)
+	}
+}
+
+func TestCodexAlphaSearchRetriesAnotherCredentialAfterRateLimit(t *testing.T) {
+	server := newTestServer(t)
+	server.handlers.AuthManager.SetSelector(&codexSearchFailoverSelector{preferredID: "codex-auth-rate-limited"})
+	executor := &codexSearchCaptureExecutor{
+		statusByAuth: map[string]int{"codex-auth-rate-limited": http.StatusTooManyRequests},
+		responseByAuth: map[string]string{
+			"codex-auth-rate-limited": `{"error":"rate limited"}`,
+			"codex-auth-healthy":      `{"results":[{"url":"https://example.com/healthy"}]}`,
+		},
+	}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	for _, id := range []string{"codex-auth-rate-limited", "codex-auth-healthy"} {
+		credential := &auth.Auth{
+			ID:       id,
+			Provider: "codex",
+			Status:   auth.StatusActive,
+			Metadata: map[string]any{"access_token": id},
+		}
+		if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+			t.Fatalf("register Codex auth: %v", errRegister)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got, want := executor.authIDs, []string{"codex-auth-rate-limited", "codex-auth-healthy"}; !slices.Equal(got, want) {
+		t.Fatalf("selected auths = %v, want %v", got, want)
+	}
+	if !strings.Contains(rr.Body.String(), "example.com/healthy") {
+		t.Fatalf("response did not come from healthy credential: %s", rr.Body.String())
 	}
 }
 

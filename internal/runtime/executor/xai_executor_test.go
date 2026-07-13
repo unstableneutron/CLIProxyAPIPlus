@@ -2175,6 +2175,25 @@ func TestXAIBaseURLSource(t *testing.T) {
 	}
 }
 
+func TestXAIBaseURLForLogRedactsCredentialsAndQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "plain", baseURL: "https://gateway.example.com/v1", want: "https://gateway.example.com/v1"},
+		{name: "secrets", baseURL: "https://user:password@gateway.example.com/v1?token=secret#fragment", want: "https://gateway.example.com/v1"},
+		{name: "invalid", baseURL: "secret-token", want: "<redacted>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := xaiBaseURLForLog(tt.baseURL); got != tt.want {
+				t.Fatalf("xaiBaseURLForLog(%q) = %q, want %q", tt.baseURL, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestXAIChatBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
