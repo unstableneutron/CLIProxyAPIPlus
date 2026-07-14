@@ -17,7 +17,7 @@ import (
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Interactions, Claude, Codex, CommandCode, OpenAI-compat, Bedrock, and Vertex-compat providers.
+// It handles Gemini, Interactions, Claude, Codex, xAI, Kiro, CommandCode, OpenAI-compat, Bedrock, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
 func configLabel(label, fallback string) string {
@@ -48,6 +48,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// xAI API Keys
+	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// Kiro (AWS CodeWhisperer)
 	out = append(out, s.synthesizeKiroKeys(ctx)...)
 	// Command Code API Keys
@@ -187,61 +189,72 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 
 // synthesizeCodexKeys creates Auth entries for Codex API keys.
 func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.CodexKey, "codex")
+}
+
+// synthesizeXAIKeys creates Auth entries for xAI API keys.
+func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
+}
+
+func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
 
-	out := make([]*coreauth.Auth, 0, len(cfg.CodexKey))
-	for i := range cfg.CodexKey {
-		ck := cfg.CodexKey[i]
-		key := strings.TrimSpace(ck.APIKey)
+	out := make([]*coreauth.Auth, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {
 			continue
 		}
-		prefix := strings.TrimSpace(ck.Prefix)
-		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		id, token := idGen.Next(provider+":apikey", key, baseURL)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:codex[%s]", token),
+			"source":  fmt.Sprintf("config:%s[%s]", provider, token),
 			"api_key": key,
 		}
 		metadata := map[string]any{}
-		if ck.DisableCooling {
+		if entry.DisableCooling {
 			metadata["disable_cooling"] = true
 		}
-		if ck.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(ck.Priority)
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
-		if ck.BaseURL != "" {
-			attrs["base_url"] = ck.BaseURL
+		if baseURL != "" {
+			attrs["base_url"] = baseURL
 		}
-		if ck.Websockets {
+		if entry.Websockets {
 			attrs["websockets"] = "true"
 		}
-		if responsesState := strings.TrimSpace(string(ck.ResponsesState)); responsesState != "" {
-			attrs["responses_state"] = responsesState
-			if modelsAttr := codexResponsesStateModelsAttribute(prefix, ck.Models); modelsAttr != "" {
-				attrs["responses_state_models"] = modelsAttr
+		if provider == "codex" {
+			if responsesState := strings.TrimSpace(string(entry.ResponsesState)); responsesState != "" {
+				attrs["responses_state"] = responsesState
+				if modelsAttr := codexResponsesStateModelsAttribute(prefix, entry.Models); modelsAttr != "" {
+					attrs["responses_state_models"] = modelsAttr
+				}
 			}
+			addConfigQueryParamsToAttrs(entry.QueryParams, attrs)
 		}
-		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
+		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
-		addConfigQueryParamsToAttrs(ck.QueryParams, attrs)
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,
-			Provider:   "codex",
-			Label:      configLabel(ck.Label, "codex-apikey"),
+			Provider:   provider,
+			Label:      configLabel(entry.Label, provider+"-apikey"),
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
+			ProxyURL:   strings.TrimSpace(entry.ProxyURL),
 			Attributes: attrs,
 			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
-		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}

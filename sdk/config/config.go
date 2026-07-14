@@ -21,6 +21,8 @@ type PayloadModelRule = internalconfig.PayloadModelRule
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
+type XAIKey = internalconfig.XAIKey
+type XAIModel = internalconfig.XAIModel
 type CommandCodeKey = internalconfig.CommandCodeKey
 type CommandCodeModel = internalconfig.CommandCodeModel
 type ClaudeKey = internalconfig.ClaudeKey

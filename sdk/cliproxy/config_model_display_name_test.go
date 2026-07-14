@@ -49,6 +49,15 @@ func TestBuildConfigModelsDisplayName(t *testing.T) {
 			},
 		},
 		{
+			name: "xai",
+			want: "xAI Catalog Name",
+			got: func() *ModelInfo {
+				return buildXAIConfigModels(&config.XAIKey{Models: []config.XAIModel{{
+					Name: "grok-4.5", Alias: "grok-latest", DisplayName: "xAI Catalog Name",
+				}}})[0]
+			},
+		},
+		{
 			name: "commandcode",
 			want: "CommandCode Catalog Name",
 			got: func() *ModelInfo {

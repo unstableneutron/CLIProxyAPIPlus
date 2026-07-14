@@ -1071,8 +1071,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["display_name"].(string); got != "Custom Codex Model" {
 		t.Fatalf("custom display_name = %q, want Custom Codex Model", got)
 	}
-	if got := int(codexClientTestPriority(custom["priority"])); got != 143 {
-		t.Fatalf("custom priority = %v, want 143", custom["priority"])
+	wantCustomPriority := maxEmbeddedCodexTemplatePriorityForTest(t) + 100
+	if got := int(codexClientTestPriority(custom["priority"])); got != wantCustomPriority {
+		t.Fatalf("custom priority = %v, want %d", custom["priority"], wantCustomPriority)
 	}
 	if got, _ := custom["description"].(string); got != "Custom model from registry" {
 		t.Fatalf("custom description = %q, want Custom model from registry", got)
@@ -1158,7 +1159,6 @@ func maxEmbeddedCodexTemplatePriorityForTest(t *testing.T) int {
 	}
 	return maxPriority
 }
-
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
 	t.Helper()
 

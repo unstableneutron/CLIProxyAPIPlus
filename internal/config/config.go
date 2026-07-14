@@ -165,6 +165,8 @@ type Config struct {
 	// CommandCodeKey defines a list of Command Code API key configurations.
 	CommandCodeKey []CommandCodeKey `yaml:"commandcode-api-key" json:"commandcode-api-key"`
 
+	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
+	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
@@ -208,7 +210,7 @@ type Config struct {
 	// vertex, aistudio, antigravity, claude, codex, kimi, xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// gemini-api-key, interactions-api-key, codex-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
+	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
@@ -740,6 +742,12 @@ func (m CommandCodeModel) GetAlias() string       { return m.Alias }
 func (m CommandCodeModel) GetDisplayName() string { return m.DisplayName }
 func (m CommandCodeModel) GetForceMapping() bool  { return m.ForceMapping }
 
+// XAIKey uses the Codex API key structure for native xAI execution.
+type XAIKey = CodexKey
+
+// XAIModel uses the Codex model mapping structure for xAI models.
+type XAIModel = CodexModel
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
@@ -1081,6 +1089,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Command Code API keys.
 	cfg.SanitizeCommandCodeKeys()
 
+	// Sanitize xAI keys: drop entries without base-url
+	cfg.SanitizeXAIKeys()
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
@@ -1314,12 +1324,28 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
 // It trims whitespace and preserves order for remaining entries.
 func (cfg *Config) SanitizeCodexKeys() {
-	if cfg == nil || len(cfg.CodexKey) == 0 {
+	if cfg == nil {
 		return
 	}
-	out := make([]CodexKey, 0, len(cfg.CodexKey))
-	for i := range cfg.CodexKey {
-		e := cfg.CodexKey[i]
+	cfg.CodexKey = sanitizeCodexKeyEntries(cfg.CodexKey)
+}
+
+// SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
+// It applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizeXAIKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.XAIKey = sanitizeCodexKeyEntries(cfg.XAIKey)
+}
+
+func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]CodexKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.ResponsesState = ResponsesStateCapability(strings.TrimSpace(string(e.ResponsesState)))
@@ -1331,7 +1357,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		}
 		out = append(out, e)
 	}
-	cfg.CodexKey = out
+	return out
 }
 
 // SanitizeCommandCodeKeys deduplicates and normalizes Command Code credentials.
