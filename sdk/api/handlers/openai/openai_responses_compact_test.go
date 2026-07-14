@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
@@ -28,6 +29,9 @@ type compactCaptureExecutor struct {
 	response     []byte
 	headers      http.Header
 	streamCalls  int
+	streamChunks [][]byte
+	streamStart  chan struct{}
+	streamResume chan struct{}
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -43,9 +47,26 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`), Headers: e.headers.Clone()}, nil
 }
 
-func (e *compactCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *compactCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	e.streamCalls++
-	return nil, errors.New("not implemented")
+	e.alt = opts.Alt
+	e.sourceFormat = opts.SourceFormat.String()
+	e.payload = bytes.Clone(req.Payload)
+	if e.streamStart != nil {
+		close(e.streamStart)
+	}
+	if e.streamResume != nil {
+		<-e.streamResume
+	}
+	if len(e.streamChunks) == 0 {
+		return nil, errors.New("not implemented")
+	}
+	chunks := make(chan coreexecutor.StreamChunk, len(e.streamChunks))
+	for _, chunk := range e.streamChunks {
+		chunks <- coreexecutor.StreamChunk{Payload: bytes.Clone(chunk)}
+	}
+	close(chunks)
+	return &coreexecutor.StreamResult{Headers: e.headers.Clone(), Chunks: chunks}, nil
 }
 
 func (e *compactCaptureExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -247,15 +268,32 @@ func TestOpenAIResponsesCompactSanitizesAndTruncatesToolOutputs(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesNativeCheckpointCompactionRoutesStreamingRequestToCompact(t *testing.T) {
+func TestOpenAIResponsesLocalCheckpointUsesNormalStreamingSemantics(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	executor := &compactCaptureExecutor{response: []byte(`{
-  "id":"resp_compact_test",
-  "object":"response.compaction",
-  "created_at":1,
-  "completed_at":2,
-  "output":[{"type":"compaction","text":"summary"}]
-}`), headers: http.Header{"Content-Type": []string{"application/json"}}}
+	const assistantSummary = "The implementation is fixed and the next step is verification."
+	checkpointPrompt := "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary."
+	streamStart := make(chan struct{})
+	streamResume := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-streamResume:
+		default:
+			close(streamResume)
+		}
+	})
+	executor := &compactCaptureExecutor{
+		headers:      http.Header{"Content-Type": []string{"text/event-stream"}},
+		streamStart:  streamStart,
+		streamResume: streamResume,
+		streamChunks: [][]byte{
+			[]byte("data: " + `{"type":"response.created","response":{"id":"resp_checkpoint_test","status":"in_progress","output":[]}}` + "\n\n"),
+			[]byte("data: " + `{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_checkpoint_test","role":"assistant","status":"in_progress","content":[]}}` + "\n\n"),
+			[]byte("data: " + `{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"The implementation is fixed and the next step is verification."}` + "\n\n"),
+			[]byte("data: " + `{"type":"response.output_text.done","output_index":0,"content_index":0,"text":"The implementation is fixed and the next step is verification."}` + "\n\n"),
+			[]byte("data: " + `{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_checkpoint_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The implementation is fixed and the next step is verification.","annotations":[]}]}}` + "\n\n"),
+			[]byte("data: " + `{"type":"response.completed","response":{"id":"resp_checkpoint_test","status":"completed","output":[{"type":"message","id":"msg_checkpoint_test","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The implementation is fixed and the next step is verification.","annotations":[]}]}]}}` + "\n\n"),
+		},
+	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 
@@ -271,41 +309,117 @@ func TestOpenAIResponsesNativeCheckpointCompactionRoutesStreamingRequestToCompac
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("accessProvider", "access")
+		c.Set("userApiKey", "secret-key")
+		c.Next()
+	})
 	router.POST("/v1/responses", h.Responses)
 
-	body := `{
+	body := fmt.Sprintf(`{
   "model":"test-native-checkpoint-model",
   "stream":true,
   "tool_choice":"auto",
   "input":[
     {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
-    {"type":"message","role":"user","content":[{"type":"input_text","text":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary."}]}
+    {"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}
   ]
-}`
+}`, checkpointPrompt)
+	turnMetadata := `{"installation_id":"install-1","session_id":"session-1","turn_id":"turn-1","request_kind":"compaction"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(codexTurnMetadataHeader, turnMetadata)
 	resp := httptest.NewRecorder()
-	router.ServeHTTP(resp, req)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		router.ServeHTTP(resp, req)
+	}()
+
+	select {
+	case <-streamStart:
+	case <-time.After(time.Second):
+		t.Fatal("normal streaming execution did not start")
+	}
+	coordinationContext := testResponsesTurnCoordinationContext(t, turnMetadata, "access", "secret-key")
+	turnKey, _, ok := responsesTurnCoordinationKeyFromContext(coordinationContext)
+	if !ok {
+		t.Fatal("compaction metadata did not produce a coordination key")
+	}
+	mainDuringCompaction, finishDuringCompaction, canceledDuringCompaction := h.beginResponsesMainTurn(context.Background(), turnKey)
+	finishDuringCompaction()
+	if mainDuringCompaction.Err() == nil || !canceledDuringCompaction() {
+		t.Fatal("same-turn coordination was not active during local checkpoint streaming")
+	}
+	close(streamResume)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("normal streaming execution did not finish")
+	}
+	mainAfterCompaction, finishAfterCompaction, canceledAfterCompaction := h.beginResponsesMainTurn(context.Background(), turnKey)
+	defer finishAfterCompaction()
+	if mainAfterCompaction.Err() != nil || canceledAfterCompaction() {
+		t.Fatal("same-turn coordination remained active after local checkpoint streaming completed")
+	}
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if executor.calls != 1 || executor.streamCalls != 0 {
-		t.Fatalf("calls = %d streamCalls = %d, want 1 and 0", executor.calls, executor.streamCalls)
+	if executor.calls != 0 || executor.streamCalls != 1 {
+		t.Fatalf("calls = %d streamCalls = %d, want 0 and 1", executor.calls, executor.streamCalls)
 	}
-	if executor.alt != "responses/compact" {
-		t.Fatalf("alt = %q, want responses/compact", executor.alt)
+	if executor.alt != "" {
+		t.Fatalf("alt = %q, want normal Responses execution", executor.alt)
 	}
-	if gjson.GetBytes(executor.payload, "stream").Exists() || gjson.GetBytes(executor.payload, "tool_choice").Exists() {
-		t.Fatalf("compact request kept streaming-only fields: %s", string(executor.payload))
+	if executor.sourceFormat != "openai-response" {
+		t.Fatalf("source format = %q, want openai-response", executor.sourceFormat)
+	}
+	if !gjson.GetBytes(executor.payload, "stream").Bool() || gjson.GetBytes(executor.payload, "tool_choice").String() != "auto" {
+		t.Fatalf("normal Responses request lost streaming fields: %s", string(executor.payload))
+	}
+	if got := gjson.GetBytes(executor.payload, "input.1.content.0.text").String(); got != checkpointPrompt {
+		t.Fatalf("checkpoint prompt = %q, want %q", got, checkpointPrompt)
 	}
 	if contentType := resp.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
 	}
 	bodyText := resp.Body.String()
-	for _, want := range []string{"event: response.created", "event: response.output_item.added", "event: response.completed", "resp_compact_test", "summary"} {
-		if !strings.Contains(bodyText, want) {
-			t.Fatalf("stream body missing %q: %s", want, bodyText)
+	if strings.Contains(bodyText, `"type":"compaction"`) || strings.Contains(bodyText, checkpointPrompt) {
+		t.Fatalf("proxy output exposed compact items or the checkpoint prompt: %s", bodyText)
+	}
+	if !strings.Contains(bodyText, assistantSummary) || !strings.Contains(bodyText, `"type":"response.completed"`) {
+		t.Fatalf("normal assistant summary stream was incomplete: %s", bodyText)
+	}
+
+	// Codex 0.144.3 keeps the synthesized checkpoint prompt request-local. It extracts the last
+	// streamed assistant message, then rebuilds replacement history from the session's existing
+	// user messages plus a user-role summary. Proxy output must not be able to reintroduce the prompt.
+	streamedSummary := ""
+	for _, line := range strings.Split(bodyText, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		event := gjson.Parse(payload)
+		if event.Get("type").String() != "response.output_item.done" {
+			continue
+		}
+		item := event.Get("item")
+		if item.Get("type").String() != "message" || item.Get("role").String() != "assistant" {
+			t.Fatalf("checkpoint stream returned a non-assistant output item: %s", item.Raw)
+		}
+		streamedSummary = item.Get("content.0.text").String()
+	}
+	if streamedSummary != assistantSummary {
+		t.Fatalf("streamed assistant summary = %q, want %q", streamedSummary, assistantSummary)
+	}
+	const codexSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process."
+	replacementUserHistory := []string{"hello", codexSummaryPrefix + "\n" + streamedSummary}
+	for _, item := range replacementUserHistory {
+		if strings.Contains(item, checkpointPrompt) {
+			t.Fatalf("checkpoint prompt was installed as replacement user history: %#v", replacementUserHistory)
 		}
 	}
 }

@@ -181,3 +181,16 @@ websocketTurnCoordinatorExecutor.Refresh	approved upstream-first Responses failo
 websocketTurnCoordinatorExecutor.ReleaseStream	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 shouldReleaseResponsesWebsocketPinnedAuth	dedicated Responses turn runner now owns pre-commit auth and route recovery
 TestShouldReleaseResponsesWebsocketPinnedAuth	dedicated Responses turn runner tests recovery transitions directly
+OpenAIResponsesAPIHandler.handleNativeCheckpointCompaction	removed c9717414 adapter because Codex local checkpoint requests require normal streamed Responses semantics
+OpenAIResponsesAPIHandler.handleNativeCheckpointCompactionStream	removed c9717414 synthetic compact stream because remote compact items are not a local assistant summary
+TestOpenAIResponsesNativeCheckpointCompactionRoutesStreamingRequestToCompact	replaced by local checkpoint normal-streaming and replacement-history regression coverage
+buildOpenAIResponsesCompactSSEChunks	removed synthetic SSE adapter because remote compact output cannot emulate local checkpoint response semantics
+compactBaseResponse	removed with the invalid synthetic remote-compact-to-Responses stream adapter
+compactMarshalRawMessages	removed with the invalid synthetic remote-compact-to-Responses stream adapter
+compactResponseID	removed with the invalid synthetic remote-compact-to-Responses stream adapter
+compactResponseOutputItems	removed with the invalid synthetic remote-compact-to-Responses stream adapter
+compactResponseTimes	removed with the invalid synthetic remote-compact-to-Responses stream adapter
+firstResponsesInputText	removed text-inferred checkpoint routing so prompts retain normal Responses semantics
+isNativeCheckpointCompactionRequest	removed text-inferred checkpoint routing so local compaction is not mistaken for remote compaction
+openAIResponsesSSEFrame	removed synthetic SSE adapter because remote compact output cannot emulate local checkpoint response semantics
+writeOpenAIResponsesCompactSSE	removed synthetic SSE adapter because remote compact output cannot emulate local checkpoint response semantics

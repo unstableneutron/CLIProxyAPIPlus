@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
@@ -15,8 +13,6 @@ import (
 )
 
 const (
-	nativeCheckpointCompactionPrompt = "You are performing a CONTEXT CHECKPOINT COMPACTION."
-
 	compactToolOutputTruncateThreshold = 24 * 1024
 	compactToolOutputLongLineThreshold = 8 * 1024
 	compactToolOutputHeadBytes         = 4 * 1024
@@ -24,27 +20,6 @@ const (
 	compactToolOutputOmitThreshold     = 512 * 1024
 	compactToolOutputTotalBudget       = 192 * 1024
 )
-
-func isNativeCheckpointCompactionRequest(rawJSON []byte) bool {
-	input := gjson.GetBytes(rawJSON, "input")
-	if !input.IsArray() {
-		return false
-	}
-	items := input.Array()
-	if len(items) == 0 {
-		return false
-	}
-	last := items[len(items)-1]
-	if role := strings.TrimSpace(last.Get("role").String()); role != "user" {
-		return false
-	}
-	itemType := strings.TrimSpace(last.Get("type").String())
-	if itemType != "" && itemType != "message" {
-		return false
-	}
-	text := strings.TrimSpace(firstResponsesInputText(last.Get("content")))
-	return strings.HasPrefix(text, nativeCheckpointCompactionPrompt)
-}
 
 func isResponsesCompactionTriggerRequest(rawJSON []byte) bool {
 	input := gjson.GetBytes(rawJSON, "input")
@@ -57,25 +32,6 @@ func isResponsesCompactionTriggerRequest(rawJSON []byte) bool {
 		}
 	}
 	return false
-}
-
-func firstResponsesInputText(content gjson.Result) string {
-	if content.Type == gjson.String {
-		return content.String()
-	}
-	if !content.IsArray() {
-		return ""
-	}
-	for _, part := range content.Array() {
-		partType := strings.TrimSpace(part.Get("type").String())
-		if partType != "" && partType != "input_text" && partType != "text" {
-			continue
-		}
-		if text := part.Get("text"); text.Type == gjson.String {
-			return text.String()
-		}
-	}
-	return ""
 }
 
 func sanitizeOpenAIResponsesCompactRequest(rawJSON []byte) []byte {
@@ -268,136 +224,4 @@ func utf8SafeSuffix(s string, maxBytes int) string {
 		start++
 	}
 	return s[start:]
-}
-
-func writeOpenAIResponsesCompactSSE(w io.Writer, compactData []byte) {
-	for _, chunk := range buildOpenAIResponsesCompactSSEChunks(compactData) {
-		writeResponsesSSEChunk(w, chunk)
-	}
-}
-
-func buildOpenAIResponsesCompactSSEChunks(compactData []byte) [][]byte {
-	responseID := compactResponseID(compactData)
-	createdAt, completedAt := compactResponseTimes(compactData)
-	outputItems := compactResponseOutputItems(compactData)
-	outputRaw := compactMarshalRawMessages(outputItems)
-
-	createdResponse := compactBaseResponse(compactData, responseID, createdAt, "in_progress")
-	inProgressResponse := compactBaseResponse(compactData, responseID, createdAt, "in_progress")
-	completedResponse := compactBaseResponse(compactData, responseID, createdAt, "completed")
-	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", completedAt)
-	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", outputRaw)
-
-	sequence := 0
-	createdPayload := []byte(`{"type":"response.created"}`)
-	createdPayload, _ = sjson.SetBytes(createdPayload, "sequence_number", sequence)
-	createdPayload, _ = sjson.SetRawBytes(createdPayload, "response", createdResponse)
-	sequence++
-
-	inProgressPayload := []byte(`{"type":"response.in_progress"}`)
-	inProgressPayload, _ = sjson.SetBytes(inProgressPayload, "sequence_number", sequence)
-	inProgressPayload, _ = sjson.SetRawBytes(inProgressPayload, "response", inProgressResponse)
-	sequence++
-
-	chunks := [][]byte{
-		openAIResponsesSSEFrame("response.created", createdPayload),
-		openAIResponsesSSEFrame("response.in_progress", inProgressPayload),
-	}
-	for i, item := range outputItems {
-		addedPayload := []byte(`{"type":"response.output_item.added"}`)
-		addedPayload, _ = sjson.SetBytes(addedPayload, "sequence_number", sequence)
-		addedPayload, _ = sjson.SetBytes(addedPayload, "output_index", i)
-		addedPayload, _ = sjson.SetRawBytes(addedPayload, "item", item)
-		sequence++
-		chunks = append(chunks, openAIResponsesSSEFrame("response.output_item.added", addedPayload))
-
-		donePayload := []byte(`{"type":"response.output_item.done"}`)
-		donePayload, _ = sjson.SetBytes(donePayload, "sequence_number", sequence)
-		donePayload, _ = sjson.SetBytes(donePayload, "output_index", i)
-		donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
-		sequence++
-		chunks = append(chunks, openAIResponsesSSEFrame("response.output_item.done", donePayload))
-	}
-	completedPayload := []byte(`{"type":"response.completed"}`)
-	completedPayload, _ = sjson.SetBytes(completedPayload, "sequence_number", sequence)
-	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
-	chunks = append(chunks, openAIResponsesSSEFrame("response.completed", completedPayload))
-	return chunks
-}
-
-func compactResponseID(compactData []byte) string {
-	if id := strings.TrimSpace(gjson.GetBytes(compactData, "id").String()); id != "" {
-		return id
-	}
-	return fmt.Sprintf("resp_compact_%d", time.Now().UnixNano())
-}
-
-func compactResponseTimes(compactData []byte) (int64, int64) {
-	now := time.Now().Unix()
-	createdAt := gjson.GetBytes(compactData, "created_at").Int()
-	if createdAt <= 0 {
-		createdAt = now
-	}
-	completedAt := gjson.GetBytes(compactData, "completed_at").Int()
-	if completedAt <= 0 {
-		completedAt = now
-	}
-	return createdAt, completedAt
-}
-
-func compactResponseOutputItems(compactData []byte) []json.RawMessage {
-	output := gjson.GetBytes(compactData, "output")
-	if !output.IsArray() {
-		return nil
-	}
-	items := make([]json.RawMessage, 0, len(output.Array()))
-	for _, item := range output.Array() {
-		if item.Raw == "" || !json.Valid([]byte(item.Raw)) {
-			continue
-		}
-		items = append(items, json.RawMessage(item.Raw))
-	}
-	return items
-}
-
-func compactMarshalRawMessages(items []json.RawMessage) []byte {
-	if len(items) == 0 {
-		return []byte("[]")
-	}
-	data, err := json.Marshal(items)
-	if err != nil {
-		return []byte("[]")
-	}
-	return data
-}
-
-func compactBaseResponse(compactData []byte, responseID string, createdAt int64, status string) []byte {
-	response := bytes.TrimSpace(compactData)
-	if len(response) == 0 || !json.Valid(response) || !gjson.ParseBytes(response).IsObject() {
-		response = []byte(`{"object":"response","output":[]}`)
-	} else {
-		response = bytes.Clone(response)
-	}
-	response, _ = sjson.SetBytes(response, "id", responseID)
-	response, _ = sjson.SetBytes(response, "object", "response")
-	response, _ = sjson.SetBytes(response, "created_at", createdAt)
-	response, _ = sjson.SetBytes(response, "status", status)
-	response, _ = sjson.SetRawBytes(response, "output", []byte("[]"))
-	return response
-}
-
-func openAIResponsesSSEFrame(event string, payload []byte) []byte {
-	var out bytes.Buffer
-	if strings.TrimSpace(event) != "" {
-		out.WriteString("event: ")
-		out.WriteString(event)
-		out.WriteByte('\n')
-	}
-	for _, line := range bytes.Split(payload, []byte("\n")) {
-		out.WriteString("data: ")
-		out.Write(line)
-		out.WriteByte('\n')
-	}
-	out.WriteByte('\n')
-	return out.Bytes()
 }
