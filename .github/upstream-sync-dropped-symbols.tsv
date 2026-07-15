@@ -43,6 +43,8 @@ TestParseXAIManualCallbackTokenAcceptsRawCode	original v7.2.67 replaced xAI brow
 TestParseXAIManualCallbackTokenRejectsCallbackURL	original v7.2.67 replaced xAI browser callback OAuth with device authorization
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchCallForOrphanOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
+TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved	original v7.2.77 preserves the client-requested service tier from context instead of inferring it from the translated provider payload
+TestUsageReporterSetTranslatedReasoningEffortUpdatesServiceTier	original v7.2.77 preserves the client-requested service tier from context instead of overwriting it from the translated provider payload
 TestResponsesRetriesProviderReplayStateForNonStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestResponsesRetriesProviderReplayStateForStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestResponsesWebsocketCompactionCancelsActiveSameTurnStream	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
@@ -72,6 +74,7 @@ TestResponsesWebsocketStartupBufferCapCommitsOversizedFrame	approved upstream-fi
 TestResponsesWebsocketStartupBufferExactCapRetriesInvalidEncryptedContent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 XAIAuth.ExchangeCodeForTokens	original v7.2.67 replaced xAI browser callback OAuth with device authorization
 findOpenAICompatTarget	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
+extractServiceTierFromPayload	original v7.2.77 sources the client-requested service tier from request context and keeps the provider-reported tier separate
 isResponsesWebsocketFailureTerminalEvent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 isResponsesWebsocketTerminalEvent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 legacyConfigData	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration

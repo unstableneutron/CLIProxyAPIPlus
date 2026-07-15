@@ -601,6 +601,7 @@ func (s *Server) setupRoutes() {
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
 	// Gemini compatible API routes
@@ -748,6 +749,30 @@ func (s *Server) setupRoutes() {
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
+func sanitizeCodexAlphaSearchBody(body []byte) []byte {
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil || payload == nil {
+		return body
+	}
+
+	removed := false
+	for _, field := range []string{"prompt_cache_key", "prompt_cache_retention"} {
+		if _, exists := payload[field]; exists {
+			delete(payload, field)
+			removed = true
+		}
+	}
+	if !removed {
+		return body
+	}
+
+	sanitizedBody, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return sanitizedBody
+}
+
 // codexAlphaSearch forwards the standalone search endpoint used by current
 // Codex clients. Unlike /responses, this payload is already in Codex search
 // format and must not pass through a protocol translator.
@@ -768,6 +793,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &routing)
+	upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
 
 	selectionHeaders := c.Request.Header.Clone()
 	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
@@ -788,7 +814,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	var lastErr error
 
 	for {
-		selected, errSelect := s.handlers.AuthManager.SelectAuth(ctx, "codex", model, selectionOpts)
+		selected, errSelect := s.handlers.AuthManager.SelectAuthByKind(ctx, "codex", model, auth.AuthKindOAuth, selectionOpts)
 		if errSelect != nil || selected == nil {
 			if lastStatus != 0 {
 				writeCodexAlphaSearchResponse(c, lastStatus, lastHeader, lastBody)
@@ -836,7 +862,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			headers.Set("Chatgpt-Account-Id", accountID)
 		}
 
-		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, selected, http.MethodPost, upstreamURL, body, headers)
+		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, selected, http.MethodPost, upstreamURL, upstreamRequestBody, headers)
 		if errRequest != nil {
 			lastErr = errRequest
 			s.handlers.AuthManager.MarkResult(ctx, auth.Result{
@@ -851,7 +877,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			URL:       upstreamURL,
 			Method:    http.MethodPost,
 			Headers:   req.Header.Clone(),
-			Body:      body,
+			Body:      upstreamRequestBody,
 			Provider:  "codex",
 			AuthID:    selected.ID,
 			AuthLabel: selected.Label,
