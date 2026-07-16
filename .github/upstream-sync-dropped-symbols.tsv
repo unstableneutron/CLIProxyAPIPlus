@@ -29,6 +29,7 @@ BuildAuthorizeURL	original v7.2.67 replaced xAI browser callback OAuth with devi
 Config.migrateLegacyAmpConfig	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
 Config.migrateLegacyGeminiKeys	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
 Config.migrateLegacyOpenAICompatibilityKeys	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
+GitTokenStore.gitAuth	original v7.2.80 replaced transport.AuthMethod plumbing with gitClientOptions for go-git v6 client options
 OpenAIResponsesAPIHandler.forwardResponsesWebsocketWithOptions	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 OpenAIResponsesAPIHandler.responsesWebsocketAuthUsesUpstreamWebsocketPassthrough	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 OpenAIResponsesAPIHandler.responsesWebsocketCanProbeResponsesStateForModel	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
@@ -45,6 +46,7 @@ TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchCallForOrphanOutput	
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved	original v7.2.77 preserves the client-requested service tier from context instead of inferring it from the translated provider payload
 TestUsageReporterSetTranslatedReasoningEffortUpdatesServiceTier	original v7.2.77 preserves the client-requested service tier from context instead of overwriting it from the translated provider payload
+TestXAIExecutorExecuteImagesUsesImagesEndpoint	original v7.2.80 replaced this test with TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage, retaining endpoint assertions and adding usage coverage
 TestResponsesRetriesProviderReplayStateForNonStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestResponsesRetriesProviderReplayStateForStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestResponsesWebsocketCompactionCancelsActiveSameTurnStream	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
