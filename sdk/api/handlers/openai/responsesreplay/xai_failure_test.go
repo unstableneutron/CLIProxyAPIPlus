@@ -32,3 +32,13 @@ func TestClassifyFailureForRequestRejectsUnmatchedXAIResponseStateErrors(t *test
 		})
 	}
 }
+
+func TestClassifyFailureForRequestRecognizesCodexMissingPreviousResponse(t *testing.T) {
+	const responseID = "resp_03b51c10dfb803f0016a594510a19481919d4ca9cf566b4429"
+	request := []byte(`{"previous_response_id":"` + responseID + `","input":[]}`)
+	errorPayload := `{"status":400,"error":{"message":"Previous response with id '` + responseID + `' not found.","type":"invalid_request_error"}}`
+
+	if got := ClassifyFailureForRequest(http.StatusBadRequest, errorPayload, request); got != FailurePreviousResponseMissing {
+		t.Fatalf("ClassifyFailureForRequest() = %v, want %v", got, FailurePreviousResponseMissing)
+	}
+}

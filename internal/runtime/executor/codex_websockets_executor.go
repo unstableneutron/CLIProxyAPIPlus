@@ -452,6 +452,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
+			wsErr = helps.MarkCodexMissingPreviousResponseRequestScoped(wsErr, req.Payload)
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}
@@ -753,6 +754,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
+				wsErr = helps.MarkCodexMissingPreviousResponseRequestScoped(wsErr, req.Payload)
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)

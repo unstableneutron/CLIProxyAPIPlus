@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1198,6 +1200,62 @@ func TestParseXAIWebsocketBareErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T
 	}
 	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
 		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
+	}
+}
+
+func TestXAIMissingPreviousResponseErrorIsRequestScoped(t *testing.T) {
+	previousResponseID := "00000000-0000-0000-0000-531197936124-xai-999999"
+	payload := []byte(`{"error":{"message":"gRPC error: Response with id=` + previousResponseID + ` not found","type":"api_error"}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected xAI websocket error")
+	}
+
+	marked := helps.MarkXAIMissingPreviousResponseRequestScoped(err, []byte(`{"previous_response_id":"`+previousResponseID+`"}`))
+	var requestScoped interface{ IsRequestScoped() bool }
+	if !errors.As(marked, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
+		t.Fatalf("marked error = %T, want request-scoped error", marked)
+	}
+	if marked.Error() != err.Error() {
+		t.Fatalf("marked payload = %q, want %q", marked, err)
+	}
+	status, ok := marked.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusInternalServerError {
+		t.Fatalf("marked status = %#v, want 500", marked)
+	}
+
+	mismatch := helps.MarkXAIMissingPreviousResponseRequestScoped(err, []byte(`{"previous_response_id":"different-response"}`))
+	var mismatchedRequestScoped interface{ IsRequestScoped() bool }
+	if errors.As(mismatch, &mismatchedRequestScoped) && mismatchedRequestScoped != nil && mismatchedRequestScoped.IsRequestScoped() {
+		t.Fatalf("mismatched response ID unexpectedly became request scoped: %T", mismatch)
+	}
+}
+
+func TestCodexMissingPreviousResponseErrorIsRequestScoped(t *testing.T) {
+	previousResponseID := "resp_03b51c10dfb803f0016a594510a19481919d4ca9cf566b4429"
+	payload := []byte(`{"type":"error","status":400,"error":{"message":"Previous response with id '` + previousResponseID + `' not found.","type":"invalid_request_error"}}`)
+	err, ok := parseCodexWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected Codex websocket error")
+	}
+
+	marked := helps.MarkCodexMissingPreviousResponseRequestScoped(err, []byte(`{"previous_response_id":"`+previousResponseID+`"}`))
+	var requestScoped interface{ IsRequestScoped() bool }
+	if !errors.As(marked, &requestScoped) || requestScoped == nil || !requestScoped.IsRequestScoped() {
+		t.Fatalf("marked error = %T, want request-scoped error", marked)
+	}
+	if marked.Error() != err.Error() {
+		t.Fatalf("marked payload = %q, want %q", marked, err)
+	}
+	status, ok := marked.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("marked status = %#v, want 400", marked)
+	}
+
+	mismatch := helps.MarkCodexMissingPreviousResponseRequestScoped(err, []byte(`{"previous_response_id":"different-response"}`))
+	var mismatchedRequestScoped interface{ IsRequestScoped() bool }
+	if errors.As(mismatch, &mismatchedRequestScoped) && mismatchedRequestScoped != nil && mismatchedRequestScoped.IsRequestScoped() {
+		t.Fatalf("mismatched response ID unexpectedly became request scoped: %T", mismatch)
 	}
 }
 

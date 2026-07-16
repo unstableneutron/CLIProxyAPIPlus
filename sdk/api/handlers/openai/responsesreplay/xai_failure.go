@@ -1,15 +1,7 @@
 package responsesreplay
 
 import (
-	"net/http"
-	"strings"
-
-	"github.com/tidwall/gjson"
-)
-
-const (
-	xaiMissingResponsePrefix = "gRPC error: Response with id="
-	xaiMissingResponseSuffix = " not found"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 )
 
 // ClassifyFailureForRequest refines failures whose meaning depends on the
@@ -18,34 +10,8 @@ const (
 // eligible for state reconciliation.
 func ClassifyFailureForRequest(status int, message string, request []byte) FailureKind {
 	kind := ClassifyFailure(status, message)
-	if kind != FailureAuthOrRoute || !isXAIMissingPreviousResponse(status, message, request) {
+	if kind != FailureAuthOrRoute || !helps.IsXAIMissingPreviousResponseError(status, message, request) {
 		return kind
 	}
 	return FailurePreviousResponseMissing
-}
-
-func isXAIMissingPreviousResponse(status int, message string, request []byte) bool {
-	if status < http.StatusInternalServerError {
-		return false
-	}
-	previousResponseID := strings.TrimSpace(gjson.GetBytes(request, "previous_response_id").String())
-	if previousResponseID == "" {
-		return false
-	}
-
-	message = strings.TrimSpace(message)
-	if !gjson.Valid(message) {
-		return false
-	}
-	errorPayload := []byte(message)
-	if strings.TrimSpace(gjson.GetBytes(errorPayload, "error.type").String()) != "api_error" {
-		return false
-	}
-	errorMessage := strings.TrimSpace(gjson.GetBytes(errorPayload, "error.message").String())
-	responseID, ok := strings.CutPrefix(errorMessage, xaiMissingResponsePrefix)
-	if !ok {
-		return false
-	}
-	responseID, ok = strings.CutSuffix(responseID, xaiMissingResponseSuffix)
-	return ok && strings.TrimSpace(responseID) == previousResponseID
 }

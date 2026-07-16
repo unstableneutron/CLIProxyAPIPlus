@@ -689,6 +689,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseXAIWebsocketError(payload); ok {
+				wsErr = helps.MarkXAIMissingPreviousResponseRequestScoped(wsErr, req.Payload)
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)

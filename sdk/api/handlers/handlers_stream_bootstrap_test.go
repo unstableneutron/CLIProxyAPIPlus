@@ -20,6 +20,57 @@ type failOnceStreamExecutor struct {
 	calls int
 }
 
+type requestScopedBootstrapError struct {
+	message string
+}
+
+func (e *requestScopedBootstrapError) Error() string { return e.message }
+
+func (e *requestScopedBootstrapError) StatusCode() int { return http.StatusInternalServerError }
+
+func (e *requestScopedBootstrapError) IsRequestScoped() bool { return true }
+
+type requestScopedBootstrapExecutor struct {
+	mu    sync.Mutex
+	calls int
+	err   *requestScopedBootstrapError
+}
+
+func (e *requestScopedBootstrapExecutor) Identifier() string { return "xai" }
+
+func (e *requestScopedBootstrapExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *requestScopedBootstrapExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Err: e.err}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *requestScopedBootstrapExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *requestScopedBootstrapExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *requestScopedBootstrapExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
+func (e *requestScopedBootstrapExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
 func (e *failOnceStreamExecutor) Identifier() string { return "codex" }
 
 func (e *failOnceStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -392,6 +443,53 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	upstreamAttemptHeader := upstreamHeaders.Get("X-Upstream-Attempt")
 	if upstreamAttemptHeader != "2" {
 		t.Fatalf("expected upstream header from retry attempt, got %q", upstreamAttemptHeader)
+	}
+}
+
+func TestExecuteStreamWithAuthManagerPreservesRequestScopedBootstrapError(t *testing.T) {
+	providerErr := &requestScopedBootstrapError{message: `{"type":"error","status":500,"error":{"message":"provider state is stale","type":"api_error"}}`}
+	executor := &requestScopedBootstrapExecutor{err: providerErr}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth1", Provider: "xai", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan != nil {
+		for range dataChan {
+		}
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusInternalServerError || gotErr.Error != providerErr {
+		t.Fatalf("terminal error = %#v, want original 500 error", gotErr)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("upstream calls = %d, want 1 without generic bootstrap retry", executor.Calls())
+	}
+
+	registered, ok := manager.GetByID(auth.ID)
+	if !ok || registered == nil {
+		t.Fatal("registered auth missing")
+	}
+	if registered.Unavailable || registered.Status != coreauth.StatusActive {
+		t.Fatalf("request-scoped error cooled down auth: %#v", registered)
 	}
 }
 
