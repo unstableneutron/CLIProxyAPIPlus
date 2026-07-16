@@ -98,6 +98,7 @@ func (r responsesWebsocketTurnRunner) run(
 	attempted := make(map[[32]byte]map[string]struct{})
 	pinnedAuthID := strings.TrimSpace(input.InitialPinnedAuthID)
 	providerStateRepair := false
+	var lastRealError *interfaces.ErrorMessage
 	const anonymousAuthID = "<anonymous>"
 
 	for {
@@ -189,6 +190,7 @@ func (r responsesWebsocketTurnRunner) run(
 		}
 		retry := false
 		terminalFailure := responsesreplay.FailureNone
+		terminalErrorForwarded := false
 
 		processFailure := func(kind responsesreplay.FailureKind) bool {
 			if committed {
@@ -203,11 +205,11 @@ func (r responsesWebsocketTurnRunner) run(
 				}
 				trace := snapshotTrace()
 				if len(trace) == 0 {
-					hardExcluded[anonymousAuthID] = struct{}{}
-				} else {
-					for _, authID := range trace {
-						hardExcluded[authID] = struct{}{}
-					}
+					terminalFailure = kind
+					return false
+				}
+				for _, authID := range trace {
+					hardExcluded[authID] = struct{}{}
 				}
 				pinnedAuthID = ""
 				if input.NativeProviderBound {
@@ -267,6 +269,7 @@ func (r responsesWebsocketTurnRunner) run(
 						continue
 					}
 					if errMsg != nil {
+						lastRealError = errMsg
 						message := ""
 						if errMsg.Error != nil {
 							message = errMsg.Error.Error()
@@ -282,6 +285,7 @@ func (r responsesWebsocketTurnRunner) run(
 							continue
 						}
 						errOut <- errMsg
+						terminalErrorForwarded = true
 						dataOpen, errsOpen = false, false
 					}
 					continue
@@ -299,6 +303,7 @@ func (r responsesWebsocketTurnRunner) run(
 						continue
 					}
 					if errMsg != nil {
+						lastRealError = errMsg
 						message := ""
 						if errMsg.Error != nil {
 							message = errMsg.Error.Error()
@@ -310,6 +315,7 @@ func (r responsesWebsocketTurnRunner) run(
 						}
 						if flush() {
 							errOut <- errMsg
+							terminalErrorForwarded = true
 						}
 						errsOpen = false
 					}
@@ -327,6 +333,7 @@ func (r responsesWebsocketTurnRunner) run(
 				eventType := strings.TrimSpace(gjson.GetBytes(event, "type").String())
 				if eventType == wsEventTypeError {
 					errMsg := responsesWebsocketErrorMessageFromPayload(event)
+					lastRealError = errMsg
 					kind := responsesreplay.ClassifyFailureForRequest(responsesErrorStatus(errMsg), string(event), payload)
 					if processFailure(kind) {
 						dataOpen, errsOpen = false, false
@@ -334,6 +341,8 @@ func (r responsesWebsocketTurnRunner) run(
 					}
 					if !flush() || !emit(event) {
 						terminalFailure = responsesreplay.FailureCanceled
+					} else {
+						terminalErrorForwarded = true
 					}
 					dataOpen, errsOpen = false, false
 					break
@@ -388,6 +397,8 @@ func (r responsesWebsocketTurnRunner) run(
 		outcome.Failure = terminalFailure
 		if completed {
 			outcome.Failure = responsesreplay.FailureNone
+		} else if !terminalErrorForwarded && terminalFailure != responsesreplay.FailureCanceled && lastRealError != nil {
+			errOut <- lastRealError
 		}
 		return
 	}

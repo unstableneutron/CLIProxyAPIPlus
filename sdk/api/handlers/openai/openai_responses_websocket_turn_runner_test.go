@@ -195,6 +195,75 @@ func TestResponsesWebsocketTurnRunnerPropagatesFailureAfterStateRepairUnchanged(
 	}
 }
 
+func TestResponsesWebsocketTurnRunnerPropagatesUnselectedAuthErrorUnchanged(t *testing.T) {
+	terminalErr := &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: errors.New("no auth available")}
+	attempts := 0
+	runner := responsesWebsocketTurnRunner{
+		execute: func(_ context.Context, _ []byte, _ string, _ []string, _ func(string)) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+			attempts++
+			errs := make(chan *interfaces.ErrorMessage, 1)
+			errs <- terminalErr
+			close(errs)
+			return nil, errs
+		},
+	}
+	stream := runner.Start(context.Background(), responsesWebsocketTurnInput{NativePayload: []byte(`{"input":[]}`)})
+	for range stream.Data {
+	}
+	var gotErr *interfaces.ErrorMessage
+	for errMsg := range stream.Errors {
+		gotErr = errMsg
+	}
+	outcome := <-stream.outcome
+
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 without an auth to exclude", attempts)
+	}
+	if gotErr != terminalErr {
+		t.Fatalf("downstream error = %p, want unchanged error %p", gotErr, terminalErr)
+	}
+	if outcome.Failure != responsesreplay.FailureAuthOrRoute || outcome.Completed {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
+func TestResponsesWebsocketTurnRunnerPropagatesLastErrorAfterSilentRetryFailure(t *testing.T) {
+	lastErr := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("first upstream failed")}
+	attempts := 0
+	runner := responsesWebsocketTurnRunner{
+		execute: func(_ context.Context, _ []byte, _ string, _ []string, selected func(string)) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+			attempts++
+			data := make(chan []byte)
+			errs := make(chan *interfaces.ErrorMessage, 1)
+			if attempts == 1 {
+				selected("auth-a")
+				errs <- lastErr
+			}
+			close(data)
+			close(errs)
+			return data, errs
+		},
+	}
+	stream := runner.Start(context.Background(), responsesWebsocketTurnInput{NativePayload: []byte(`{"input":[]}`)})
+	for range stream.Data {
+	}
+	var gotErr *interfaces.ErrorMessage
+	for errMsg := range stream.Errors {
+		gotErr = errMsg
+	}
+	outcome := <-stream.outcome
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if gotErr != lastErr {
+		t.Fatalf("downstream error = %p, want last real error %p", gotErr, lastErr)
+	}
+	if outcome.Failure != responsesreplay.FailureAuthOrRoute || outcome.Completed {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
+
 func TestResponsesWebsocketTurnRunnerDiscardsStartupFramesBeforeFailover(t *testing.T) {
 	var mu sync.Mutex
 	var payloads [][]byte
