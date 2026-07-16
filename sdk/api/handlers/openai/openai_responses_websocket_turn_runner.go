@@ -97,6 +97,7 @@ func (r responsesWebsocketTurnRunner) run(
 	hardExcluded := make(map[string]struct{})
 	attempted := make(map[[32]byte]map[string]struct{})
 	pinnedAuthID := strings.TrimSpace(input.InitialPinnedAuthID)
+	providerStateRepair := false
 	const anonymousAuthID = "<anonymous>"
 
 	for {
@@ -196,6 +197,10 @@ func (r responsesWebsocketTurnRunner) run(
 			}
 			next, changed := responsesreplay.Advance(constraints, kind, input.Compaction)
 			if kind == responsesreplay.FailureAuthOrRoute {
+				if providerStateRepair {
+					terminalFailure = kind
+					return false
+				}
 				trace := snapshotTrace()
 				if len(trace) == 0 {
 					hardExcluded[anonymousAuthID] = struct{}{}
@@ -214,6 +219,13 @@ func (r responsesWebsocketTurnRunner) run(
 				return true
 			}
 			if changed {
+				if kind == responsesreplay.FailurePreviousResponseMissing || kind == responsesreplay.FailureProviderItemMissing {
+					providerStateRepair = true
+					trace := snapshotTrace()
+					if len(trace) > 0 {
+						pinnedAuthID = strings.TrimSpace(trace[len(trace)-1])
+					}
+				}
 				constraints = next
 				retry = true
 				return true
@@ -255,7 +267,11 @@ func (r responsesWebsocketTurnRunner) run(
 						continue
 					}
 					if errMsg != nil {
-						kind := responsesreplay.ClassifyFailure(responsesErrorStatus(errMsg), errMsg.Error.Error())
+						message := ""
+						if errMsg.Error != nil {
+							message = errMsg.Error.Error()
+						}
+						kind := responsesreplay.ClassifyFailureForRequest(responsesErrorStatus(errMsg), message, payload)
 						if processFailure(kind) {
 							dataOpen, errsOpen = false, false
 							continue
@@ -287,7 +303,7 @@ func (r responsesWebsocketTurnRunner) run(
 						if errMsg.Error != nil {
 							message = errMsg.Error.Error()
 						}
-						kind := responsesreplay.ClassifyFailure(responsesErrorStatus(errMsg), message)
+						kind := responsesreplay.ClassifyFailureForRequest(responsesErrorStatus(errMsg), message, payload)
 						if processFailure(kind) {
 							errsOpen = false
 							continue
@@ -311,7 +327,7 @@ func (r responsesWebsocketTurnRunner) run(
 				eventType := strings.TrimSpace(gjson.GetBytes(event, "type").String())
 				if eventType == wsEventTypeError {
 					errMsg := responsesWebsocketErrorMessageFromPayload(event)
-					kind := responsesreplay.ClassifyFailure(responsesErrorStatus(errMsg), string(event))
+					kind := responsesreplay.ClassifyFailureForRequest(responsesErrorStatus(errMsg), string(event), payload)
 					if processFailure(kind) {
 						dataOpen, errsOpen = false, false
 						break
