@@ -46,6 +46,8 @@ TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchCallForOrphanOutput	
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved	original v7.2.77 preserves the client-requested service tier from context instead of inferring it from the translated provider payload
 TestUsageReporterSetTranslatedReasoningEffortUpdatesServiceTier	original v7.2.77 preserves the client-requested service tier from context instead of overwriting it from the translated provider payload
+TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesOnlyTemperature	original v7.2.86 replaced this direct Claude contract with TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP; fork Bedrock top_p preservation remains covered by TestBedrockExecutorExecute_removesTemperatureBeforeConverse
+TestSanitizeOAuthModelAlias_PreservesForkFlag	original v7.2.86 replaced this test with TestSanitizeOAuthModelAlias_PreservesOptionalFields, which retains the Fork assertion and adds DisplayName and ForceMapping coverage
 TestXAIExecutorExecuteImagesUsesImagesEndpoint	original v7.2.80 replaced this test with TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage, retaining endpoint assertions and adding usage coverage
 TestResponsesRetriesProviderReplayStateForNonStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestResponsesRetriesProviderReplayStateForStreamingRequest	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
@@ -79,6 +81,7 @@ findOpenAICompatTarget	plus v7.2.62-5 intentionally removed startup config mutat
 extractServiceTierFromPayload	original v7.2.77 sources the client-requested service tier from request context and keeps the provider-reported tier separate
 isResponsesWebsocketFailureTerminalEvent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 isResponsesWebsocketTerminalEvent	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
+applyReasoningEffort	original v7.2.86 replaced Kimi top-level reasoning_effort output with applyEnabledThinking and native thinking.type plus thinking.effort coverage
 legacyConfigData	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
 legacyOpenAICompatibility	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
 mergeLegacyOpenAICompatAPIKeys	plus v7.2.62-5 intentionally removed startup config mutation and legacy migration
