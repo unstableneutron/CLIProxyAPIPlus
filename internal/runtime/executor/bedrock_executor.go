@@ -20,6 +20,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -323,8 +324,19 @@ func (e *BedrockExecutor) translateRequest(ctx context.Context, req cliproxyexec
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "bedrock", from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = ensureModelMaxTokens(body, baseModel)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeSamplingForUpstream(body)
+	body = normalizeBedrockSamplingForUpstream(body)
 	return body, body, nil
+}
+
+func normalizeBedrockSamplingForUpstream(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "temperature")
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	switch thinkingType {
+	case "enabled", "adaptive", "auto":
+		body, _ = sjson.DeleteBytes(body, "top_p")
+		body, _ = sjson.DeleteBytes(body, "top_k")
+	}
+	return body
 }
 
 func (e *BedrockExecutor) prepareInvokePlan(auth *cliproxyauth.Auth, baseURL, requestedModel string, claudeBody []byte, stream bool) (bedrockInvokePlan, error) {

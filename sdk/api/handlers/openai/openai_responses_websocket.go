@@ -56,6 +56,11 @@ type websocketTimelineAppender interface {
 	Append(eventType string, payload []byte, timestamp time.Time)
 }
 
+type responsesWebsocketPinnedAuthState struct {
+	authID   string
+	modelKey string
+}
+
 type websocketTimelineLog struct {
 	enabled bool
 	source  *requestlogging.FileBodySource
@@ -229,6 +234,39 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 
+	wsDone := make(chan struct{})
+	defer close(wsDone)
+
+	disconnectSubscribed := false
+	subscribeUpstreamDisconnect := func() {
+		if disconnectSubscribed || h == nil || h.AuthManager == nil {
+			return
+		}
+		disconnectSubscribed = true
+		type upstreamDisconnectSubscriber interface {
+			UpstreamDisconnectChan(sessionID string) <-chan error
+		}
+		for _, provider := range []string{"codex", "xai"} {
+			exec, ok := h.AuthManager.Executor(provider)
+			if !ok || exec == nil {
+				continue
+			}
+			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
+				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
+				if disconnectCh != nil {
+					go func() {
+						select {
+						case <-wsDone:
+							return
+						case <-disconnectCh:
+							_ = conn.Close()
+						}
+					}()
+				}
+			}
+		}
+	}
+
 	var wsTerminateErr error
 	defer func() {
 		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
@@ -253,15 +291,43 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	lastResponseID := ""
 	var lastResponsePendingToolCallIDs []string
 	pinnedAuthID := ""
+	// Preserve independent upstream auth affinity when a downstream session switches providers.
+	pinnedAuthByProvider := make(map[string]responsesWebsocketPinnedAuthState)
 	passthroughModelName := ""
-	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+	sessionAuthByIDWithSource := func(authID string) (*coreauth.Auth, bool, bool) {
 		if h == nil || h.AuthManager == nil {
-			return nil, false
+			return nil, false, false
 		}
 		if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, authID); ok {
-			return auth, true
+			return auth, true, true
 		}
-		return h.AuthManager.GetByID(authID)
+		auth, ok := h.AuthManager.GetByID(authID)
+		return auth, false, ok
+	}
+	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+		auth, _, ok := sessionAuthByIDWithSource(authID)
+		return auth, ok
+	}
+	rememberPinnedAuth := func(authID string, modelName string) {
+		authID = strings.TrimSpace(authID)
+		auth, ok := sessionAuthByID(authID)
+		if authID == "" || !ok || auth == nil {
+			return
+		}
+		pinnedAuthID = authID
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+		if providerKey != "" {
+			pinnedAuthByProvider[providerKey] = responsesWebsocketPinnedAuthState{authID: authID, modelKey: modelKey}
+		}
+	}
+	forgetPinnedAuth := func() {
+		for providerKey, state := range pinnedAuthByProvider {
+			if state.authID == pinnedAuthID {
+				delete(pinnedAuthByProvider, providerKey)
+			}
+		}
+		pinnedAuthID = ""
 	}
 
 	for {
@@ -278,6 +344,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
+		subscribeUpstreamDisconnect()
 		// log.Infof(
 		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
 		// 	passthroughSessionID,
@@ -300,14 +367,43 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		payload = updatedPayload
 
-		requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		explicitRequestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		requestModelName := explicitRequestModelName
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
 		}
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 		}
+		if pinnedAuthID != "" {
+			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
+			providerKey := ""
+			if pinnedAuth != nil {
+				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
+			}
+			state, hasState := pinnedAuthByProvider[providerKey]
+			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
+				pinnedAuthID = ""
+			}
+		}
+		if pinnedAuthID == "" {
+			providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
+			if len(providerSet) == 1 {
+				for providerKey := range providerSet {
+					state, ok := pinnedAuthByProvider[providerKey]
+					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
+					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+						pinnedAuthID = state.authID
+					} else {
+						delete(pinnedAuthByProvider, providerKey)
+					}
+				}
+			}
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
+		if explicitRequestModelName != "" && !useUpstreamWebsocketPassthrough {
+			passthroughModelName = ""
+		}
 		allowIncrementalInputWithPreviousResponseID := false
 		allowCompactionReplayBypass := false
 		if !useUpstreamWebsocketPassthrough {
@@ -462,13 +558,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if outcome.SelectedAuthID != "" {
 				if selectedAuth, ok := sessionAuthByID(outcome.SelectedAuthID); ok && selectedAuth != nil &&
 					websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					pinnedAuthID = outcome.SelectedAuthID
+					rememberPinnedAuth(outcome.SelectedAuthID, modelName)
 				}
 			}
 			continue
 		}
 		if outcome.Committed {
-			pinnedAuthID = ""
+			if outcome.SelectedAuthID != "" {
+				pinnedAuthID = outcome.SelectedAuthID
+			}
+			forgetPinnedAuth()
 			passthroughModelName = ""
 		}
 	}
@@ -1147,6 +1246,25 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
 		return false
 	}
 	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+}
+
+func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool) bool {
+	if auth == nil {
+		return false
+	}
+	providerSet, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if _, ok := providerSet[providerKey]; !ok {
+		return false
+	}
+	if !responsesWebsocketAuthAvailableForModel(auth, modelKey, time.Now()) {
+		return false
+	}
+
+	if homeRuntime {
+		return strings.EqualFold(strings.TrimSpace(pinnedModelKey), strings.TrimSpace(modelKey))
+	}
+	return registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, modelKey)
 }
 
 func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName string) ([]byte, *interfaces.ErrorMessage) {

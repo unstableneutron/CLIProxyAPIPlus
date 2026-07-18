@@ -1003,7 +1003,7 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 				e.invalidateUpstreamConn(sess, conn, "fold_abandoned", terminateErr)
 			}
 			if sess != nil {
-				sess.clearActive(readCh)
+				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
 				return
 			}
