@@ -522,6 +522,49 @@ func TestCodexWebsocketCompactionPayloadKeepsPendingTriggerInput(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketCompactionPayloadDeduplicatesFullReplayTriggerInput(t *testing.T) {
+	transcriptInput := []byte(`[
+  {"id":"msg-upstream","type":"message","role":"user","content":"before"},
+  {"id":"fc-upstream","type":"function_call","call_id":"call_pending","name":"exec_command","arguments":"{}","metadata":{"provider":"upstream"}}
+]`)
+	requestPayload := []byte(`{
+  "model":"gpt-5.5",
+  "previous_response_id":"resp-1",
+  "input":[
+    {"id":"msg-downstream","type":"message","role":"user","content":"before"},
+    {"id":"fc-downstream","type":"function_call","call_id":"call_pending","name":"exec_command","arguments":"{}"},
+    {"id":"out-downstream","type":"function_call_output","call_id":"call_pending","output":"done"},
+    {"type":"compaction_trigger"}
+  ]
+}`)
+
+	replayInput := codexWebsocketCompactionReplayInput(transcriptInput, requestPayload)
+	compactPayload, err := buildCodexWebsocketCompactionPayloadWithOptions(requestPayload, replayInput, codexWebsocketCompactionPayloadOptions{})
+	if err != nil {
+		t.Fatalf("build compact payload: %v", err)
+	}
+
+	input := gjson.GetBytes(compactPayload, "input").Array()
+	if got, want := len(input), 3; got != want {
+		t.Fatalf("compact input length = %d, want %d: %s", got, want, compactPayload)
+	}
+	wantTypes := []string{"message", "function_call", "function_call_output"}
+	for index, wantType := range wantTypes {
+		if got := input[index].Get("type").String(); got != wantType {
+			t.Fatalf("input[%d].type = %q, want %q: %s", index, got, wantType, compactPayload)
+		}
+	}
+	for index, item := range input {
+		if item.Get("type").String() == "compaction_trigger" {
+			t.Fatalf("compact input kept compaction_trigger at input[%d]: %s", index, compactPayload)
+		}
+		if item.Get("id").Exists() {
+			t.Fatalf("compact input kept sanitized id at input[%d]: %s", index, compactPayload)
+		}
+	}
+	assertNoOrphanFunctionCallOutputs(t, gjson.GetBytes(compactPayload, "input"))
+}
+
 func TestSanitizeCodexWebsocketCompactionReplayPayloadPreservesEncryptedContent(t *testing.T) {
 	payload := []byte(`{"model":"gpt-5.5","stream":true,"include":["reasoning.encrypted_content"],"input":[{"type":"compaction","id":"cmp-1","encrypted_content":"sealed-compaction"},{"type":"reasoning","id":"rs-1","summary":[],"encrypted_content":"sealed-reasoning"}]}`)
 

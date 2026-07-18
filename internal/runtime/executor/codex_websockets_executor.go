@@ -899,7 +899,7 @@ func codexWebsocketCompactionReplayInput(transcriptInput []byte, requestPayload 
 	if len(transcriptItems) == 0 {
 		return transcriptInput
 	}
-	transcriptItems = append(transcriptItems, pendingItems...)
+	transcriptItems = appendCodexWebsocketCompactionPendingInputItems(transcriptItems, pendingItems)
 	return xaiMarshalRawMessages(transcriptItems)
 }
 

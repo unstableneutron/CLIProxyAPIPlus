@@ -18,6 +18,8 @@ antigravity	contains	internal/registry/model_definitions_test.go	TestAntigravity
 kiro	contains	internal/registry/model_definitions_test.go	TestGetKiroModelsReturnsStaticFallbackSet	Kiro fallback model regression test remains present
 codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_executor.go	patchCodexCompletedOutput	Codex websocket executor patches empty completed output before transcript recording
 codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_executor_test.go	TestCodexWebsocketsExecuteStreamRecordsStreamedOutputItemsForCompaction	Codex websocket compaction transcript regression test remains
+codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_executor.go	appendCodexWebsocketCompactionPendingInputItems	Codex websocket compaction replay removes full-history overlap before appending pending input
+codex-websocket-compaction	contains	internal/runtime/executor/codex_websockets_fork_regression_test.go	TestCodexWebsocketCompactionPayloadDeduplicatesFullReplayTriggerInput	Codex websocket compaction full-history replay deduplication regression test remains
 responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
 responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
 responses-compaction	contains	sdk/api/handlers/openai/openai_responses_handlers.go	isResponsesCompactionTriggerRequest(rawJSON)	responses compaction-trigger streams bypass bootstrap timeout
