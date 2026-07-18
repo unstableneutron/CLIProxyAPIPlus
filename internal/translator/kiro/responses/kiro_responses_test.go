@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -82,14 +84,15 @@ func TestKiroResponsesTranslatorRegistrationAndRequestDelegation(t *testing.T) {
 
 func TestKiroResponsesStreamFinalizesMessageBeforeFunctionCall(t *testing.T) {
 	chunks := [][]byte{
-		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
-		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
-		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Checking the workspace."}}`),
-		[]byte(`data: {"type":"content_block_stop","index":0}`),
-		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_123","name":"exec_command","input":{}}}`),
-		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"pwd\"}"}}`),
-		[]byte(`data: {"type":"content_block_stop","index":1}`),
-		[]byte(`data: {"type":"message_stop"}`),
+		kiroclaude.BuildClaudeMessageStartEvent("kiro-claude-sonnet-4-6", 1),
+		kiroclaude.BuildClaudeContentBlockStartEvent(0, "text", "", ""),
+		kiroclaude.BuildClaudeStreamEvent("Checking the workspace.", 0),
+		kiroclaude.BuildClaudeContentBlockStopEvent(0),
+		kiroclaude.BuildClaudeContentBlockStartEvent(1, "tool_use", "call_123", "exec_command"),
+		kiroclaude.BuildClaudeInputJsonDeltaEvent(`{"cmd":"pwd"}`, 1),
+		kiroclaude.BuildClaudeContentBlockStopEvent(1),
+		kiroclaude.BuildClaudeMessageDeltaEvent("tool_use", usage.Detail{InputTokens: 1, OutputTokens: 8}),
+		kiroclaude.BuildClaudeMessageStopOnlyEvent(),
 	}
 
 	var param any
@@ -148,5 +151,68 @@ func TestKiroResponsesStreamFinalizesMessageBeforeFunctionCall(t *testing.T) {
 	}
 	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
 		t.Fatalf("completed output[1] type = %q, want function_call", got)
+	}
+}
+
+func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
+	claudeResponse := kiroclaude.BuildClaudeResponse(
+		"Checking the workspace.",
+		[]kiroclaude.KiroToolUse{{
+			ToolUseID: "call_123",
+			Name:      "exec_command",
+			Input:     map[string]interface{}{"cmd": "pwd"},
+		}},
+		"kiro-claude-sonnet-4-6",
+		usage.Detail{
+			InputTokens:         3,
+			OutputTokens:        11,
+			CacheReadTokens:     7,
+			CacheCreationTokens: 5,
+		},
+		"tool_use",
+	)
+	claudeRoot := gjson.ParseBytes(claudeResponse)
+
+	out := sdktranslator.TranslateNonStream(
+		context.Background(),
+		sdktranslator.FromString("kiro"),
+		sdktranslator.FormatOpenAIResponse,
+		"kiro-claude-sonnet-4-6",
+		nil,
+		nil,
+		claudeResponse,
+		nil,
+	)
+	root := gjson.ParseBytes(out)
+
+	if got, want := root.Get("id").String(), claudeRoot.Get("id").String(); got != want {
+		t.Fatalf("response id = %q, want executor id %q. Output: %s", got, want, string(out))
+	}
+	if got := root.Get("output.#").Int(); got != 2 {
+		t.Fatalf("output count = %d, want 2. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.0.type").String(); got != "message" {
+		t.Fatalf("output[0].type = %q, want message. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.0.content.0.text").String(); got != "Checking the workspace." {
+		t.Fatalf("message text = %q. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.1.type").String(); got != "function_call" {
+		t.Fatalf("output[1].type = %q, want function_call. Output: %s", got, string(out))
+	}
+	if got := root.Get("output.1.arguments").String(); got != `{"cmd":"pwd"}` {
+		t.Fatalf("function arguments = %q. Output: %s", got, string(out))
+	}
+	if got := root.Get("usage.input_tokens").Int(); got != 15 {
+		t.Fatalf("usage.input_tokens = %d, want 15. Output: %s", got, string(out))
+	}
+	if got := root.Get("usage.input_tokens_details.cached_tokens").Int(); got != 7 {
+		t.Fatalf("usage cached_tokens = %d, want 7. Output: %s", got, string(out))
+	}
+	if got := root.Get("usage.output_tokens").Int(); got != 11 {
+		t.Fatalf("usage.output_tokens = %d, want 11. Output: %s", got, string(out))
+	}
+	if got := root.Get("usage.total_tokens").Int(); got != 26 {
+		t.Fatalf("usage.total_tokens = %d, want 26. Output: %s", got, string(out))
 	}
 }
