@@ -35,6 +35,7 @@ type oauthSession struct {
 	Status    string
 	Source    string
 	Metadata  map[string]any
+	Saving    bool
 	Completed bool
 	CreatedAt time.Time
 	ExpiresAt time.Time
@@ -218,21 +219,53 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	if !ok {
 		return false
 	}
-	if session.Completed {
+	if session.Completed || session.Saving {
 		return false
 	}
-	if session.Status != "" {
-		if !strings.EqualFold(session.Provider, "kiro") {
-			return false
-		}
-		if !strings.HasPrefix(session.Status, "device_code|") && !strings.HasPrefix(session.Status, "auth_url|") {
-			return false
-		}
+	if !isOAuthSessionPendingStatus(session) {
+		return false
 	}
 	if provider == "" {
 		return true
 	}
 	return strings.EqualFold(session.Provider, provider)
+}
+
+func isOAuthSessionPendingStatus(session oauthSession) bool {
+	if session.Status == "" {
+		return true
+	}
+	if !strings.EqualFold(session.Provider, "kiro") {
+		return false
+	}
+	return strings.HasPrefix(session.Status, "device_code|") || strings.HasPrefix(session.Status, "auth_url|")
+}
+
+// TryBeginSave atomically claims a pending OAuth session for credential
+// persistence. Once claimed, cancellation must report false because saving has
+// already won the race. If cancellation wins first, this returns false.
+func (s *oauthSessionStore) TryBeginSave(state, provider string) bool {
+	state = strings.TrimSpace(state)
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if state == "" || provider == "" {
+		return false
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	session, ok := s.sessions[state]
+	if !ok || session.Completed || session.Saving || !isOAuthSessionPendingStatus(session) {
+		return false
+	}
+	if !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Saving = true
+	s.sessions[state] = session
+	return true
 }
 
 // Cancel removes a pending OAuth session so background waiters exit without saving credentials.
@@ -249,7 +282,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Status != "" {
+	if !ok || session.Completed || session.Saving || !isOAuthSessionPendingStatus(session) {
 		return false
 	}
 	delete(s.sessions, state)
@@ -307,12 +340,10 @@ func IsOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.IsPending(state, provider)
 }
 
-// guardOAuthSessionPendingForSave returns errOAuthSessionNotPending when the session
-// is no longer pending (cancelled, completed, errored, or expired).
-// Call immediately before persisting credentials so a cancel that races with token
-// exchange or metadata fetch cannot save credentials for a cancelled flow.
-func guardOAuthSessionPendingForSave(state, provider string) error {
-	if IsOAuthSessionPending(state, provider) {
+// beginOAuthSessionSave atomically prevents cancellation from claiming success
+// once credential persistence has started.
+func beginOAuthSessionSave(state, provider string) error {
+	if oauthSessions.TryBeginSave(state, provider) {
 		return nil
 	}
 	return errOAuthSessionNotPending

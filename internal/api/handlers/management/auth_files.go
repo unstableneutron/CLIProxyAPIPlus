@@ -2120,6 +2120,13 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	return savedPath, nil
 }
 
+func (h *Handler) saveOAuthTokenRecord(ctx context.Context, state, provider string, record *coreauth.Auth) (string, error) {
+	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+		return "", errBegin
+	}
+	return h.saveTokenRecord(ctx, record)
+}
+
 func gitLabBaseURLFromRequest(c *gin.Context) string {
 	if c != nil {
 		if raw := strings.TrimSpace(c.Query("base_url")); raw != "" {
@@ -2405,10 +2412,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: map[string]any{"email": tokenStorage.Email},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "anthropic"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "anthropic", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -2554,10 +2561,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"account_id": tokenStorage.AccountID,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "codex", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -2714,7 +2721,10 @@ func (h *Handler) RequestGitLabToken(c *gin.Context) {
 			Label:    identifier,
 			Metadata: metadata,
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "gitlab", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			log.Errorf("Failed to save GitLab auth record: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -2974,10 +2984,10 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "antigravity"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "antigravity", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save token to file")
@@ -3081,10 +3091,10 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 				"base_url":  tokenStorage.BaseURL,
 			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "xai"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "xai", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save xAI token to file: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save token to file")
@@ -3166,7 +3176,10 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			Storage:  storage,
 			Metadata: map[string]any{"email": storage.Email},
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "qoder", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -3253,10 +3266,10 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "kimi"); errGuard != nil {
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kimi", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
 			return
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -3410,7 +3423,10 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			Attributes: map[string]string{"api_key": tokenStorage.APIKey},
 		}
 
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "iflow", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -3503,7 +3519,10 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			Metadata: metadata,
 		}
 
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "github-copilot", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -4090,7 +4109,11 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authentication failed"})
 					return
 				}
-				if errSave := h.savePluginLoginRecords(ctx, records); errSave != nil {
+				if errSave := h.savePluginLoginRecords(ctx, state, provider, records); errSave != nil {
+					if errors.Is(errSave, errOAuthSessionNotPending) {
+						c.JSON(http.StatusOK, gin.H{"status": "error", "error": "OAuth flow is not pending"})
+						return
+					}
 					log.WithError(errSave).WithField("provider", provider).Error("failed to save plugin auth tokens")
 					SetOAuthSessionError(state, "Failed to save authentication tokens")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
@@ -4127,7 +4150,10 @@ func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollRes
 	return records
 }
 
-func (h *Handler) savePluginLoginRecords(ctx context.Context, records []*coreauth.Auth) error {
+func (h *Handler) savePluginLoginRecords(ctx context.Context, state, provider string, records []*coreauth.Auth) error {
+	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
+		return errBegin
+	}
 	savedPaths := make([]string, 0, len(records))
 	for _, record := range records {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -4268,7 +4294,10 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 						},
 					}
 
-					savedPath, errSave := h.saveTokenRecord(ctx, record)
+					savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kiro", record)
+					if errors.Is(errSave, errOAuthSessionNotPending) {
+						return
+					}
 					if errSave != nil {
 						log.Errorf("Failed to save authentication tokens: %v", errSave)
 						SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -4422,7 +4451,10 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 						},
 					}
 
-					savedPath, errSave := h.saveTokenRecord(ctx, record)
+					savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kiro", record)
+					if errors.Is(errSave, errOAuthSessionNotPending) {
+						return
+					}
 					if errSave != nil {
 						log.Errorf("Failed to save authentication tokens: %v", errSave)
 						SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -4525,7 +4557,10 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 			},
 		}
 
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kilo", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -4608,7 +4643,10 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 			Label:    displayLabel,
 			Metadata: metadata,
 		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "cursor", record)
+		if errors.Is(errSave, errOAuthSessionNotPending) {
+			return
+		}
 		if errSave != nil {
 			log.Errorf("Failed to save Cursor tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save tokens")

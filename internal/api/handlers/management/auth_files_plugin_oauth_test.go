@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -55,6 +56,11 @@ func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
 	store := &pluginLoginRollbackStore{failAt: 2}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	h.tokenStore = store
+	sessionStore := newOAuthSessionStore(time.Minute)
+	replaceOAuthSessionStoreForTest(t, sessionStore)
+	if errRegister := sessionStore.RegisterPlugin("plugin-save-state", "gemini-cli", nil); errRegister != nil {
+		t.Fatalf("register plugin OAuth session: %v", errRegister)
+	}
 
 	records := []*coreauth.Auth{
 		{
@@ -71,7 +77,7 @@ func TestSavePluginLoginRecordsRollsBackSavedAuthsOnFailure(t *testing.T) {
 		},
 	}
 
-	errSave := h.savePluginLoginRecords(context.Background(), records)
+	errSave := h.savePluginLoginRecords(context.Background(), "plugin-save-state", "gemini-cli", records)
 	if errSave == nil {
 		t.Fatal("savePluginLoginRecords() error = nil, want rollback-triggering error")
 	}
