@@ -50,35 +50,54 @@ jobs:
           git config user.email "ccs-upstream-sync@users.noreply.github.com"
           git config merge.ours.driver true
 
-      - name: Resolve the pinned upstream target
+      - name: Resolve the upstream target
         id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          INPUT_COMMIT: ${{ inputs.upstream_commit }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1091
           . ./.ccs-fork-upstream.env
 
-          INPUT_TAG="${{ inputs.upstream_tag }}"
-          INPUT_COMMIT="${{ inputs.upstream_commit }}"
           if { [ -n "${INPUT_TAG}" ] && [ -z "${INPUT_COMMIT}" ]; } || { [ -z "${INPUT_TAG}" ] && [ -n "${INPUT_COMMIT}" ]; }; then
             echo "upstream_tag and upstream_commit must be supplied together" >&2
             exit 1
           fi
 
-          TARGET_TAG="${INPUT_TAG:-${UPSTREAM_TAG}}"
-          EXPECTED_COMMIT="${INPUT_COMMIT:-${UPSTREAM_COMMIT}}"
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          if [ "${EVENT_NAME}" = "schedule" ]; then
+            TARGET_TAG="$(
+              git ls-remote --tags --refs upstream 'v*' \
+                | awk '{sub("^refs/tags/", "", $2); print $2}' \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | sort -V \
+                | tail -n 1
+            )"
+            EXPECTED_COMMIT=""
+            if [ -z "${TARGET_TAG}" ]; then
+              echo "No stable upstream tag was found" >&2
+              exit 1
+            fi
+            echo "Scheduled run selected latest stable upstream tag ${TARGET_TAG}."
+          else
+            TARGET_TAG="${INPUT_TAG:-${UPSTREAM_TAG}}"
+            EXPECTED_COMMIT="${INPUT_COMMIT:-${UPSTREAM_COMMIT}}"
+          fi
+
           if ! printf '%s' "${TARGET_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Invalid pinned upstream tag: ${TARGET_TAG}" >&2
+            echo "Invalid upstream tag: ${TARGET_TAG}" >&2
             exit 1
           fi
-          if ! printf '%s' "${EXPECTED_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
+          if [ -n "${EXPECTED_COMMIT}" ] && ! printf '%s' "${EXPECTED_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
             echo "Invalid pinned upstream commit: ${EXPECTED_COMMIT}" >&2
             exit 1
           fi
 
-          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
-          git fetch --no-tags upstream "refs/tags/${TARGET_TAG}:refs/tags/${TARGET_TAG}"
-          TARGET_COMMIT="$(git rev-list -n 1 "${TARGET_TAG}")"
-          if [ "${TARGET_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+          git fetch --no-tags upstream "refs/tags/${TARGET_TAG}:refs/upstream-tags/${TARGET_TAG}"
+          TARGET_COMMIT="$(git rev-parse "refs/upstream-tags/${TARGET_TAG}^{commit}")"
+          if [ -n "${EXPECTED_COMMIT}" ] && [ "${TARGET_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
             echo "${TARGET_TAG} resolved to ${TARGET_COMMIT}, not ${EXPECTED_COMMIT}" >&2
             exit 1
           fi

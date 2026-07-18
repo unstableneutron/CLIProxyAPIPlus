@@ -139,9 +139,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, part.Get("signature").String())
+				rawSignature := part.Get("signature").String()
+				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
 				if !ok {
-					return
+					if !codexClaudeTargetAcceptsGrokSignature(modelName) {
+						return
+					}
+					if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
+						return
+					}
+					signature = rawSignature
 				}
 
 				flushMessage()
@@ -333,7 +340,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
 	template, _ = sjson.SetBytes(template, "reasoning.summary", "auto")
-	if serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier")); serviceTier != "" {
+	serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
+	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
+		serviceTier = "priority"
+	}
+	if serviceTier != "" {
 		template, _ = sjson.SetBytes(template, "service_tier", serviceTier)
 	}
 	template, _ = sjson.SetBytes(template, "stream", true)
@@ -341,6 +352,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	return strings.Contains(baseModel, "grok")
 }
 
 // normalizeCodexServiceTier maps a requested service_tier to the value Codex
