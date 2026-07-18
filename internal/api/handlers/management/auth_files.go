@@ -4074,6 +4074,10 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
 		return
 	}
+	if IsOAuthSessionSaving(state, provider) {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
@@ -4110,7 +4114,20 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 					return
 				}
 				if errSave := h.savePluginLoginRecords(ctx, state, provider, records); errSave != nil {
+					if errors.Is(errSave, errOAuthSessionSaving) {
+						c.JSON(http.StatusOK, gin.H{"status": "wait"})
+						return
+					}
 					if errors.Is(errSave, errOAuthSessionNotPending) {
+						_, _, _, _, saveCompleted, saveSessionExists := GetOAuthSessionDetails(state)
+						if saveSessionExists && saveCompleted {
+							c.JSON(http.StatusOK, gin.H{"status": "ok"})
+							return
+						}
+						if IsOAuthSessionSaving(state, provider) {
+							c.JSON(http.StatusOK, gin.H{"status": "wait"})
+							return
+						}
 						c.JSON(http.StatusOK, gin.H{"status": "error", "error": "OAuth flow is not pending"})
 						return
 					}

@@ -253,8 +253,8 @@ func TestBeginOAuthSessionSaveCoversBuiltinAndPluginProviders(t *testing.T) {
 		if CancelOAuthSession(state) {
 			t.Fatalf("%s CancelOAuthSession() = true after save began, want false", provider)
 		}
-		if errBegin := beginOAuthSessionSave(state, provider); !errors.Is(errBegin, errOAuthSessionNotPending) {
-			t.Fatalf("%s repeated begin error = %v, want %v", provider, errBegin, errOAuthSessionNotPending)
+		if errBegin := beginOAuthSessionSave(state, provider); !errors.Is(errBegin, errOAuthSessionSaving) {
+			t.Fatalf("%s repeated begin error = %v, want %v", provider, errBegin, errOAuthSessionSaving)
 		}
 	}
 
@@ -318,8 +318,8 @@ func TestOAuthSessionStoreKiroPresentationStatusesRemainCancellableAndSaveable(t
 		saveStore := newOAuthSessionStore(time.Minute)
 		saveStore.Register("kiro-save", "kiro")
 		saveStore.SetError("kiro-save", status)
-		if !saveStore.TryBeginSave("kiro-save", "kiro") {
-			t.Fatalf("TryBeginSave() = false for Kiro status %q, want true", status)
+		if errBegin := saveStore.BeginSave("kiro-save", "kiro"); errBegin != nil {
+			t.Fatalf("BeginSave() error = %v for Kiro status %q, want nil", errBegin, status)
 		}
 		if saveStore.Cancel("kiro-save") {
 			t.Fatalf("Cancel() = true after Kiro save began for status %q, want false", status)
@@ -341,7 +341,7 @@ func TestOAuthSessionStoreCancelAndSaveHaveOneWinner(t *testing.T) {
 		}()
 		go func() {
 			<-start
-			saveBegan <- store.TryBeginSave("racing-state", "xai")
+			saveBegan <- store.BeginSave("racing-state", "xai") == nil
 		}()
 		close(start)
 
