@@ -28,6 +28,8 @@ import (
 
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
 
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/responses"
+
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/gemini-cli"
