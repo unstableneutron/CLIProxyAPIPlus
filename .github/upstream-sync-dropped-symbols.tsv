@@ -42,6 +42,7 @@ TestForwardResponsesWebsocketRestoresLogicalPreviousResponseID_whenUpstreamReque
 TestForwardResponsesWebsocketTreatsFailureEventsAsTerminal	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestParseXAIManualCallbackTokenAcceptsRawCode	original v7.2.67 replaced xAI browser callback OAuth with device authorization
 TestParseXAIManualCallbackTokenRejectsCallbackURL	original v7.2.67 replaced xAI browser callback OAuth with device authorization
+TestParseConfigBytes_PluginSyncRevision	plus v7.2.88-1 renamed SyncRevision and sync-revision to AuthRevision and auth-revision; TestParseConfigBytes_PluginAuthRevision retains the parsing assertion
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchCallForOrphanOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestRepairResponsesWebsocketToolCallsInsertsCachedToolSearchOutput	approved upstream-first Responses failover redesign replaces the distributed retry checkpoint and probe controller; the dedicated runner must land before release
 TestUsageReporterSetTranslatedReasoningEffortDefaultsServiceTierWhenRemoved	original v7.2.77 preserves the client-requested service tier from context instead of inferring it from the translated provider payload
