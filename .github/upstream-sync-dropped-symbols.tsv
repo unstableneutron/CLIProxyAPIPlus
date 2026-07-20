@@ -203,3 +203,23 @@ firstResponsesInputText	removed text-inferred checkpoint routing so prompts reta
 isNativeCheckpointCompactionRequest	removed text-inferred checkpoint routing so local compaction is not mistaken for remote compaction
 openAIResponsesSSEFrame	removed synthetic SSE adapter because remote compact output cannot emulate local checkpoint response semantics
 writeOpenAIResponsesCompactSSE	removed synthetic SSE adapter because remote compact output cannot emulate local checkpoint response semantics
+TestBuildCodexWebsocketRequestBodyShortensOverlongInputItemIDs	original v7.2.91 replaced it with TestBuildCodexWebsocketRequestBodySanitizesOverlongInputItemIDs, retaining deterministic shortening and adding encrypted reasoning ID removal coverage
+TestCodexExecutorExecuteStreamShortensOverlongInputItemIDs	original v7.2.91 replaced it with TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs, retaining deterministic shortening and adding encrypted reasoning ID removal coverage
+TestNormalizeXAITools_AdditionalToolsNamespace	original v7.2.91 replaced it with TestPromoteXAIAdditionalTools, retaining namespace qualification and covering promotion into the supported top-level tools array
+appendAntigravityFunctionDeclaration	original v7.2.89 replaced incremental array mutation with antigravityFunctionDeclarationJSON and single-pass item assembly
+appendClaudeToolResultToInteractions	original v7.2.89 replaced incremental array mutation with claudeToolResultToInteractions and single-pass item assembly
+appendClaudeToolUseToInteractions	original v7.2.89 replaced incremental array mutation with claudeToolUseToInteractions and single-pass item assembly
+appendGeminiFileDataPart	original v7.2.89 replaced incremental array mutation with geminiFileDataPartJSON and single-pass item assembly
+appendGeminiInlineDataFromDataURL	original v7.2.89 replaced incremental array mutation with geminiInlineDataPartFromDataURL and single-pass item assembly
+appendGeminiInlineDataPart	original v7.2.89 replaced incremental array mutation with geminiInlineDataPartJSON and single-pass item assembly
+appendInteractionsClaudeTool	original v7.2.89 replaced incremental array mutation with interactionsClaudeTool and single-pass item assembly
+appendInteractionsContentToClaude	original v7.2.89 replaced incremental array mutation with interactionsContentToClaude and single-pass item assembly
+appendInteractionsInputItemToResponses	original v7.2.89 replaced incremental array mutation with interactionsInputItemToResponses and SetRawArrayItems
+appendInteractionsInputToResponses	original v7.2.89 replaced incremental array mutation with setInteractionsInputOnResponses and SetRawArrayItems
+appendInteractionsTextStep	original v7.2.89 replaced incremental array mutation with interactionsTextStep and single-pass item assembly
+appendResponsesInputItemToInteractions	original v7.2.89 replaced incremental array mutation with responsesInputItemToInteractions and SetRawArrayItems
+appendResponsesInputToInteractions	original v7.2.89 replaced incremental array mutation with setResponsesInputOnInteractions and SetRawArrayItems
+appendToolOutputContentPart	original v7.2.89 replaced incremental array mutation with toolOutputContentPart and single-pass item assembly
+appendToolOutputFallbackPart	original v7.2.89 replaced incremental array mutation with toolOutputFallbackPart and single-pass item assembly
+copyInteractionsSystemToOpenAI	original v7.2.89 replaced direct output mutation with appendInteractionsSystemToOpenAI and single-pass message assembly
+isTeamScopedPlan	original v7.2.91 now includes the account hash for every plan when present, superseding team-only plan classification with expanded filename tests
