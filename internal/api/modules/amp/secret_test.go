@@ -14,6 +14,11 @@ import (
 	"github.com/sirupsen/logrus/hooks/test"
 )
 
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("AMP_API_KEY")
+	os.Exit(m.Run())
+}
+
 func TestMultiSourceSecret_PrecedenceOrder(t *testing.T) {
 	ctx := context.Background()
 

@@ -5,7 +5,7 @@ echo "Installing system build dependencies..."
 packages=()
 command -v curl >/dev/null 2>&1 || packages+=(curl)
 command -v git >/dev/null 2>&1 || packages+=(git)
-command -v gcc >/dev/null 2>&1 || packages+=(build-essential)
+dpkg-query -W -f='${Status}' build-essential 2>/dev/null | grep -q 'ok installed' || packages+=(build-essential)
 dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -q 'ok installed' || packages+=(ca-certificates)
 
 if ((${#packages[@]})); then
@@ -19,13 +19,14 @@ if ((${#packages[@]})); then
 fi
 
 echo "Installing mise..."
-if [[ ! -x "$HOME/.local/bin/mise" ]]; then
-  curl https://mise.run | sh
+mise_version="2026.7.11"
+mise_bin="$HOME/.local/bin/mise"
+if [[ ! -x "$mise_bin" ]] || [[ $($mise_bin --version 2>/dev/null | awk '{print $1}') != "$mise_version" ]]; then
+  curl -fsSL https://mise.run | MISE_VERSION="v$mise_version" sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
 echo "Installing project toolchains with mise..."
-mise trust mise.toml
 mise install
 
 # Amp command shells include ~/.local/bin but do not necessarily source shell
