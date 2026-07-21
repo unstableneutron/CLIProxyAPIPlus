@@ -223,3 +223,5 @@ appendToolOutputContentPart	original v7.2.89 replaced incremental array mutation
 appendToolOutputFallbackPart	original v7.2.89 replaced incremental array mutation with toolOutputFallbackPart and single-pass item assembly
 copyInteractionsSystemToOpenAI	original v7.2.89 replaced direct output mutation with appendInteractionsSystemToOpenAI and single-pass message assembly
 isTeamScopedPlan	original v7.2.91 now includes the account hash for every plan when present, superseding team-only plan classification with expanded filename tests
+ensureGeminiGenerationConfig	original v7.2.92 removes the redundant precreation helper because nested sjson.SetBytes calls create generationConfig while preserving the same text-format output
+filterKimiEmptyAssistantMessages	original v7.2.92 folds empty-assistant filtering into normalizeKimiToolMessageLinks single-pass assembly while retaining shouldDropKimiAssistantMessage behavior and regression coverage

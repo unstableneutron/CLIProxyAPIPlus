@@ -45,7 +45,7 @@ func runForwardResponsesWebsocketErrorTest(
 		}
 		_, _, _, errMsg, errForward := handler.forwardResponsesWebsocket(
 			ctx,
-			conn,
+			newResponsesWebsocketWriter(conn),
 			func(...interface{}) {},
 			data,
 			errs,
