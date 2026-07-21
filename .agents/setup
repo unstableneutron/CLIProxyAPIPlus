@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Installing system build dependencies..."
+packages=()
+command -v curl >/dev/null 2>&1 || packages+=(curl)
+command -v git >/dev/null 2>&1 || packages+=(git)
+command -v gcc >/dev/null 2>&1 || packages+=(build-essential)
+dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -q 'ok installed' || packages+=(ca-certificates)
+
+if ((${#packages[@]})); then
+  if [[ $(id -u) -eq 0 ]]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+  else
+    sudo -n apt-get update
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+  fi
+fi
+
+echo "Installing mise..."
+if [[ ! -x "$HOME/.local/bin/mise" ]]; then
+  curl https://mise.run | sh
+fi
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "Installing project toolchains with mise..."
+mise trust mise.toml
+mise install
+
+# Amp command shells include ~/.local/bin but do not necessarily source shell
+# activation files, so expose the mise-managed tools there as well.
+go_bin=$(mise which go)
+ln -sfn "$go_bin" "$HOME/.local/bin/go"
+ln -sfn "$(dirname "$go_bin")/gofmt" "$HOME/.local/bin/gofmt"
+
+echo "Downloading Go module dependencies..."
+mise exec -- go mod download
+
+echo "Orb setup complete."

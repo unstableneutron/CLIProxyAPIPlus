@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Repair the direct tool links in case an orb snapshot restored them before the
+# mise installation. This performs no installation and normally takes <1s.
+mise_bin="$HOME/.local/bin/mise"
+if [[ -x "$mise_bin" ]]; then
+  go_bin=$($mise_bin which go 2>/dev/null) || {
+    echo "mise-managed Go is unavailable; rerun .agents/setup" >&2
+    exit 1
+  }
+  ln -sfn "$go_bin" "$HOME/.local/bin/go"
+  ln -sfn "$(dirname "$go_bin")/gofmt" "$HOME/.local/bin/gofmt"
+fi
