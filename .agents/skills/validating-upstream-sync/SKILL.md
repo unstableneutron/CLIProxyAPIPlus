@@ -1,106 +1,117 @@
 ---
 name: validating-upstream-sync
-description: Use when resolving, merging, retriggering, or verifying this fork's upstream-sync workflow, sync PRs, release tags, assets, Docker publishes, owned overlays, or blocked-sync reports.
+description: Validate and repair CLIProxyAPIPlus upstream-sync plans, candidates, sync PRs, v2 promotion, release tags, assets, receipts, and GHCR publication. Use when resolving, retriggering, promoting, or verifying upstream-sync maintenance, including clean no-op and blocked or manual-composition runs.
 ---
 
 # Validating Upstream Sync
 
-## Core Rule
+## Core Contract
 
-Never call upstream sync done from a green workflow alone. Prove actual `main`, tag, release, Docker, ownership, and invariant state. A run can look green while only reporting a block, and a resolved PR can be superseded by newer original or Plus refs during normal-mode acceptance.
+Never call upstream sync complete from workflow status alone. Prove the immutable target, ownership and invariant state, promoted commit, peeled tag, release, receipt, and multi-platform image.
 
-## Required Flow
+Keep release maintenance separate from deployment. Unless deployment is explicitly in scope, do not deploy or runtime-smoke VN3; report `runtime_smoke=not_run` and `vn3_deployed=false`.
 
-1. **Identify the sync target**
-   - Confirm `original`, `plus`, and `fork` terms from `AGENTS.md`.
-   - Run `plan` or inspect the v2 candidate artifact. Record `base_fork_commit`, original tag/commit, Plus tag/tag commit/head commit, whether Plus head is included, models commit, sync ID, plan fingerprint, candidate branch, expected fork tag, `has_changes`, `target_drift`, and blocked state.
-   - The fingerprint identifies one immutable source snapshot. Never validate one fingerprint and promote another.
-   - If `has_changes=false`, verify the represented tag and attached receipt. Do not force a rebuild merely to exercise the workflow.
-   - Immediately before accepting a repaired PR, rerun planning or `replay-plan`. If selected refs or the fingerprint changed, restart validation against the new snapshot.
+## Maintenance Flow
 
-2. **Resolve blocked candidates as overlays**
-   - Download the `upstream-sync-v2-<run>-<attempt>` artifact and inspect `plan.out`, `report/candidate.md`, gate logs, provenance, and conflict files.
-   - If `replay-plan` reports conflicts or failing gates during maintenance, attempt a local repair before declaring the sync blocked. Create or reuse a resolution branch from current fork `main`, reproduce the phase with `merge-ref`, make the smallest overlay fix, and rerun `replay-plan`.
-   - Preserve owner intent from `.github/upstream-sync-ownership.tsv`; no side wins by default on shared hotspots.
-   - Mechanical owner-class conflicts can use the owner policy as a starting point; shared hotspots must be manually composed. Never blanket `ours` or `theirs`.
-   - Check `.github/upstream-sync-invariants.tsv` after conflicts. Non-conflicting Git auto-merges can still clobber owned behavior.
-   - Run `check-symbol-survival <pre-sync-head>` after composing shared hotspots. Restore every missing fork-only symbol or `Test*` function unless a documented upstream replacement justifies adding it to `.github/upstream-sync-dropped-symbols.tsv`.
-   - When resolution intentionally drops overlay code, record it in `.github/upstream-sync-dropped-symbols.tsv` in the same commit. Do not pre-populate the allowlist with historical noise.
-   - Re-check high-value fork surfaces: provider fallback, auth/proxy selection, CommandCode, Responses WebSocket continuity, compaction, Gemini CLI, model catalog, aliases, release branding, and CGO/plugin settings.
+### 1. Snapshot and classify the target
 
-3. **Run local gates before merging**
-   ```bash
-   .github/scripts/upstream-sync.sh replay-plan
-   .github/scripts/test-upstream-sync.sh
-   .github/scripts/test-verify-upstream-release.sh
-   .github/scripts/upstream-sync.sh check-invariants
-   .github/scripts/upstream-sync.sh check-symbol-survival <pre-sync-head>
-   shellcheck .github/scripts/*.sh
-   go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-   go build -o test-output ./cmd/server && rm test-output
-   go test ./...
-   ```
-   If a gate fails, capture the diagnostic tail, fix root cause, and rerun the full gate set.
-   Never run `merge-ref` or harness experiments with the real repository as the working directory; use a scratch clone. `merge-ref` fetches tags and restores fork-owned paths, which reverts uncommitted work in the live worktree.
+- Use the automation worktree and preserve the primary checkout, including unrelated dirty state.
+- Fetch and prune current fork, original, Plus, models, candidate, and tag refs on every run.
+- Confirm the `original`, `plus`, and `fork` meanings from `AGENTS.md`.
+- Run `plan` before `replay-plan`. Treat its fingerprint as the identity of one immutable source snapshot.
+- Record `base_fork_commit`, original tag/commit, Plus tag/tag commit/head commit and inclusion state, models commit, sync ID, plan fingerprint, candidate branch, expected fork tag, `has_changes`, `target_drift`, and blocked state.
+- Reuse a candidate branch or PR only when its fingerprint exactly matches the current plan.
+- If `has_changes=false`, skip mutation and candidate creation. Verify the represented release chain in step 6 and finish `clean-noop`.
 
-4. **Run v2 acceptance**
-   Use `shadow` for non-mutating equivalence. Confirm it publishes only the fingerprinted candidate and does not move `main`, create a tag, publish a release, or move `latest`.
-   ```bash
-   gh workflow run upstream-sync-v2.yml \
-     --repo unstableneutron/CLIProxyAPIPlus \
-     --ref main \
-     -f mode=shadow \
-     -f force_candidate=false
-   ```
-   After shadow equivalence and local review, run the same workflow with `mode=promote`. Scheduled runs use promote semantics automatically.
-   ```bash
-   gh workflow run upstream-sync-v2.yml \
-     --repo unstableneutron/CLIProxyAPIPlus \
-     --ref main \
-     -f mode=promote \
-     -f force_candidate=false
-   ```
-   The legacy implementation is retained only at `.github/workflows-disabled/upstream-sync.yml`; do not dispatch it during normal maintenance.
+### 2. Replay and repair overlays
 
-5. **Verify artifacts, not just checks**
-   Required success evidence:
-   - Candidate, promote, reusable GoReleaser, reusable Docker, and verify jobs reached the expected terminal conclusions.
-   - Current `main` equals the promoted candidate SHA for a new release, and local fetched state is clean.
-   - Expected fork tag exists locally after fetch and remotely, e.g. `vX.Y.Z-unstableneutron.N`. For no-op plans, verify `latest_fork_tag`, not `next_fork_tag`.
-   - Compare annotated tags by their peeled commit (`git rev-parse <tag>^{}`); remote tag object SHA can differ from the commit SHA.
-   - GitHub release is published and all binary archives use `CLIProxyAPIPlus` branding.
-   - The release contains `upstream-sync-receipt.json`. Regenerate it with `verify-upstream-release.sh`, ignore only `workflow_run_id`, and require an otherwise exact match.
-   - The fork tag and `latest` image references share one OCI index digest containing `linux/amd64` and `linux/arm64`.
-   - Clean no-op classification requires current `main`, peeled represented tag, release, receipt, and Docker digest to line up. Report `clean / already released` or `clean / no-op`, not `released`.
-   - When deployment is in scope, verify the running image digest, health, real REST/SSE/WebSocket/compaction/provider paths, and post-deploy logs before reporting success.
+- Run `replay-plan` for a changing target. Inspect conflicts, provenance, manual-composition state, invariants, symbol survival, build, and tests.
+- If a v2 artifact exists for the same fingerprint, inspect its `plan.out`, candidate report, gate logs, provenance, and conflict files.
+- Attempt a bounded local repair before reporting manual action. Create or reuse a resolution branch from the plan's fork base and reproduce the failing phase with `merge-ref` in a scratch clone.
+- Never run `merge-ref` or harness experiments in the primary checkout. It fetches tags and restores fork-owned paths.
+- Apply `.github/upstream-sync-ownership.tsv`:
+  - Preserve newer original behavior on original-owned paths and reapply required fork or Plus compatibility.
+  - Preserve compatible Plus behavior on Plus-owned paths while adapting to newer original APIs.
+  - Preserve explicit fork behavior on fork-owned paths.
+  - Manually compose shared hotspots; never blanket `ours` or `theirs`.
+- Check `.github/upstream-sync-invariants.tsv`; conflict-free Git merges can still clobber owned behavior.
+- After shared-hotspot composition, run `check-symbol-survival <pre-sync-head>`. Restore missing fork-only symbols and `Test*` functions, or document genuine replacements in `.github/upstream-sync-dropped-symbols.tsv` in the same commit.
+- Re-check provider fallback, auth and proxy selection, CommandCode, Responses WebSocket continuity, compaction, Gemini CLI, model catalog, aliases, release branding, and CGO or plugin settings when touched.
 
-## Smoke Matrix Notes
+During repair iteration, rerun `replay-plan`, the failing gate, and focused tests for the changed surface. Do not rerun the full matrix after every edit. Once the repair is stable, run the complete matrix once. If final review causes another code change, rerun its focused checks and the complete matrix.
 
-- Use model IDs advertised by the surface being tested. The direct API advertises CommandCode IDs such as `cc/ds4-flash`; Pi may expose the provider-scoped selector as `gust/cc/ds4-flash`.
-- Exercise REST, SSE, downstream Responses WebSocket, native Responses WebSocket where supported, and `/v1/responses/compact`.
-- `tools/upstream-sync-smoke` emits redacted JSON outcomes and treats terminal events and exact markers as acceptance criteria.
-- If a local provider smoke hits a plan/auth failure that marks a provider unavailable in memory, restart the scratch server before testing later CommandCode/provider selectors.
+Stop as `needs-manual-action` only when repository ownership and invariants cannot determine the intended behavior, the repair expands beyond the bounded overlay, required authority or secrets are missing, or a validated repair needs approval to enter `main`.
 
-## Blocked-Sync Triage
+### 3. Respect the current repaired-candidate boundary
 
-If v2 does not produce the expected tag:
+The current `upstream-sync-v2.yml` has no `repair_ref` or candidate-import input. Do not pretend a local resolution branch can be promoted directly.
 
-1. Inspect each job conclusion; a successful candidate with skipped promotion can be a legitimate no-op.
-2. Download the candidate artifact and inspect the first failed gate, freshness reason, conflicts, and manual-composition flag.
-3. Verify the fingerprinted candidate branch and any PR publication state.
-4. Reproduce and repair locally with the exact refs, then rerun the full gate set and v2 promotion.
-5. Do not create a tag manually. If an accepted tag already exists but publication failed, use `Recover Existing Release Tag` with the exact peeled commit.
-6. Report the exact refs, candidate SHA, conflict files or failing gate, attempted repair, branch publication state, and next manual action.
+- Publish or update a repair PR with the exact fingerprint, refs, conflict list, repair summary, and gate evidence.
+- Do not merge the repair PR merely to make the v2 plan clean unless the user explicitly authorizes that mutation and repository policy permits it.
+- After an approved repair merge, fetch the new `main`, replan, require the same selected upstream refs, and rerun the stable full matrix before v2 promotion.
+- If v2 later gains a documented repair-candidate input, use it only when the workflow verifies the repair base, fingerprint, source freshness, provenance, and complete gates before promotion.
 
-## Common Mistakes
+### 4. Run the stable full matrix
 
-- Treating workflow-level success as release success.
-- Treating `next_fork_tag` as expected when `has_changes=false`; the represented artifact is `latest_fork_tag`.
-- Validating one plan fingerprint and promoting a candidate built from another.
-- Dispatching the retired legacy workflow instead of `upstream-sync-v2.yml`.
-- Reporting blocked before attempting a reasonable local repair for conflict or gate failures.
-- Trusting a conflict-free merge without checking ownership clobbers and invariants.
-- Accepting a resolution where `check-symbol-survival` failures are neither restored nor allowlisted with reasons.
-- Letting original or Plus overwrite fork-owned workflow, Gemini CLI, CommandCode, or release behavior.
-- Declaring Docker/release complete before verifying the attached receipt and `latest` digest parity.
-- Using a Pi provider-scoped model selector directly against the API without checking `/v1/models`.
+```bash
+.github/scripts/upstream-sync.sh replay-plan
+.github/scripts/test-upstream-sync.sh
+.github/scripts/test-verify-upstream-release.sh
+.github/scripts/upstream-sync.sh check-invariants
+.github/scripts/upstream-sync.sh check-symbol-survival <pre-sync-head>
+shellcheck .github/scripts/*.sh
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+go build -o test-output ./cmd/server && rm test-output
+go test ./...
+```
+
+Capture the first failing diagnostic with enough context to reproduce it. Treat sandbox, network, cache, or runner failures as infrastructure failures until reproduced as code failures.
+
+### 5. Accept only through v2
+
+Immediately before dispatch, replan and recheck source freshness. Restart validation if selected refs or fingerprint changed.
+
+Use `shadow` only for an explicitly requested non-mutating equivalence check. Confirm it does not move `main`, create a tag or release, or move `latest`.
+
+For acceptance, dispatch only:
+
+```bash
+gh workflow run upstream-sync-v2.yml \
+  --repo unstableneutron/CLIProxyAPIPlus \
+  --ref main \
+  -f mode=promote \
+  -f force_candidate=false
+```
+
+Never dispatch `.github/workflows-disabled/upstream-sync.yml`. Never create an accepted tag manually. Use `Recover Existing Release Tag` only when an already accepted tag needs publication recovery and its peeled commit is exact.
+
+### 6. Verify the published state independently
+
+For a new release, require all of the following:
+
+- Candidate, promote, reusable GoReleaser, Docker amd64, Docker arm64, Docker publish, and final verify jobs have the expected successful conclusions.
+- Fingerprinted candidate SHA, fetched remote `main`, local detached `HEAD`, and the peeled expected tag are equal.
+- The GitHub release is published, not draft, and contains only `CLIProxyAPIPlus`-branded archives plus checksums and `upstream-sync-receipt.json`.
+- Regenerating the receipt with `verify-upstream-release.sh` matches the attached receipt after removing only `workflow_run_id`.
+- The versioned GHCR tag and `latest` resolve to the same OCI index digest with `linux/amd64` and `linux/arm64` manifests.
+- A final fetched plan reports `has_changes=false`, `target_drift=false`, and `blocked=false`.
+
+For `has_changes=false`, verify the fetched `main`, peeled `latest_fork_tag`, represented release, receipt, and Docker digest without mutation. Do not use `next_fork_tag` and do not dispatch merely to exercise CI.
+
+Close superseded blocked PRs only after successful acceptance; retain their branches unless deletion is explicitly requested.
+
+## Optional Deployment Proof
+
+Run deployment only when explicitly authorized. Pin the exact released digest, create a rollback anchor, deploy only the intended service, and then prove the running digest and version, local health, model catalogs, REST, SSE, downstream and native WebSocket where supported, compact, affected provider paths, and recent error logs. Use model IDs advertised by the tested surface and keep request evidence bounded and redacted.
+
+## Terminal States
+
+Return exactly one primary state:
+
+- `clean-noop`: the target is already represented and its release chain verifies without mutation.
+- `released-clean`: a conflict-free changing target was validated, promoted, and independently verified.
+- `released-auto-resolved`: a repaired target was approved, validated, promoted, and independently verified.
+- `needs-manual-action`: a bounded repair or approval remains; include the exact next action.
+- `failed`: infrastructure or an unrecoverable execution failure prevented a trustworthy result.
+
+Always report the target refs and fingerprint, candidate and repair state, conflict or failed-gate summary, branch and PR state, full-matrix result, promoted SHA and release evidence when applicable, final planner state, and explicit runtime-smoke and deployment status.
