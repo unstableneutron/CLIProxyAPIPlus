@@ -65,6 +65,7 @@ const (
 
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
+type preparedModelRouteContextKey struct{}
 type executionSessionContextKey struct{}
 type responsesStateModeContextKey struct{}
 type disallowFreeAuthContextKey struct{}
@@ -158,6 +159,26 @@ func WithAdditionalSelectedAuthIDCallback(ctx context.Context, callback func(str
 		previous(authID)
 		callback(authID)
 	})
+}
+
+// PrepareStreamModelRoute resolves a stream route once and stores it on the returned context for execution.
+// The boolean reports whether the route overrides normal model-to-provider resolution.
+func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerType string, modelName string, rawJSON []byte) (context.Context, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	decision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, modelExecutionOptions{})
+	ctx = context.WithValue(ctx, preparedModelRouteContextKey{}, decision)
+	hasOverride := strings.TrimSpace(decision.ExecutorPluginID) != "" || strings.TrimSpace(decision.Provider) != ""
+	return ctx, hasOverride
+}
+
+func preparedModelRouteFromContext(ctx context.Context) (modelRouteDecision, bool) {
+	if ctx == nil {
+		return modelRouteDecision{}, false
+	}
+	decision, ok := ctx.Value(preparedModelRouteContextKey{}).(modelRouteDecision)
+	return decision, ok
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
@@ -1271,7 +1292,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx)
+	if !preparedRoute {
+		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
+	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)

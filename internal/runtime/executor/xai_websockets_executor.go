@@ -461,6 +461,9 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 	idMapper := newXAIWebsocketRequestIDMapper(e.idStore, stateSessionID, req.Payload)
 	if xaiInputHasItemType(req.Payload, "compaction_trigger") {
+		if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+		}
 		return e.executeCompactionTriggerFromWebsocketContext(ctx, auth, req, opts, idMapper)
 	}
 
@@ -526,7 +529,21 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 	logXAIWebsocketRequest(executionSessionID, authID, wsURL, wsReqBody)
 
-	conn, closer, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	var conn *websocket.Conn
+	var closer *websocketConnectionCloser
+	var respHS *http.Response
+	var errDial error
+	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+		conn = existingWebsocketSessionConn(sess, authID, wsURL)
+		if conn == nil {
+			if sess != nil {
+				sess.reqMu.Unlock()
+			}
+			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+		}
+	} else {
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	}
 	var upstreamHeaders http.Header
 	if respHS != nil {
 		upstreamHeaders = respHS.Header.Clone()
@@ -571,6 +588,15 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
+			if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "send_error", errSend)
+				sess.clearActive(conn, readCh)
+				sess.reqMu.Unlock()
+				if !shouldRetryXAIWebsocketSend(errSend) {
+					return nil, errSend
+				}
+				return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+			}
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
 			if !shouldRetryXAIWebsocketSend(errSend) {
 				sess.clearActive(conn, readCh)
@@ -1560,6 +1586,9 @@ func (e *XAIAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && xaiWebsocketsEnabled(auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
+	}
+	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+		return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
