@@ -13,6 +13,7 @@ EXPECTED_PLAN_FINGERPRINT=""
 IMAGE_INPUT=""
 MAIN_POLICY=exact
 REQUIRE_LATEST_PARITY=""
+REQUIRE_ARCHITECTURE_TAGS=false
 RECEIPT=""
 
 while [ "$#" -gt 0 ]; do
@@ -52,6 +53,11 @@ while [ "$#" -gt 0 ]; do
       REQUIRE_LATEST_PARITY=$2
       shift 2
       ;;
+    --require-architecture-tags)
+      [ "$#" -ge 2 ] || die "--require-architecture-tags requires a value"
+      REQUIRE_ARCHITECTURE_TAGS=$2
+      shift 2
+      ;;
     --receipt)
       [ "$#" -ge 2 ] || die "--receipt requires a value"
       RECEIPT=$2
@@ -74,6 +80,10 @@ esac
 case "${REQUIRE_LATEST_PARITY}" in
   true|false) ;;
   *) die "--require-latest-parity must be true or false" ;;
+esac
+case "${REQUIRE_ARCHITECTURE_TAGS}" in
+  true|false) ;;
+  *) die "--require-architecture-tags must be true or false" ;;
 esac
 [ -n "${RECEIPT}" ] || die "--receipt is required"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
@@ -144,6 +154,54 @@ for ARCH in amd64 arm64; do
   fi
 done
 
+RECEIPT_SCHEMA_VERSION=1
+ARCHITECTURE_IMAGES='{}'
+RECEIPT_PLATFORMS='["linux/amd64","linux/arm64"]'
+if [ "${REQUIRE_ARCHITECTURE_TAGS}" = true ]; then
+  RECEIPT_SCHEMA_VERSION=2
+  ARCHITECTURE_ROWS=()
+  while IFS= read -r ROW; do
+    ARCHITECTURE_ROWS+=("${ROW}")
+  done < <(jq -r '
+      .manifests[]? |
+      select(.platform.os == "linux" and .platform.architecture != "unknown") |
+      [
+        .platform.os,
+        .platform.architecture,
+        (.platform.variant // ""),
+        .digest
+      ] | join("|")
+    ' <<< "${IMAGE_INDEX}")
+  [ "${#ARCHITECTURE_ROWS[@]}" -gt 0 ] \
+    || die "Image ${IMAGE_REF} has no architecture manifests to verify"
+  for ROW in "${ARCHITECTURE_ROWS[@]}"; do
+    IFS='|' read -r PLATFORM_OS PLATFORM_ARCH PLATFORM_VARIANT PLATFORM_DIGEST <<< "${ROW}"
+    TAG_SUFFIX=${PLATFORM_ARCH}
+    if [ -n "${PLATFORM_VARIANT}" ]; then
+      TAG_SUFFIX+="-${PLATFORM_VARIANT//\//-}"
+    fi
+    ARCHITECTURE_REF="${IMAGE_REPOSITORY}:${TAG}-${TAG_SUFFIX}"
+    ARCHITECTURE_MANIFEST=$(docker buildx imagetools inspect \
+      "${ARCHITECTURE_REF}" \
+      --format '{{json .Manifest}}')
+    ARCHITECTURE_DIGEST=$(jq -r '.digest // empty' <<< "${ARCHITECTURE_MANIFEST}")
+    if [ "${ARCHITECTURE_DIGEST}" != "${PLATFORM_DIGEST}" ]; then
+      die "Architecture tag ${ARCHITECTURE_REF} resolves to ${ARCHITECTURE_DIGEST}, expected ${PLATFORM_DIGEST}"
+    fi
+    PLATFORM_KEY="${PLATFORM_OS}/${PLATFORM_ARCH}"
+    if [ -n "${PLATFORM_VARIANT}" ]; then
+      PLATFORM_KEY+="/${PLATFORM_VARIANT}"
+    fi
+    ARCHITECTURE_IMAGES=$(jq -c \
+      --arg platform "${PLATFORM_KEY}" \
+      --arg image "${ARCHITECTURE_REF}" \
+      --arg digest "${ARCHITECTURE_DIGEST}" \
+      '. + {($platform): {image: $image, digest: $digest}}' \
+      <<< "${ARCHITECTURE_IMAGES}")
+  done
+  RECEIPT_PLATFORMS=$(jq -c 'keys' <<< "${ARCHITECTURE_IMAGES}")
+fi
+
 if [ "${REQUIRE_LATEST_PARITY}" = true ]; then
   LATEST_INDEX=$(docker buildx imagetools inspect \
     "${IMAGE_REPOSITORY}:latest" \
@@ -158,6 +216,7 @@ mkdir -p "$(dirname -- "${RECEIPT}")"
 RECEIPT_TEMP=$(mktemp "${RECEIPT}.tmp.XXXXXX")
 trap 'rm -f "${RECEIPT_TEMP}"' EXIT
 jq -n \
+  --argjson schema_version "${RECEIPT_SCHEMA_VERSION}" \
   --arg sync_id "${EXPECTED_SYNC_ID}" \
   --arg plan_fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
   --arg main_commit "${EXPECTED_COMMIT}" \
@@ -167,9 +226,11 @@ jq -n \
   --argjson release_assets "${RELEASE_ASSETS}" \
   --arg image "${IMAGE_REF}" \
   --arg image_digest "${IMAGE_DIGEST}" \
+  --argjson architecture_images "${ARCHITECTURE_IMAGES}" \
+  --argjson platforms "${RECEIPT_PLATFORMS}" \
   --arg workflow_run_id "${GITHUB_RUN_ID:-local}" \
   '{
-    schema_version: 1,
+    schema_version: $schema_version,
     sync_id: $sync_id,
     plan_fingerprint: $plan_fingerprint,
     main_commit: $main_commit,
@@ -179,9 +240,11 @@ jq -n \
     release_assets: $release_assets,
     image: $image,
     image_digest: $image_digest,
-    platforms: ["linux/amd64", "linux/arm64"],
+    platforms: $platforms,
     workflow_run_id: $workflow_run_id
-  }' > "${RECEIPT_TEMP}"
+  } + if $schema_version >= 2 then {
+    architecture_images: $architecture_images
+  } else {} end' > "${RECEIPT_TEMP}"
 mv "${RECEIPT_TEMP}" "${RECEIPT}"
 trap - EXIT
 

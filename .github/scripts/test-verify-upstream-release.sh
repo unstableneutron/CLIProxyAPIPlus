@@ -55,6 +55,8 @@ if [ "${1:-}" != buildx ] || [ "${2:-}" != imagetools ] || [ "${3:-}" != inspect
 fi
 case "${4:-}" in
   *:latest) cat "${STUB_LATEST_INDEX_JSON}" ;;
+  *-amd64) cat "${STUB_AMD64_IMAGE_JSON}" ;;
+  *-arm64) cat "${STUB_ARM64_IMAGE_JSON}" ;;
   *) cat "${STUB_IMAGE_INDEX_JSON}" ;;
 esac
 EOF
@@ -72,6 +74,9 @@ run_verifier() {
   local latest_json=${8:-${image_json}}
   local main_policy=${9:-exact}
   local compare_status=${10:-ahead}
+  local require_architecture_tags=${11:-false}
+  local amd64_image_json=${12:-${FIXTURES}/image-amd64.json}
+  local arm64_image_json=${13:-${FIXTURES}/image-arm64.json}
 
   PATH="${root}/bin:${PATH}" \
     GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
@@ -81,6 +86,8 @@ run_verifier() {
     STUB_RELEASE_JSON="${release_json}" \
     STUB_IMAGE_INDEX_JSON="${image_json}" \
     STUB_LATEST_INDEX_JSON="${latest_json}" \
+    STUB_AMD64_IMAGE_JSON="${amd64_image_json}" \
+    STUB_ARM64_IMAGE_JSON="${arm64_image_json}" \
     STUB_COMPARE_STATUS="${compare_status}" \
     "${VERIFIER}" \
       --tag "${TAG}" \
@@ -89,6 +96,7 @@ run_verifier() {
       --expected-plan-fingerprint "${FINGERPRINT}" \
       --image "${IMAGE}" \
       --main-policy "${main_policy}" \
+      --require-architecture-tags "${require_architecture_tags}" \
       --require-latest-parity "${require_latest}" \
       --receipt "${receipt}"
 }
@@ -136,14 +144,18 @@ test_writes_receipt_after_success() {
   make_stubs "${root}"
   local receipt=${root}/receipt.json
 
-  run_verifier "${root}" "${receipt}" true
+  run_verifier \
+    "${root}" "${receipt}" true \
+    "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${FIXTURES}/image-index.json" \
+    exact ahead true
 
   jq -e \
     --arg commit "${COMMIT}" \
     --arg fingerprint "${FINGERPRINT}" \
     --arg sync_id "${SYNC_ID}" \
     --arg tag "${TAG}" \
-    '.schema_version == 1 and
+    '.schema_version == 2 and
      .main_commit == $commit and
      .tag_commit == $commit and
      .plan_fingerprint == $fingerprint and
@@ -151,8 +163,25 @@ test_writes_receipt_after_success() {
      .tag == $tag and
      .image_digest == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
      .platforms == ["linux/amd64", "linux/arm64"] and
+     .architecture_images["linux/amd64"].digest == "sha256:1111111111111111111111111111111111111111111111111111111111111111" and
+     .architecture_images["linux/arm64"].digest == "sha256:2222222222222222222222222222222222222222222222222222222222222222" and
      .workflow_run_id == "123456789"' \
     "${receipt}" >/dev/null || fail "receipt did not contain the verified identity"
+  rm -rf "${root}"
+}
+
+test_rejects_mismatched_architecture_tag() {
+  local root
+  root=$(mktemp -d)
+  make_stubs "${root}"
+  jq '.digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"' \
+    "${FIXTURES}/image-amd64.json" > "${root}/wrong-amd64.json"
+
+  expect_failure \
+    "${root}" "${root}/receipt.json" "Architecture tag" \
+    true "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${FIXTURES}/image-index.json" \
+    exact ahead true "${root}/wrong-amd64.json" "${FIXTURES}/image-arm64.json"
   rm -rf "${root}"
 }
 
@@ -224,6 +253,7 @@ main() {
   test_allows_verified_main_descendant_when_requested
   test_rejects_wrong_release_branding
   test_rejects_missing_required_platforms
+  test_rejects_mismatched_architecture_tag
   test_latest_parity_is_conditional
   echo "[OK] upstream release verifier tests passed"
 }

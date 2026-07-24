@@ -370,6 +370,45 @@ test_record_state_writes_schema_v2_before_validation() {
   rm -rf "${root}"
 }
 
+test_validate_repair_accepts_only_exact_recorded_candidate() {
+  local root
+  root=$(mktemp -d)
+  local fork
+  fork=$(setup_base_graph "${root}")
+  local plan_out=${root}/plan.out
+  local repair_out=${root}/repair.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${plan_out}" "${HELPER}" plan >/dev/null
+    GITHUB_OUTPUT="${root}/materialize.out" "${HELPER}" materialize "${plan_out}" >/dev/null
+    "${HELPER}" record-state "${plan_out}"
+    local repair_sha
+    repair_sha=$(git rev-parse HEAD)
+    GITHUB_OUTPUT="${repair_out}" "${HELPER}" validate-repair "${plan_out}" "${repair_sha}" >/dev/null
+  )
+
+  assert_contains "${repair_out}" "repair_validated=true"
+  assert_contains "${repair_out}" "candidate_sha=$(run_git -C "${fork}" rev-parse HEAD)"
+  assert_contains "${repair_out}" "conflicts=false"
+
+  (
+    cd "${fork}"
+    awk -F= '
+      $1 == "PLAN_FINGERPRINT" { print "PLAN_FINGERPRINT=0000000000000000000000000000000000000000"; next }
+      { print }
+    ' .ccs-fork-upstream.env > .ccs-fork-upstream.env.tmp
+    mv .ccs-fork-upstream.env.tmp .ccs-fork-upstream.env
+    git add .ccs-fork-upstream.env
+    git commit -m "Corrupt repair fingerprint" >/dev/null
+    if GITHUB_OUTPUT="${root}/invalid-repair.out" \
+      "${HELPER}" validate-repair "${plan_out}" "$(git rev-parse HEAD)" >/dev/null 2>&1; then
+      fail "validate-repair accepted a mismatched recorded fingerprint"
+    fi
+  )
+  rm -rf "${root}"
+}
+
 assert_freshness_failure() {
   local fork=$1
   local plan_out=$2
@@ -757,11 +796,17 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   # shellcheck disable=SC2016 # The workflow expression is asserted literally.
   assert_contains "${workflow}" "MODE: \${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}"
   assert_contains "${workflow}" "force_candidate:"
+  assert_contains "${workflow}" "repair_ref:"
+  assert_contains "${workflow}" "repair_sha:"
+  assert_contains "${workflow}" "repair_fingerprint:"
+  assert_contains "${workflow}" "repair_pr:"
   assert_contains "${workflow}" "ref: main"
   assert_contains "${workflow}" "Reject forced promotion"
   assert_contains "${workflow}" "inputs.mode == 'promote' && inputs.force_candidate"
   assert_contains "${workflow}" "materialize"
   assert_contains "${workflow}" "record-state"
+  assert_contains "${workflow}" "validate-repair"
+  assert_contains "${workflow}" "            .github/scripts"
   assert_contains "${workflow}" "check-freshness"
   assert_contains "${workflow}" "validate-upstream-sync.sh --mode full"
   assert_contains "${workflow}" "--force-with-lease"
@@ -773,6 +818,16 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "gh release download"
   assert_contains "${workflow}" "gh release upload"
   assert_contains "${workflow}" "upstream-sync-receipt.json"
+  assert_contains "${workflow}" "run-state.json"
+  assert_contains "${workflow}" "Require final fetched no-op plan"
+  assert_contains "${workflow}" 'FINAL_HAS_CHANGES}'
+  assert_contains "${workflow}" 'FINAL_TARGET_DRIFT}'
+  assert_contains "${workflow}" 'FINAL_BLOCKED}'
+  assert_contains "${workflow}" 'status: "clean-noop"'
+  assert_contains "${workflow}" "docker_build:"
+  assert_contains "${workflow}" "needs: [promote, release, docker_build]"
+  assert_contains "${workflow}" "mode: build"
+  assert_contains "${workflow}" "mode: publish"
   # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
   assert_contains "${workflow}" 'refs/tags/${EXPECTED_FORK_TAG}:.ccs-fork-upstream.env'
   # shellcheck disable=SC2016 # The workflow expression is asserted literally.
@@ -820,23 +875,33 @@ test_publication_workflows_are_reusable_and_checked() {
 
   assert_contains "${docker}" "workflow_call:"
   assert_contains "${docker}" "publish_latest:"
-  assert_contains "${docker}" "runner: ubuntu-24.04-arm"
-  assert_contains "${docker}" "platform: linux/arm64"
-  assert_contains "${docker}" "runner: ubuntu-24.04"
-  assert_contains "${docker}" "platform: linux/amd64"
+  assert_contains "${docker}" "options: [full, build, publish]"
+  assert_contains "${docker}" "target_matrix="
+  assert_contains "${docker}" '(.tag_suffix == (.platform'
+  assert_contains "${docker}" '"runner":"ubuntu-24.04-arm"'
+  assert_contains "${docker}" '"platform":"linux/arm64"'
+  assert_contains "${docker}" '"runner":"ubuntu-24.04"'
+  assert_contains "${docker}" '"platform":"linux/amd64"'
   # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
-  assert_contains "${docker}" 'cache-from: type=gha,scope=cliproxy-${{ matrix.arch }}'
+  assert_contains "${docker}" 'cache-from: type=gha,scope=cliproxy-${{ matrix.tag_suffix }}'
   # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
-  assert_contains "${docker}" 'cache-to: type=gha,mode=max,scope=cliproxy-${{ matrix.arch }}'
+  assert_contains "${docker}" 'cache-to: type=gha,mode=max,scope=cliproxy-${{ matrix.tag_suffix }}'
   assert_contains "${docker}" "push-by-digest=true"
+  assert_contains "${docker}" "--prefer-index=false"
+  # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
+  assert_contains "${docker}" 'ARCH_TAG="${TAG}-${TAG_SUFFIX}"'
+  assert_contains "${docker}" "Published early architecture image"
   assert_not_contains "${docker}" "setup-qemu-action"
   assert_not_contains "${docker}" "Refresh models catalog"
 
   assert_contains "${recovery}" "uses: ./.github/workflows/release.yaml"
   assert_contains "${recovery}" "uses: ./.github/workflows/docker-image.yml"
+  assert_contains "${recovery}" "docker_build:"
+  assert_contains "${recovery}" "needs: [resolve, release, docker_build]"
   assert_contains "${recovery}" "verify-upstream-release.sh"
   assert_contains "${recovery}" "gh release upload"
   assert_contains "${recovery}" "upstream-sync-receipt.json"
+  assert_contains "${recovery}" "--require-architecture-tags true"
   assert_not_contains "${recovery}" "gh workflow run"
 
   assert_contains "${dockerfile}" "# syntax=docker/dockerfile:1"
@@ -1374,6 +1439,7 @@ main() {
   test_validation_driver_modes_tooling_and_artifacts
   test_validation_failure_preserves_all_logs
   test_record_state_writes_schema_v2_before_validation
+  test_validate_repair_accepts_only_exact_recorded_candidate
   test_freshness_passes_for_unchanged_snapshot
   test_freshness_rejects_moved_original_tag
   test_freshness_rejects_moved_plus_head

@@ -96,18 +96,34 @@ jobs:
       expected_commit: ${{ needs.resolve.outputs.expected_commit }}
     secrets: inherit
 
+  docker_build:
+    needs: resolve
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      tag: ${{ inputs.tag }}
+      expected_commit: ${{ needs.resolve.outputs.expected_commit }}
+      mode: build
+    secrets: inherit
+
   docker:
-    needs: [resolve, release]
+    needs: [resolve, release, docker_build]
+    if: >-
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success'
     uses: ./.github/workflows/docker-image.yml
     with:
       tag: ${{ inputs.tag }}
       expected_commit: ${{ needs.resolve.outputs.expected_commit }}
       publish_latest: ${{ needs.resolve.outputs.publish_latest == 'true' }}
+      mode: publish
     secrets: inherit
 
   verify:
-    needs: [resolve, release, docker]
-    if: needs.release.result == 'success' && needs.docker.result == 'success'
+    needs: [resolve, release, docker_build, docker]
+    if: >-
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success' &&
+      needs.docker.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       # actions/checkout v7.0.0
@@ -133,6 +149,7 @@ jobs:
             --expected-sync-id "${SYNC_ID}" \
             --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
             --image "${IMAGE}" \
+            --require-architecture-tags true \
             --require-latest-parity "${PUBLISH_LATEST}" \
             --receipt upstream-sync-receipt.json
           RECEIPT_DIGEST="$(jq -r '.image_digest' upstream-sync-receipt.json)"

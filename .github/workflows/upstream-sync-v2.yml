@@ -19,6 +19,26 @@ on:
         required: false
         default: false
         type: boolean
+      repair_ref:
+        description: Remote repair branch to import as the exact candidate
+        required: false
+        default: ''
+        type: string
+      repair_sha:
+        description: Immutable repair commit expected at repair_ref
+        required: false
+        default: ''
+        type: string
+      repair_fingerprint:
+        description: Plan fingerprint represented by the repair candidate
+        required: false
+        default: ''
+        type: string
+      repair_pr:
+        description: Open repair PR whose head is repair_sha
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -84,6 +104,79 @@ jobs:
           FORCE_REBUILD="${FORCE_CANDIDATE}" GITHUB_OUTPUT="${PLAN_FILE}" \
             .github/scripts/upstream-sync.sh plan
           cat "${PLAN_FILE}" >> "${STEP_OUTPUT}"
+
+      - name: Validate repair import request
+        id: repair_request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+          PLAN_FINGERPRINT: ${{ steps.plan.outputs.plan_fingerprint }}
+          REPAIR_FINGERPRINT: ${{ inputs.repair_fingerprint }}
+          REPAIR_PR: ${{ inputs.repair_pr }}
+          REPAIR_REF_INPUT: ${{ inputs.repair_ref }}
+          REPAIR_SHA: ${{ inputs.repair_sha }}
+        run: |
+          if [ -z "${REPAIR_REF_INPUT}" ] && \
+             [ -z "${REPAIR_SHA}" ] && \
+             [ -z "${REPAIR_FINGERPRINT}" ] && \
+             [ -z "${REPAIR_PR}" ]; then
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${HAS_CHANGES}" != true ]; then
+            echo "A repair candidate cannot be imported when the exact target is already represented." >&2
+            exit 1
+          fi
+          if [ -z "${REPAIR_REF_INPUT}" ] || \
+             [ -z "${REPAIR_SHA}" ] || \
+             [ -z "${REPAIR_FINGERPRINT}" ] || \
+             [ -z "${REPAIR_PR}" ]; then
+            echo "repair_ref, repair_sha, repair_fingerprint, and repair_pr must be supplied together." >&2
+            exit 1
+          fi
+          if ! [[ "${REPAIR_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "repair_sha must be a 40-character lowercase commit." >&2
+            exit 1
+          fi
+          if ! [[ "${REPAIR_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "repair_fingerprint must be a 40-character lowercase hash." >&2
+            exit 1
+          fi
+          if ! [[ "${REPAIR_PR}" =~ ^[0-9]+$ ]]; then
+            echo "repair_pr must be a pull request number." >&2
+            exit 1
+          fi
+          if [ "${REPAIR_FINGERPRINT}" != "${PLAN_FINGERPRINT}" ]; then
+            echo "Repair fingerprint ${REPAIR_FINGERPRINT} does not match live plan ${PLAN_FINGERPRINT}." >&2
+            exit 1
+          fi
+          REPAIR_REF=${REPAIR_REF_INPUT#refs/heads/}
+          PR_JSON="$(gh pr view "${REPAIR_PR}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json baseRefName,headRefName,headRefOid,isDraft,mergeable,reviewDecision,state,statusCheckRollup)"
+          if ! jq -e \
+            --arg ref "${REPAIR_REF}" \
+            --arg sha "${REPAIR_SHA}" '
+              .state == "OPEN" and
+              .isDraft == false and
+              .baseRefName == "main" and
+              .headRefName == $ref and
+              .headRefOid == $sha and
+              .mergeable == "MERGEABLE" and
+              (.reviewDecision // "") != "CHANGES_REQUESTED" and
+              ((.statusCheckRollup // []) | length) > 0 and
+              all((.statusCheckRollup // [])[];
+                ((.conclusion // .state // "") | ascii_upcase) as $status |
+                ($status == "SUCCESS" or $status == "NEUTRAL" or $status == "SKIPPED")
+              )
+            ' <<< "${PR_JSON}" >/dev/null; then
+            echo "Repair PR ${REPAIR_PR} is not an exact, mergeable, review-clean, fully checked match for ${REPAIR_SHA}." >&2
+            exit 1
+          fi
+          {
+            echo "enabled=true"
+            echo "repair_ref=${REPAIR_REF}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Report represented target
         if: steps.plan.outputs.has_changes == 'false'
@@ -162,6 +255,11 @@ jobs:
             echo "Represented release state does not match the selected exact refs." >&2
             exit 1
           fi
+          REQUIRE_ARCHITECTURE_TAGS=false
+          if jq -e '(.schema_version // 1) >= 2' \
+            "${RECEIPT_DIR}/upstream-sync-receipt.json" >/dev/null; then
+            REQUIRE_ARCHITECTURE_TAGS=true
+          fi
           .github/scripts/verify-upstream-release.sh \
             --tag "${EXPECTED_FORK_TAG}" \
             --expected-commit "${TAG_COMMIT}" \
@@ -169,6 +267,7 @@ jobs:
             --expected-plan-fingerprint "${STATE_FINGERPRINT}" \
             --image ghcr.io/unstableneutron/cli-proxy-api-plus \
             --main-policy descendant \
+            --require-architecture-tags "${REQUIRE_ARCHITECTURE_TAGS}" \
             --require-latest-parity true \
             --receipt "${RECEIPT_DIR}/verified-receipt.json"
           diff -u \
@@ -178,7 +277,7 @@ jobs:
 
       - name: Materialize target-specific candidate
         id: materialize
-        if: steps.plan.outputs.has_changes == 'true'
+        if: steps.plan.outputs.has_changes == 'true' && steps.repair_request.outputs.enabled != 'true'
         run: |
           MATERIALIZE_FILE="${SYNC_WORK_DIR}/materialize.out"
           STEP_OUTPUT="${GITHUB_OUTPUT}"
@@ -187,8 +286,41 @@ jobs:
           cat "${MATERIALIZE_FILE}" >> "${SYNC_WORK_DIR}/plan.out"
           cat "${MATERIALIZE_FILE}" >> "${STEP_OUTPUT}"
 
+      - name: Import exact repaired candidate
+        id: repair
+        if: steps.plan.outputs.has_changes == 'true' && steps.repair_request.outputs.enabled == 'true'
+        env:
+          BASE_FORK_COMMIT: ${{ steps.plan.outputs.base_fork_commit }}
+          BRANCH: ${{ steps.plan.outputs.candidate_branch }}
+          REPAIR_REF: ${{ steps.repair_request.outputs.repair_ref }}
+          REPAIR_SHA: ${{ inputs.repair_sha }}
+        run: |
+          IMPORT_REF="refs/upstream-sync-repair/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force origin "refs/heads/${REPAIR_REF}:${IMPORT_REF}"
+          ACTUAL_SHA="$(git rev-parse "${IMPORT_REF}^{commit}")"
+          if [ "${ACTUAL_SHA}" != "${REPAIR_SHA}" ]; then
+            echo "Repair ref ${REPAIR_REF} moved to ${ACTUAL_SHA}; expected ${REPAIR_SHA}." >&2
+            exit 1
+          fi
+          RESTRICTED_CHANGES="$(git diff --name-only "${BASE_FORK_COMMIT}..${REPAIR_SHA}" -- \
+            .github/workflows \
+            .github/workflows-disabled \
+            .github/scripts \
+            .github/upstream-sync-ownership.tsv \
+            .github/upstream-sync-invariants.tsv)"
+          if [ -n "${RESTRICTED_CHANGES}" ]; then
+            echo "Repair candidate changes protected sync-policy paths: ${RESTRICTED_CHANGES}" >&2
+            exit 1
+          fi
+          git checkout -B "${BRANCH}" "${REPAIR_SHA}"
+          REPAIR_OUTPUT="${SYNC_WORK_DIR}/repair.out"
+          GITHUB_OUTPUT="${REPAIR_OUTPUT}" \
+            .github/scripts/upstream-sync.sh validate-repair "${SYNC_WORK_DIR}/plan.out" "${REPAIR_SHA}"
+          cat "${REPAIR_OUTPUT}" >> "${SYNC_WORK_DIR}/plan.out"
+          cat "${REPAIR_OUTPUT}" >> "${GITHUB_OUTPUT}"
+
       - name: Record candidate state
-        if: steps.plan.outputs.has_changes == 'true'
+        if: steps.plan.outputs.has_changes == 'true' && steps.repair_request.outputs.enabled != 'true'
         run: .github/scripts/upstream-sync.sh record-state "${SYNC_WORK_DIR}/plan.out"
 
       - name: Check source freshness
@@ -251,17 +383,22 @@ jobs:
         if: always() && steps.plan.outputs.has_changes == 'true'
         env:
           BLOCKED: ${{ steps.plan.outputs.blocked }}
-          CONFLICTS: ${{ steps.materialize.outputs.conflicts }}
+          CONFLICTS: ${{ steps.materialize.outputs.conflicts || steps.repair.outputs.conflicts }}
           FRESH: ${{ steps.freshness.outputs.fresh }}
           MANUAL_COMPOSITION: ${{ steps.provenance.outputs.manual_composition_required }}
+          REPAIR_VALIDATED: ${{ steps.repair.outputs.repair_validated }}
         run: |
           VALIDATION_STATUS="$(awk -F= '$1 == "OVERALL_STATUS" { print $2; exit }' "${SYNC_WORK_DIR}/report/validation.env")"
           CANDIDATE_SHA="$(git rev-parse HEAD)"
           ACCEPTABLE=false
+          COMPOSITION_ACCEPTABLE=false
+          if [ "${MANUAL_COMPOSITION}" != true ] || [ "${REPAIR_VALIDATED}" = true ]; then
+            COMPOSITION_ACCEPTABLE=true
+          fi
           if [ "${BLOCKED}" != true ] && \
              [ "${CONFLICTS}" != true ] && \
              [ "${FRESH}" = true ] && \
-             [ "${MANUAL_COMPOSITION}" != true ] && \
+             [ "${COMPOSITION_ACCEPTABLE}" = true ] && \
              [ "${VALIDATION_STATUS}" = passed ]; then
             ACCEPTABLE=true
           fi
@@ -290,6 +427,87 @@ jobs:
           git push \
             "--force-with-lease=refs/heads/${BRANCH}:${REMOTE_SHA}" \
             origin "HEAD:refs/heads/${BRANCH}"
+
+      - name: Write machine-readable run ledger
+        if: always() && steps.plan.outputs.has_changes == 'true'
+        env:
+          ACCEPTABLE: ${{ steps.result.outputs.acceptable }}
+          BASE_FORK_COMMIT: ${{ steps.plan.outputs.base_fork_commit }}
+          BLOCKED: ${{ steps.plan.outputs.blocked }}
+          CANDIDATE_BRANCH: ${{ steps.plan.outputs.candidate_branch }}
+          CANDIDATE_SHA: ${{ steps.result.outputs.candidate_sha }}
+          EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
+          MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}
+          ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
+          ORIGINAL_TAG: ${{ steps.plan.outputs.original_tag }}
+          PLAN_FINGERPRINT: ${{ steps.plan.outputs.plan_fingerprint }}
+          PLUS_HEAD: ${{ steps.plan.outputs.plus_head }}
+          PLUS_HEAD_INCLUDED: ${{ steps.plan.outputs.plus_head_included }}
+          PLUS_TAG: ${{ steps.plan.outputs.plus_tag }}
+          PLUS_TAG_COMMIT: ${{ steps.plan.outputs.plus_tag_head }}
+          REPAIR_ENABLED: ${{ steps.repair_request.outputs.enabled }}
+          REPAIR_PR: ${{ inputs.repair_pr }}
+          REPAIR_SHA: ${{ inputs.repair_sha }}
+          SYNC_ID: ${{ steps.plan.outputs.safe_sync_id }}
+          TARGET_DRIFT: ${{ steps.plan.outputs.target_drift }}
+          VALIDATION_STATUS: ${{ steps.result.outputs.validation_status }}
+        run: |
+          jq -n \
+            --arg base_fork_commit "${BASE_FORK_COMMIT}" \
+            --arg original_tag "${ORIGINAL_TAG}" \
+            --arg original_commit "${ORIGINAL_COMMIT}" \
+            --arg plus_tag "${PLUS_TAG}" \
+            --arg plus_tag_commit "${PLUS_TAG_COMMIT}" \
+            --arg plus_head "${PLUS_HEAD}" \
+            --arg plus_head_included "${PLUS_HEAD_INCLUDED}" \
+            --arg models_commit "${MODELS_COMMIT}" \
+            --arg sync_id "${SYNC_ID}" \
+            --arg plan_fingerprint "${PLAN_FINGERPRINT}" \
+            --arg candidate_branch "${CANDIDATE_BRANCH}" \
+            --arg candidate_sha "${CANDIDATE_SHA}" \
+            --arg expected_fork_tag "${EXPECTED_FORK_TAG}" \
+            --arg target_drift "${TARGET_DRIFT}" \
+            --arg blocked "${BLOCKED}" \
+            --arg repair_enabled "${REPAIR_ENABLED}" \
+            --arg repair_pr "${REPAIR_PR}" \
+            --arg repair_sha "${REPAIR_SHA}" \
+            --arg validation_status "${VALIDATION_STATUS}" \
+            --arg acceptable "${ACCEPTABLE}" '
+              {
+                schema_version: 1,
+                state: (if $acceptable == "true" then "candidate_validated" else "candidate_rejected" end),
+                target: {
+                  base_fork_commit: $base_fork_commit,
+                  original: {tag: $original_tag, commit: $original_commit},
+                  plus: {
+                    tag: $plus_tag,
+                    tag_commit: $plus_tag_commit,
+                    head: $plus_head,
+                    head_included: ($plus_head_included == "true")
+                  },
+                  models_commit: $models_commit,
+                  sync_id: $sync_id,
+                  plan_fingerprint: $plan_fingerprint,
+                  expected_fork_tag: $expected_fork_tag,
+                  target_drift: ($target_drift == "true"),
+                  blocked: ($blocked == "true")
+                },
+                candidate: {
+                  branch: $candidate_branch,
+                  sha: $candidate_sha,
+                  acceptable: ($acceptable == "true"),
+                  validation_status: $validation_status
+                },
+                repair: {
+                  imported: ($repair_enabled == "true"),
+                  pr: (if $repair_pr == "" then null else ($repair_pr | tonumber) end),
+                  sha: (if $repair_sha == "" then null else $repair_sha end)
+                },
+                final_plan: {status: "pending_external_verification"},
+                runtime_smoke: "not_run",
+                vn3_deployed: false
+              }
+            ' > "${SYNC_WORK_DIR}/run-state.json"
 
       - name: Open or update blocked candidate PR
         if: always() && (github.event_name == 'schedule' || inputs.mode == 'promote') && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'
@@ -433,19 +651,37 @@ jobs:
       expected_commit: ${{ needs.promote.outputs.commit }}
     secrets: inherit
 
+  docker_build:
+    needs: promote
+    if: needs.promote.result == 'success'
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      tag: ${{ needs.promote.outputs.tag }}
+      expected_commit: ${{ needs.promote.outputs.commit }}
+      mode: build
+    secrets: inherit
+
   docker:
-    needs: [promote, release]
-    if: needs.promote.result == 'success' && needs.release.result == 'success'
+    needs: [promote, release, docker_build]
+    if: >-
+      needs.promote.result == 'success' &&
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success'
     uses: ./.github/workflows/docker-image.yml
     with:
       tag: ${{ needs.promote.outputs.tag }}
       expected_commit: ${{ needs.promote.outputs.commit }}
       publish_latest: true
+      mode: publish
     secrets: inherit
 
   verify:
-    needs: [candidate, promote, release, docker]
-    if: needs.promote.result == 'success' && needs.release.result == 'success' && needs.docker.result == 'success'
+    needs: [candidate, promote, release, docker_build, docker]
+    if: >-
+      needs.promote.result == 'success' &&
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success' &&
+      needs.docker.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       # actions/checkout v7.0.0
@@ -453,6 +689,12 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ needs.promote.outputs.commit }}
+
+      # actions/download-artifact v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: upstream-sync-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SYNC_WORK_DIR }}
 
       - name: Verify release, image, and promoted identity
         env:
@@ -470,6 +712,7 @@ jobs:
             --expected-sync-id "${EXPECTED_SYNC_ID}" \
             --expected-plan-fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
             --image "${IMAGE}" \
+            --require-architecture-tags true \
             --require-latest-parity true \
             --receipt upstream-sync-receipt.json
           RECEIPT_DIGEST="$(jq -r '.image_digest' upstream-sync-receipt.json)"
@@ -492,10 +735,79 @@ jobs:
             --jq '.assets[].name' \
             | grep -Fx upstream-sync-receipt.json
 
+      - name: Require final fetched no-op plan
+        env:
+          PROMOTED_COMMIT: ${{ needs.promote.outputs.commit }}
+        run: |
+          git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
+          git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "${PROMOTED_COMMIT}" ]; then
+            echo "origin/main moved after promotion." >&2
+            exit 1
+          fi
+          FINAL_PLAN="${SYNC_WORK_DIR}/final-plan.out"
+          GITHUB_OUTPUT="${FINAL_PLAN}" .github/scripts/upstream-sync.sh plan
+          cat "${FINAL_PLAN}"
+          FINAL_HAS_CHANGES="$(awk -F= '$1 == "has_changes" { print $2; exit }' "${FINAL_PLAN}")"
+          FINAL_TARGET_DRIFT="$(awk -F= '$1 == "target_drift" { print $2; exit }' "${FINAL_PLAN}")"
+          FINAL_BLOCKED="$(awk -F= '$1 == "blocked" { print $2; exit }' "${FINAL_PLAN}")"
+          if [ "${FINAL_HAS_CHANGES}" != false ] || \
+             [ "${FINAL_TARGET_DRIFT}" != false ] || \
+             [ "${FINAL_BLOCKED}" != false ]; then
+            echo "Final planner did not reach clean no-op state." >&2
+            exit 1
+          fi
+
+      - name: Finalize machine-readable run ledger
+        env:
+          PROMOTED_COMMIT: ${{ needs.promote.outputs.commit }}
+          TAG: ${{ needs.promote.outputs.tag }}
+        run: |
+          STATE_FILE="${SYNC_WORK_DIR}/run-state.json"
+          FINAL_PLAN="${SYNC_WORK_DIR}/final-plan.out"
+          FINAL_FINGERPRINT="$(awk -F= '$1 == "plan_fingerprint" { print $2; exit }' "${FINAL_PLAN}")"
+          FINAL_HAS_CHANGES="$(awk -F= '$1 == "has_changes" { print $2; exit }' "${FINAL_PLAN}")"
+          FINAL_TARGET_DRIFT="$(awk -F= '$1 == "target_drift" { print $2; exit }' "${FINAL_PLAN}")"
+          FINAL_BLOCKED="$(awk -F= '$1 == "blocked" { print $2; exit }' "${FINAL_PLAN}")"
+          jq \
+            --arg promoted_commit "${PROMOTED_COMMIT}" \
+            --arg tag "${TAG}" \
+            --arg final_fingerprint "${FINAL_FINGERPRINT}" \
+            --arg final_has_changes "${FINAL_HAS_CHANGES}" \
+            --arg final_target_drift "${FINAL_TARGET_DRIFT}" \
+            --arg final_blocked "${FINAL_BLOCKED}" \
+            --slurpfile receipt upstream-sync-receipt.json '
+              $receipt[0] as $release |
+              .state = "released" |
+              .promotion = {
+                commit: $promoted_commit,
+                tag: $tag
+              } |
+              .release = {
+                url: $release.release_url,
+                assets: $release.release_assets,
+                image: $release.image,
+                image_digest: $release.image_digest,
+                platforms: $release.platforms,
+                architecture_images: ($release.architecture_images // {})
+              } |
+              .final_plan = {
+                status: "clean-noop",
+                plan_fingerprint: $final_fingerprint,
+                has_changes: ($final_has_changes == "true"),
+                target_drift: ($final_target_drift == "true"),
+                blocked: ($final_blocked == "true")
+              }
+            ' "${STATE_FILE}" > "${STATE_FILE}.tmp"
+          mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: upstream-sync-receipt-${{ github.run_id }}-${{ github.run_attempt }}
-          path: upstream-sync-receipt.json
+          path: |
+            upstream-sync-receipt.json
+            ${{ env.SYNC_WORK_DIR }}/run-state.json
           if-no-files-found: error
           retention-days: 90

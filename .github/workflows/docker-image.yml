@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      mode:
+        description: Build platform images, publish the canonical manifest, or do both
+        required: false
+        default: full
+        type: string
     outputs:
       image:
         description: Published GHCR image name
@@ -45,6 +50,12 @@ on:
         required: false
         default: true
         type: boolean
+      mode:
+        description: Build platform images, publish the canonical manifest, or do both
+        required: true
+        default: full
+        type: choice
+        options: [full, build, publish]
 
 permissions:
   contents: read
@@ -60,17 +71,50 @@ env:
   GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
 
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      platforms_json: ${{ steps.targets.outputs.platforms_json }}
+      target_matrix: ${{ steps.targets.outputs.target_matrix }}
+    steps:
+      - name: Validate publication mode
+        id: targets
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          case "${MODE}" in
+            full|build|publish) ;;
+            *)
+              echo "Unsupported Docker publication mode: ${MODE}" >&2
+              exit 1
+              ;;
+          esac
+          TARGET_MATRIX='{"include":[{"tag_suffix":"amd64","runner":"ubuntu-24.04","platform":"linux/amd64"},{"tag_suffix":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}'
+          if ! jq -e '
+            (.include | length > 0) and
+            all(.include[];
+              (.tag_suffix | type == "string" and test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+              (.runner | type == "string" and length > 0) and
+              (.platform | type == "string" and test("^linux/[a-z0-9]+(?:/[a-z0-9.]+)?$")) and
+              (.tag_suffix == (.platform | sub("^linux/"; "") | gsub("/"; "-")))
+            ) and
+            ([.include[].tag_suffix] | length == (unique | length)) and
+            ([.include[].platform] | length == (unique | length))
+          ' <<< "${TARGET_MATRIX}" >/dev/null; then
+            echo "Docker target matrix contains duplicate or invalid entries." >&2
+            exit 1
+          fi
+          {
+            echo "target_matrix=${TARGET_MATRIX}"
+            echo "platforms_json=$(jq -c '[.include[].platform]' <<< "${TARGET_MATRIX}")"
+          } >> "${GITHUB_OUTPUT}"
+
   build:
+    needs: validate
+    if: inputs.mode == 'full' || inputs.mode == 'build'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            platform: linux/amd64
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
+      matrix: ${{ fromJSON(needs.validate.outputs.target_matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       # actions/checkout v7.0.0
@@ -133,26 +177,91 @@ jobs:
             COMMIT=${{ steps.identity.outputs.short_commit }}
             BUILD_DATE=${{ steps.identity.outputs.build_date }}
           outputs: type=image,name=${{ steps.image.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=cliproxy-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=cliproxy-${{ matrix.arch }}
+          cache-from: type=gha,scope=cliproxy-${{ matrix.tag_suffix }}
+          cache-to: type=gha,mode=max,scope=cliproxy-${{ matrix.tag_suffix }}
 
       - name: Export platform digest
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+          PLATFORM: ${{ matrix.platform }}
+          TAG: ${{ inputs.tag }}
+          TAG_SUFFIX: ${{ matrix.tag_suffix }}
         run: |
+          SOURCE_MANIFEST="$(docker buildx imagetools inspect \
+            "${IMAGE}@${DIGEST}" \
+            --format '{{json .Manifest}}')"
+          ARCHITECTURE_DIGEST="${DIGEST}"
+          if jq -e '.manifests | type == "array"' <<< "${SOURCE_MANIFEST}" >/dev/null 2>&1; then
+            PLATFORM_OS="${PLATFORM%%/*}"
+            PLATFORM_REMAINDER="${PLATFORM#*/}"
+            PLATFORM_ARCH="${PLATFORM_REMAINDER%%/*}"
+            PLATFORM_VARIANT=""
+            if [[ "${PLATFORM_REMAINDER}" == */* ]]; then
+              PLATFORM_VARIANT="${PLATFORM_REMAINDER#*/}"
+            fi
+            mapfile -t PLATFORM_DIGESTS < <(jq -r \
+              --arg os "${PLATFORM_OS}" \
+              --arg arch "${PLATFORM_ARCH}" \
+              --arg variant "${PLATFORM_VARIANT}" '
+                .manifests[] |
+                select(
+                  .platform.os == $os and
+                  .platform.architecture == $arch and
+                  (.platform.variant // "") == $variant
+                ) |
+                .digest
+              ' <<< "${SOURCE_MANIFEST}")
+            if [ "${#PLATFORM_DIGESTS[@]}" -ne 1 ]; then
+              echo "Expected one ${PLATFORM} manifest in ${DIGEST}, found ${#PLATFORM_DIGESTS[@]}." >&2
+              exit 1
+            fi
+            ARCHITECTURE_DIGEST="${PLATFORM_DIGESTS[0]}"
+          fi
+          if ! [[ "${ARCHITECTURE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid ${PLATFORM} architecture digest: ${ARCHITECTURE_DIGEST}." >&2
+            exit 1
+          fi
+          ARCH_TAG="${TAG}-${TAG_SUFFIX}"
+          EXISTING_DIGEST=""
+          if EXISTING_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${ARCH_TAG}" 2>/dev/null)"; then
+            EXISTING_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${EXISTING_INSPECT}")"
+          fi
+          if [ -n "${EXISTING_DIGEST}" ] && [ "${EXISTING_DIGEST}" != "${ARCHITECTURE_DIGEST}" ]; then
+            echo "Architecture tag ${IMAGE}:${ARCH_TAG} already resolves to ${EXISTING_DIGEST}, expected ${ARCHITECTURE_DIGEST}." >&2
+            exit 1
+          fi
+          if [ -z "${EXISTING_DIGEST}" ]; then
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "${IMAGE}:${ARCH_TAG}" \
+              "${IMAGE}@${ARCHITECTURE_DIGEST}"
+          fi
+          ARCH_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${ARCH_TAG}")"
+          ARCH_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${ARCH_INSPECT}")"
+          if [ "${ARCH_DIGEST}" != "${ARCHITECTURE_DIGEST}" ]; then
+            echo "Architecture tag ${IMAGE}:${ARCH_TAG} resolves to ${ARCH_DIGEST}, expected ${ARCHITECTURE_DIGEST}." >&2
+            exit 1
+          fi
           mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+          touch "${RUNNER_TEMP}/digests/${TAG_SUFFIX}-${DIGEST#sha256:}-${ARCHITECTURE_DIGEST#sha256:}"
+          echo "Published early architecture image ${IMAGE}:${ARCH_TAG}@${ARCHITECTURE_DIGEST}."
 
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: digests-${{ matrix.arch }}
+          name: docker-digests-${{ inputs.tag }}-${{ matrix.tag_suffix }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   publish:
-    needs: build
+    needs: [validate, build]
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      inputs.mode != 'build' &&
+      (inputs.mode == 'publish' || needs.build.result == 'success')
     runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.publish.outputs.image }}
@@ -172,15 +281,17 @@ jobs:
       # actions/download-artifact v8.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: digests-*
+          pattern: docker-digests-${{ inputs.tag }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
       - name: Publish and verify multi-platform manifest
         id: publish
         env:
+          PLATFORMS_JSON: ${{ needs.validate.outputs.platforms_json }}
           PUBLISH_LATEST: ${{ inputs.publish_latest }}
           TAG: ${{ inputs.tag }}
+          TARGET_MATRIX: ${{ needs.validate.outputs.target_matrix }}
         run: |
           IMAGE="${GHCR_REGISTRY}/${GHCR_IMAGE_NAME}"
           IMAGE="${IMAGE,,}"
@@ -189,23 +300,70 @@ jobs:
             TAG_ARGS+=(-t "${IMAGE}:latest")
           fi
           SOURCES=()
-          while IFS= read -r DIGEST_FILE; do
-            SOURCES+=("${IMAGE}@sha256:$(basename "${DIGEST_FILE}")")
-          done < <(find "${RUNNER_TEMP}/digests" -type f -print | sort)
-          if [ "${#SOURCES[@]}" -ne 2 ]; then
-            echo "Expected two platform digests, found ${#SOURCES[@]}." >&2
+          PLATFORMS=()
+          EXPECTED_ARCHITECTURE_DIGESTS=()
+          while IFS=$'\t' read -r TAG_SUFFIX PLATFORM; do
+            mapfile -t DIGEST_FILES < <(find "${RUNNER_TEMP}/digests" -type f -name "${TAG_SUFFIX}-*" -print | sort)
+            if [ "${#DIGEST_FILES[@]}" -ne 1 ]; then
+              echo "Expected one ${PLATFORM} platform digest, found ${#DIGEST_FILES[@]}." >&2
+              exit 1
+            fi
+            DIGEST_PAYLOAD="${DIGEST_FILES[0]##*${TAG_SUFFIX}-}"
+            SOURCE_DIGEST="sha256:${DIGEST_PAYLOAD%%-*}"
+            ARCHITECTURE_DIGEST="sha256:${DIGEST_PAYLOAD#*-}"
+            if ! [[ "${SOURCE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || \
+               ! [[ "${ARCHITECTURE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Invalid ${PLATFORM} source or architecture digest marker." >&2
+              exit 1
+            fi
+            ARCH_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${TAG}-${TAG_SUFFIX}")"
+            ARCH_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${ARCH_INSPECT}")"
+            if [ "${ARCH_DIGEST}" != "${ARCHITECTURE_DIGEST}" ]; then
+              echo "Architecture tag ${IMAGE}:${TAG}-${TAG_SUFFIX} resolves to ${ARCH_DIGEST}, expected ${ARCHITECTURE_DIGEST}." >&2
+              exit 1
+            fi
+            SOURCES+=("${IMAGE}@${SOURCE_DIGEST}")
+            PLATFORMS+=("${PLATFORM}")
+            EXPECTED_ARCHITECTURE_DIGESTS+=("${ARCHITECTURE_DIGEST}")
+          done < <(jq -r '.include[] | [.tag_suffix, .platform] | @tsv' <<< "${TARGET_MATRIX}")
+          if [ "${#SOURCES[@]}" -ne "$(jq '.include | length' <<< "${TARGET_MATRIX}")" ]; then
+            echo "Docker source count does not match the declared target matrix." >&2
             exit 1
           fi
           docker buildx imagetools create "${TAG_ARGS[@]}" "${SOURCES[@]}"
-          INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${TAG}")"
-          IMAGE_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${INSPECT}")"
+          IMAGE_INDEX="$(docker buildx imagetools inspect \
+            "${IMAGE}:${TAG}" \
+            --format '{{json .Manifest}}')"
+          IMAGE_DIGEST="$(jq -r '.digest // empty' <<< "${IMAGE_INDEX}")"
           if [ -z "${IMAGE_DIGEST}" ]; then
             echo "Could not resolve published manifest digest." >&2
             exit 1
           fi
-          for PLATFORM in linux/amd64 linux/arm64; do
-            if ! grep -Eq "Platform:[[:space:]]+${PLATFORM}$" <<< "${INSPECT}"; then
-              echo "Published manifest is missing ${PLATFORM}." >&2
+          for INDEX in "${!PLATFORMS[@]}"; do
+            PLATFORM="${PLATFORMS[INDEX]}"
+            EXPECTED_ARCHITECTURE_DIGEST="${EXPECTED_ARCHITECTURE_DIGESTS[INDEX]}"
+            PLATFORM_OS="${PLATFORM%%/*}"
+            PLATFORM_REMAINDER="${PLATFORM#*/}"
+            PLATFORM_ARCH="${PLATFORM_REMAINDER%%/*}"
+            PLATFORM_VARIANT=""
+            if [[ "${PLATFORM_REMAINDER}" == */* ]]; then
+              PLATFORM_VARIANT="${PLATFORM_REMAINDER#*/}"
+            fi
+            mapfile -t PUBLISHED_PLATFORM_DIGESTS < <(jq -r \
+              --arg os "${PLATFORM_OS}" \
+              --arg arch "${PLATFORM_ARCH}" \
+              --arg variant "${PLATFORM_VARIANT}" '
+                .manifests[]? |
+                select(
+                  .platform.os == $os and
+                  .platform.architecture == $arch and
+                  (.platform.variant // "") == $variant
+                ) |
+                .digest
+              ' <<< "${IMAGE_INDEX}")
+            if [ "${#PUBLISHED_PLATFORM_DIGESTS[@]}" -ne 1 ] || \
+               [ "${PUBLISHED_PLATFORM_DIGESTS[0]:-}" != "${EXPECTED_ARCHITECTURE_DIGEST}" ]; then
+              echo "Published manifest ${PLATFORM} digest does not match ${EXPECTED_ARCHITECTURE_DIGEST}." >&2
               exit 1
             fi
           done
@@ -220,5 +378,5 @@ jobs:
           {
             echo "image=${IMAGE}"
             echo "image_digest=${IMAGE_DIGEST}"
-            echo 'platforms_json=["linux/amd64","linux/arm64"]'
+            echo "platforms_json=${PLATFORMS_JSON}"
           } >> "${GITHUB_OUTPUT}"

@@ -999,6 +999,106 @@ cmd_record_state() {
   } > .ccs-fork-upstream.env
 }
 
+candidate_state_value() {
+  local key=$1
+  awk -F= -v key="${key}" '
+    $1 == key {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' .ccs-fork-upstream.env
+}
+
+require_repair_state_value() {
+  local state_key=$1
+  local expected=$2
+  local actual
+  actual=$(candidate_state_value "${state_key}")
+  [ "${actual}" = "${expected}" ] \
+    || die "repair candidate ${state_key}=${actual:-<missing>}, expected ${expected}"
+}
+
+cmd_validate_repair() {
+  local plan_file=${1:-}
+  local repair_sha=${2:-}
+  [ -n "${plan_file}" ] || die "validate-repair requires plan-output-file"
+  [ -f "${plan_file}" ] || die "plan output not found: ${plan_file}"
+  [[ "${repair_sha}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "validate-repair requires a 40-character lowercase repair SHA"
+  [ "$(git rev-parse HEAD)" = "${repair_sha}" ] \
+    || die "repair checkout does not match ${repair_sha}"
+  [ -z "$(git status --porcelain)" ] || die "validate-repair requires a clean worktree"
+  [ -f .ccs-fork-upstream.env ] || die "repair candidate is missing .ccs-fork-upstream.env"
+
+  local base_fork_commit fingerprint candidate_branch
+  local original_commit plus_tag_commit plus_head_commit plus_head_included models_commit
+  base_fork_commit=$(require_plan_value "${plan_file}" base_fork_commit)
+  fingerprint=$(require_plan_value "${plan_file}" plan_fingerprint)
+  candidate_branch=$(require_plan_value "${plan_file}" candidate_branch)
+  original_commit=$(require_plan_value "${plan_file}" original_head)
+  plus_tag_commit=$(require_plan_value "${plan_file}" plus_tag_head)
+  plus_head_commit=$(require_plan_value "${plan_file}" plus_head)
+  plus_head_included=$(require_plan_value "${plan_file}" plus_head_included)
+  models_commit=$(require_plan_value "${plan_file}" models_commit)
+
+  verify_snapshot_commit "${fingerprint}" original "${original_commit}"
+  verify_snapshot_commit "${fingerprint}" plus-tag "${plus_tag_commit}"
+  verify_snapshot_commit "${fingerprint}" plus-head "${plus_head_commit}"
+  verify_snapshot_commit "${fingerprint}" models "${models_commit}"
+
+  git merge-base --is-ancestor "${base_fork_commit}" "${repair_sha}" \
+    || die "repair candidate does not descend from planned fork base ${base_fork_commit}"
+  git merge-base --is-ancestor "${original_commit}" "${repair_sha}" \
+    || die "repair candidate does not contain selected original commit ${original_commit}"
+  git merge-base --is-ancestor "${plus_tag_commit}" "${repair_sha}" \
+    || die "repair candidate does not contain selected Plus tag commit ${plus_tag_commit}"
+  if [ "${plus_head_included}" = true ] && [ "${plus_head_commit}" != "${plus_tag_commit}" ]; then
+    git merge-base --is-ancestor "${plus_head_commit}" "${repair_sha}" \
+      || die "repair candidate does not contain selected Plus head commit ${plus_head_commit}"
+  fi
+
+  if ! cmp -s \
+    <(git show "$(snapshot_ref "${fingerprint}" models):models.json") \
+    internal/registry/models/models.json; then
+    die "repair candidate model catalog does not match selected models commit ${models_commit}"
+  fi
+
+  local restricted_changes
+  restricted_changes=$(git diff --name-only "${base_fork_commit}..${repair_sha}" -- \
+    .github/workflows \
+    .github/workflows-disabled \
+    .github/scripts \
+    .github/upstream-sync-ownership.tsv \
+    .github/upstream-sync-invariants.tsv)
+  [ -z "${restricted_changes}" ] \
+    || die "repair candidate changes protected sync-policy paths: $(tr '\n' ' ' <<< "${restricted_changes}")"
+
+  require_repair_state_value SCHEMA_VERSION 2
+  require_repair_state_value SYNC_ID "$(require_plan_value "${plan_file}" safe_sync_id)"
+  require_repair_state_value PLAN_FINGERPRINT "${fingerprint}"
+  require_repair_state_value BASE_FORK_COMMIT "${base_fork_commit}"
+  require_repair_state_value ORIGINAL_REPOSITORY "$(require_plan_value "${plan_file}" original_repository)"
+  require_repair_state_value ORIGINAL_TAG "$(require_plan_value "${plan_file}" original_tag)"
+  require_repair_state_value ORIGINAL_COMMIT "${original_commit}"
+  require_repair_state_value PLUS_REPOSITORY "$(require_plan_value "${plan_file}" plus_repository)"
+  require_repair_state_value PLUS_TAG "$(require_plan_value "${plan_file}" plus_tag)"
+  require_repair_state_value PLUS_TAG_COMMIT "${plus_tag_commit}"
+  require_repair_state_value PLUS_HEAD_COMMIT "${plus_head_commit}"
+  require_repair_state_value PLUS_HEAD_INCLUDED "${plus_head_included}"
+  require_repair_state_value MODELS_REPOSITORY "$(require_plan_value "${plan_file}" models_repository)"
+  require_repair_state_value MODELS_COMMIT "${models_commit}"
+  require_repair_state_value EXPECTED_FORK_TAG "$(require_plan_value "${plan_file}" expected_fork_tag)"
+  require_repair_state_value CANDIDATE_BRANCH "${candidate_branch}"
+
+  write_kv repair_validated true
+  write_kv candidate_branch "${candidate_branch}"
+  write_kv candidate_sha "${repair_sha}"
+  write_kv conflicts false
+  write_kv conflict_files ""
+  echo "[OK] validated imported repair ${repair_sha} for plan ${fingerprint}."
+}
+
 cmd_check_freshness() {
   local plan_file=${1:-}
   local allow_fork_base_drift=${UPSTREAM_SYNC_ALLOW_FORK_BASE_DRIFT:-false}
@@ -1595,13 +1695,14 @@ main() {
     merge-ref) cmd_merge_ref "$@" ;;
     replay-plan) cmd_replay_plan "$@" ;;
     record-state) cmd_record_state "$@" ;;
+    validate-repair) cmd_validate_repair "$@" ;;
     check-freshness) cmd_check_freshness "$@" ;;
     report-provenance) cmd_report_provenance "$@" ;;
     classify-paths) cmd_classify_paths "$@" ;;
     check-symbol-survival) cmd_check_symbol_survival "$@" ;;
     check-invariants) cmd_check_invariants "$@" ;;
     pending-overlay-branch) cmd_pending_overlay_branch "$@" ;;
-    *) die "usage: $0 {plan|materialize|merge-ref|replay-plan|record-state|check-freshness|report-provenance|classify-paths|check-symbol-survival|check-invariants|pending-overlay-branch}" ;;
+    *) die "usage: $0 {plan|materialize|merge-ref|replay-plan|record-state|validate-repair|check-freshness|report-provenance|classify-paths|check-symbol-survival|check-invariants|pending-overlay-branch}" ;;
   esac
 }
 
