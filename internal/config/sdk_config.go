@@ -49,6 +49,9 @@ type SDKConfig struct {
 	// RequestEvents controls line-oriented JSONL request event logging.
 	RequestEvents RequestEventsConfig `yaml:"request-events,omitempty" json:"request-events,omitempty"`
 
+	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
+	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

@@ -201,11 +201,11 @@ func (s *xaiWebsocketIDState) prependTranscriptInput(payload []byte) []byte {
 	return out
 }
 
-func (s *xaiWebsocketIDState) recordTranscriptTurn(requestPayload []byte, completedPayload []byte, reset bool) {
-	s.recordTranscriptTurnWithProvenance(requestPayload, completedPayload, reset, websocketTranscriptProvenance{})
+func (s *xaiWebsocketIDState) recordTranscriptTurn(requestPayload []byte, completedPayload []byte, reset ...bool) {
+	s.recordTranscriptTurnWithProvenance(requestPayload, completedPayload, websocketTranscriptProvenance{}, reset...)
 }
 
-func (s *xaiWebsocketIDState) recordTranscriptTurnWithProvenance(requestPayload []byte, completedPayload []byte, reset bool, provenance websocketTranscriptProvenance) {
+func (s *xaiWebsocketIDState) recordTranscriptTurnWithProvenance(requestPayload []byte, completedPayload []byte, provenance websocketTranscriptProvenance, reset ...bool) {
 	if s == nil || len(requestPayload) == 0 || len(completedPayload) == 0 {
 		return
 	}
@@ -214,7 +214,8 @@ func (s *xaiWebsocketIDState) recordTranscriptTurnWithProvenance(requestPayload 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if reset {
+	shouldReset := len(reset) > 0 && reset[0]
+	if shouldReset {
 		s.transcriptInput = nil
 		s.transcriptProvenance = websocketTranscriptProvenance{}
 		s.replayCompactedTranscriptOnReset = false
