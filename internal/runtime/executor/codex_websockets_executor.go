@@ -642,10 +642,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
-			if opts.ExecutionLifecycle != nil {
-				return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
-			}
-			return e.CodexExecutor.Execute(ctx, auth, req, opts)
+			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
@@ -972,10 +969,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			if opts.ExecutionLifecycle != nil {
-				return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
-			}
-			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			if sess != nil {
