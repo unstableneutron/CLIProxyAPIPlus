@@ -119,6 +119,28 @@
         ]
       }
     },
+        {
+      "id": "claude-opus-5",
+      "object": "model",
+      "created": 1784038800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5",
+      "description": "Latest premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
     {
       "id": "claude-sonnet-5",
       "object": "model",
