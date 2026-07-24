@@ -626,8 +626,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 
+		toolCacheTurn := newResponsesWebsocketToolCacheTurn(downstreamSessionKey)
 		if !useUpstreamWebsocketPassthrough {
-			requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+			toolCacheTurn.recordRequest(requestJSON)
+			requestJSON = repairResponsesWebsocketToolCallsWithoutRecording(downstreamSessionKey, requestJSON)
 			requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
 			replayJSON = bytes.Clone(requestJSON)
 			candidateLastRequest = bytes.Clone(requestJSON)
@@ -662,7 +664,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			InitialPinnedAuthID: pinnedAuthID,
 		})
 
-		completedOutput, completedResponseID, completedPendingToolCallIDs, _, errForward := h.forwardResponsesWebsocket(c, writer, cliCancel, turnStream.Data, turnStream.Errors, wsTimelineLog, passthroughSessionID)
+		completedOutput, completedResponseID, completedPendingToolCallIDs, _, errForward := h.forwardResponsesWebsocket(c, writer, cliCancel, turnStream.Data, turnStream.Errors, wsTimelineLog, passthroughSessionID, responsesWebsocketForwardOptions{toolCacheTurn: toolCacheTurn})
 		outcome := <-turnStream.outcome
 		finishMainTurn()
 		if errForward != nil {
@@ -681,6 +683,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			} else {
 				lastRequest = candidateLastRequest
 			}
+			toolCacheTurn.commit()
 			lastResponseOutput = completedOutput
 			lastResponseID = strings.TrimSpace(completedResponseID)
 			lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
@@ -1680,6 +1683,11 @@ func normalizeJSONArrayRaw(raw []byte) string {
 	return "[]"
 }
 
+type responsesWebsocketForwardOptions struct {
+	toolCacheTurn *responsesWebsocketToolCacheTurn
+	suppressError func(*interfaces.ErrorMessage) bool
+}
+
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	c *gin.Context,
 	writer *responsesWebsocketWriter,
@@ -1688,7 +1696,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
+	options ...responsesWebsocketForwardOptions,
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
+	var opts responsesWebsocketForwardOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	toolCacheTurn := opts.toolCacheTurn
 	completed := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
@@ -1790,7 +1804,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if isResponsesWebsocketCompletionEvent(eventType) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
-				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
+				if toolCacheTurn != nil {
+					toolCacheTurn.recordResponse(payloads[i])
+				} else {
+					recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
+				}
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				var payloadErrMsg *interfaces.ErrorMessage
 				if eventType == wsEventTypeError {
