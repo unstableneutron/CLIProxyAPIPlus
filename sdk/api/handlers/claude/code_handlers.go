@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -166,7 +167,24 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models()))
+	models := h.Models()
+	sortClaudeModelsByDisplayName(models)
+	c.JSON(http.StatusOK, claudemodels.BuildResponse(models))
+}
+
+// sortClaudeModelsByDisplayName sorts models by display_name ascending.
+// When display_name is equal or missing, id is used as a stable tie-breaker.
+func sortClaudeModelsByDisplayName(models []map[string]any) {
+	sort.SliceStable(models, func(i, j int) bool {
+		displayNameI, _ := models[i]["display_name"].(string)
+		displayNameJ, _ := models[j]["display_name"].(string)
+		if displayNameI != displayNameJ {
+			return displayNameI < displayNameJ
+		}
+		idI, _ := models[i]["id"].(string)
+		idJ, _ := models[j]["id"].(string)
+		return idI < idJ
+	})
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

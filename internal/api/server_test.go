@@ -1931,6 +1931,24 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 	}
 }
 
+func TestFormatHomeClaudeModelsSortsByDisplayName(t *testing.T) {
+	out := formatHomeClaudeModels([]homeModelEntry{
+		{id: "claude-z", displayName: "Zebra"},
+		{id: "gpt-4o", displayName: "Alpha"},
+		{id: "claude-b", displayName: "Beta"},
+	})
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	wantNames := []string{"Alpha", "Beta", "Zebra"}
+	for i, want := range wantNames {
+		got, _ := out[i]["display_name"].(string)
+		if got != want {
+			t.Fatalf("out[%d].display_name = %q, want %q", i, got, want)
+		}
+	}
+}
+
 func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	entries, errDecode := decodeHomeModels([]byte(`{
 		"claude": [

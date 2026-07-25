@@ -142,6 +142,11 @@ func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any,
 	return loadCodexClientModelTemplatesSnapshot(raw, revision)
 }
 
+// LoadTemplates returns the current Codex client model templates.
+func LoadTemplates() (map[string]map[string]any, map[string]any, error) {
+	return loadCodexClientModelTemplates()
+}
+
 func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {
 	codexClientModelTemplatesMu.Lock()
 	defer codexClientModelTemplatesMu.Unlock()
