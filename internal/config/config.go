@@ -383,10 +383,11 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse      bool                  `yaml:"identity-confuse" json:"identity-confuse"`
-	OptimizeMultiAgentV2 bool                  `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
-	TLSProfile           CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
-	ContinueThinking     CodexContinueThinking `yaml:"continue-thinking" json:"continue-thinking"`
+	IdentityConfuse      bool                      `yaml:"identity-confuse" json:"identity-confuse"`
+	OptimizeMultiAgentV2 bool                      `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	TLSProfile           CodexTLSProfileConfig     `yaml:"tls-profile" json:"tls-profile"`
+	ContinueThinking     CodexContinueThinking     `yaml:"continue-thinking" json:"continue-thinking"`
+	LiveMediaRelay       CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
 
 // CodexContinueThinking configures optional Codex reasoning truncation folding.
@@ -405,6 +406,24 @@ type CodexContinueThinking struct {
 type CodexTLSProfileConfig struct {
 	HTTPS     string `yaml:"https" json:"https"`
 	Websocket string `yaml:"websocket" json:"websocket"`
+}
+
+// CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
+type CodexLiveMediaRelayConfig struct {
+	Enabled                 bool                 `yaml:"enabled" json:"enabled"`
+	MaxSessions             int                  `yaml:"max-sessions" json:"max-sessions"`
+	DisablePrivateRemoteIPs bool                 `yaml:"disable-private-remote-ips" json:"disable-private-remote-ips"`
+	PublicIP                string               `yaml:"public-ip" json:"public-ip"`
+	UDPPortMin              uint16               `yaml:"udp-port-min" json:"udp-port-min"`
+	UDPPortMax              uint16               `yaml:"udp-port-max" json:"udp-port-max"`
+	ICEServers              []CodexLiveICEServer `yaml:"ice-servers" json:"ice-servers"`
+}
+
+// CodexLiveICEServer configures a STUN or TURN server for the media relay.
+type CodexLiveICEServer struct {
+	URLs       []string `yaml:"urls" json:"urls"`
+	Username   string   `yaml:"username" json:"-"`
+	Credential string   `yaml:"credential" json:"-"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -1044,6 +1063,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
 
