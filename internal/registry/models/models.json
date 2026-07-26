@@ -119,7 +119,7 @@
         ]
       }
     },
-        {
+    {
       "id": "claude-opus-5",
       "object": "model",
       "created": 1784038800,
