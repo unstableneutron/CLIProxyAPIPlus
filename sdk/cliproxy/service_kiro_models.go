@@ -19,7 +19,7 @@ func (s *Service) fetchKiroModels(auth *coreauth.Auth) []*ModelInfo {
 }
 
 func (s *Service) fetchKiroModelsContext(ctx context.Context, auth *coreauth.Auth) []*ModelInfo {
-	tokenData := extractKiroTokenData(auth)
+	tokenData := s.extractKiroTokenData(auth)
 	if tokenData == nil || tokenData.AccessToken == "" {
 		return registry.GetKiroModels()
 	}

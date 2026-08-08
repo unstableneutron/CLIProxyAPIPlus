@@ -292,6 +292,10 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
+	case "bedrock":
+		s.coreManager.RegisterExecutor(executor.NewBedrockExecutor(cfg))
+	case "commandcode":
+		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(cfg))
 	case "kiro":
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(cfg))
 	case "kilo":

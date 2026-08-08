@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -145,7 +146,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "github-copilot":
 		models = applyExcludedModels(executor.FetchGitHubCopilotModels(ctx, a, s.cfg), excluded)
 	case "kiro":
-		models = applyExcludedModels(s.fetchKiroModelsContext(ctx, a), excluded)
+		models = s.fetchKiroModelsContext(ctx, a)
+		if !kirocommon.IsSystemPromptInjectEnabled() {
+			models = filterAgenticVariants(models)
+		}
+		models = applyExcludedModels(models, excluded)
 	case "kilo":
 		models = applyExcludedModels(executor.FetchKiloModels(ctx, a, s.cfg), excluded)
 	case "gitlab":
@@ -161,6 +166,27 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				models = buildXAIConfigModels(entry)
 			}
 			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "bedrock":
+		if entry := s.resolveConfigBedrockProvider(a); entry != nil {
+			models = buildBedrockConfigModels(entry)
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "commandcode":
+		if entry := s.resolveConfigCommandCodeKey(a); entry != nil && len(entry.Models) > 0 {
+			models = buildCommandCodeConfigModels(entry)
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		} else {
+			models = executor.FetchCommandCodeModels(ctx, a, s.cfg)
+			if entry := s.resolveConfigCommandCodeKey(a); entry != nil && authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
 		}
@@ -549,10 +575,12 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 }
 
 func (s *Service) effectiveAuthExcludedModels(auth *coreauth.Auth, provider, authKind string, fallback []string) []string {
+	if authExcluded := excludedModelsFromAuthAttributes(auth); len(authExcluded) > 0 {
+		return authExcluded
+	}
 	return mergeExcludedModels(
 		fallback,
 		s.oauthExcludedModels(provider, authKind),
-		excludedModelsFromAuthAttributes(auth),
 	)
 }
 
