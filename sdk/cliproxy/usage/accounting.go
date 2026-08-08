@@ -21,6 +21,7 @@ const (
 	tokenAccountingSemanticsSubset
 	tokenAccountingSemanticsIndependent
 	tokenAccountingSemanticsSeparateReasoning
+	tokenAccountingSemanticsCommandCode
 )
 
 // TokenInputBreakdown contains mutually exclusive input token buckets.
@@ -300,6 +301,8 @@ func tokenBreakdownForSemantics(detail Detail, semantics tokenAccountingSemantic
 			detail.ReasoningTokens,
 			detail.TotalTokens,
 		)
+	case tokenAccountingSemanticsCommandCode:
+		return commandCodeTokenBreakdown(detail)
 	default:
 		total := detail.TotalTokens
 		if total == 0 {
@@ -311,6 +314,92 @@ func tokenBreakdownForSemantics(detail Detail, semantics tokenAccountingSemantic
 		}
 		return NewUnclassifiedTokenBreakdown(total)
 	}
+}
+
+// commandCodeTokenBreakdown accounts for Command Code's additive cache fields
+// while honoring total-bearing events whose input total already includes cache.
+// The published CLI aggregates input, cache-read, cache-write, and output as
+// additive fields; some gateway events also report a total equal to input+output
+// and therefore make cache/reasoning subsets of those parent buckets.
+func commandCodeTokenBreakdown(detail Detail) TokenBreakdown {
+	cacheTotal, okCache := nonNegativeSum(detail.CacheReadTokens, detail.CacheCreationTokens)
+	cacheSubsetValid := okCache && detail.InputTokens >= 0 && cacheTotal <= detail.InputTokens
+	reasoningSubsetValid := detail.OutputTokens >= 0 && detail.ReasoningTokens >= 0 && detail.ReasoningTokens <= detail.OutputTokens
+
+	// With no provider total, the published CLI evidence is authoritative: cache
+	// buckets are additive and reasoning is a child of output.
+	if detail.TotalTokens == 0 {
+		nonReasoningOutput := detail.OutputTokens
+		if reasoningSubsetValid {
+			nonReasoningOutput -= detail.ReasoningTokens
+		}
+		return NewIndependentTokenBreakdown(
+			detail.InputTokens,
+			detail.CacheReadTokens,
+			detail.CacheCreationTokens,
+			nonReasoningOutput,
+			detail.ReasoningTokens,
+			0,
+		)
+	}
+
+	// For a total-bearing event, identify the exact parent-bucket shape instead
+	// of guessing and risking a cache or reasoning double count.
+	if cacheSubsetValid && reasoningSubsetValid {
+		if expected, ok := nonNegativeSum(detail.InputTokens, detail.OutputTokens); ok && detail.TotalTokens == expected {
+			return NewSubsetTokenBreakdown(
+				detail.InputTokens,
+				detail.CacheReadTokens,
+				detail.CacheCreationTokens,
+				detail.OutputTokens,
+				detail.ReasoningTokens,
+				detail.TotalTokens,
+			)
+		}
+	}
+	if reasoningSubsetValid {
+		if inputWithCache, ok := nonNegativeSum(detail.InputTokens, cacheTotal); ok {
+			if expected, ok := nonNegativeSum(inputWithCache, detail.OutputTokens); ok && detail.TotalTokens == expected {
+				return NewIndependentTokenBreakdown(
+					detail.InputTokens,
+					detail.CacheReadTokens,
+					detail.CacheCreationTokens,
+					detail.OutputTokens-detail.ReasoningTokens,
+					detail.ReasoningTokens,
+					detail.TotalTokens,
+				)
+			}
+		}
+	}
+	if cacheSubsetValid {
+		if inputWithOutput, ok := nonNegativeSum(detail.InputTokens, detail.OutputTokens); ok {
+			if expected, ok := nonNegativeSum(inputWithOutput, detail.ReasoningTokens); ok && detail.TotalTokens == expected {
+				return NewSeparateReasoningTokenBreakdown(
+					detail.InputTokens,
+					detail.CacheReadTokens,
+					detail.CacheCreationTokens,
+					detail.OutputTokens,
+					detail.ReasoningTokens,
+					detail.TotalTokens,
+				)
+			}
+		}
+	}
+	if inputWithCache, ok := nonNegativeSum(detail.InputTokens, cacheTotal); ok {
+		if outputWithReasoning, ok := nonNegativeSum(detail.OutputTokens, detail.ReasoningTokens); ok {
+			if expected, ok := nonNegativeSum(inputWithCache, outputWithReasoning); ok && detail.TotalTokens == expected {
+				return NewIndependentTokenBreakdown(
+					detail.InputTokens,
+					detail.CacheReadTokens,
+					detail.CacheCreationTokens,
+					detail.OutputTokens,
+					detail.ReasoningTokens,
+					detail.TotalTokens,
+				)
+			}
+		}
+	}
+	return inconsistentTokenBreakdown(detail.TotalTokens, 0)
 }
 
 func unclassifiedTokenLowerBound(detail Detail) (int64, bool) {
@@ -354,6 +443,9 @@ func tokenAccountingSemanticsFor(provider, executorType string) tokenAccountingS
 		if strings.Contains(value, marker) {
 			return tokenAccountingSemanticsSubset
 		}
+	}
+	if strings.Contains(value, "commandcode") {
+		return tokenAccountingSemanticsCommandCode
 	}
 	return tokenAccountingSemanticsUnknown
 }

@@ -36,6 +36,87 @@ func TestNewIndependentTokenBreakdownKeepsClaudeCacheBucketsIndependent(t *testi
 	}
 }
 
+func TestEnsureTokenBreakdownForCommandCodeUsesIndependentCacheBuckets(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{
+		InputTokens:         100,
+		OutputTokens:        30,
+		ReasoningTokens:     12,
+		CacheReadTokens:     40,
+		CacheCreationTokens: 10,
+		TotalTokens:         180,
+	}, "commandcode", "")
+
+	breakdown := detail.TokenBreakdown
+	if !breakdown.Valid() || breakdown.Quality != TokenAccountingQualityComplete {
+		t.Fatalf("CommandCode token breakdown = %+v, want complete valid breakdown", breakdown)
+	}
+	if detail.TotalTokens != 180 || breakdown.TotalTokens != 180 {
+		t.Fatalf("CommandCode totals = detail %d, breakdown %d, want 180", detail.TotalTokens, breakdown.TotalTokens)
+	}
+	if breakdown.Input.TotalTokens != 150 || breakdown.Input.UncachedTokens != 100 ||
+		breakdown.Input.CacheReadTokens != 40 || breakdown.Input.CacheWriteTokens != 10 {
+		t.Fatalf("CommandCode input buckets = %+v, want total=150 uncached=100 read=40 write=10", breakdown.Input)
+	}
+	if breakdown.Output.TotalTokens != 30 || breakdown.Output.NonReasoningTokens != 18 || breakdown.Output.ReasoningTokens != 12 {
+		t.Fatalf("CommandCode output buckets = %+v, want total=30 non-reasoning=18 reasoning=12", breakdown.Output)
+	}
+}
+
+func TestEnsureTokenBreakdownForCommandCodeMatchesIndependentCacheSubsetReasoning(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{
+		InputTokens:     10,
+		OutputTokens:    30,
+		ReasoningTokens: 12,
+		CacheReadTokens: 100,
+		TotalTokens:     140,
+	}, "commandcode", "")
+
+	breakdown := detail.TokenBreakdown
+	if !breakdown.Valid() || breakdown.Quality != TokenAccountingQualityComplete {
+		t.Fatalf("CommandCode edge breakdown = %+v, want complete valid breakdown", breakdown)
+	}
+	if breakdown.TotalTokens != 140 || breakdown.Input.TotalTokens != 110 ||
+		breakdown.Input.UncachedTokens != 10 || breakdown.Input.CacheReadTokens != 100 ||
+		breakdown.Output.TotalTokens != 30 || breakdown.Output.NonReasoningTokens != 18 ||
+		breakdown.Output.ReasoningTokens != 12 {
+		t.Fatalf("CommandCode edge buckets = %+v, want input=110 cache-read=100 output=30 reasoning=12", breakdown)
+	}
+}
+
+func TestEnsureTokenBreakdownForCommandCodeHonorsGatewayTotal(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{
+		InputTokens:     7528,
+		OutputTokens:    16,
+		ReasoningTokens: 16,
+		CacheReadTokens: 7424,
+		TotalTokens:     7544,
+	}, "commandcode", "")
+
+	breakdown := detail.TokenBreakdown
+	if !breakdown.Valid() || breakdown.Quality != TokenAccountingQualityComplete {
+		t.Fatalf("CommandCode gateway total breakdown = %+v, want complete valid breakdown", breakdown)
+	}
+	if breakdown.TotalTokens != 7544 || breakdown.Input.TotalTokens != 7528 ||
+		breakdown.Input.UncachedTokens != 104 || breakdown.Input.CacheReadTokens != 7424 ||
+		breakdown.Output.TotalTokens != 16 || breakdown.Output.NonReasoningTokens != 0 ||
+		breakdown.Output.ReasoningTokens != 16 {
+		t.Fatalf("CommandCode gateway total buckets = %+v, want input=7528 uncached=104 read=7424 output=16 reasoning=16", breakdown)
+	}
+}
+
+func TestEnsureTokenBreakdownForCommandCodeRejectsUnknownTotalShape(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{
+		InputTokens:     10,
+		OutputTokens:    30,
+		ReasoningTokens: 12,
+		CacheReadTokens: 100,
+		TotalTokens:     141,
+	}, "commandcode", "")
+	if detail.TokenBreakdown.Quality != TokenAccountingQualityInconsistent || !detail.TokenBreakdown.Valid() {
+		t.Fatalf("CommandCode unknown total shape = %+v, want valid inconsistent breakdown", detail.TokenBreakdown)
+	}
+}
+
 func TestNewSeparateReasoningTokenBreakdownAddsReasoningToOutput(t *testing.T) {
 	breakdown := NewSeparateReasoningTokenBreakdown(20, 5, 0, 7, 3, 30)
 	if !breakdown.Valid() {

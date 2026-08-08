@@ -40,6 +40,7 @@ fork-owned	internal/translator/openai/gemini-cli/
 fork-owned	sdk/api/handlers/gemini/gemini-cli_handlers.go
 fork-owned	sdk/auth/gemini.go
 
+fork-owned	internal/registry/commandcode_model_definitions.go
 fork-owned	internal/runtime/executor/commandcode_executor.go
 fork-owned	internal/runtime/executor/commandcode_executor_test.go
 fork-owned	internal/registry/commandcode_models_test.go

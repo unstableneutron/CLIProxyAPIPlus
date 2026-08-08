@@ -82,7 +82,7 @@ func GetCodexProModels() []*ModelInfo {
 func GetCommandCodeModels() []*ModelInfo {
 	models := cloneModelInfos(getModels().CommandCode)
 	if len(models) == 0 {
-		return commandCodeBuiltinModelInfos()
+		return commandCodeBuiltinModelInfosV115()
 	}
 	return models
 }

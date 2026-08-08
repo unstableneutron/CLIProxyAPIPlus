@@ -8,6 +8,10 @@ gemini-cli	contains	internal/translator/init.go	_ "github.com/router-for-me/CLIP
 gemini-cli	contains	sdk/translator/formats.go	GeminiCLI	Gemini CLI SDK translator format remains present
 commandcode	contains	internal/registry/model_definitions.go	CommandCode	CommandCode model registry bucket remains present
 commandcode	contains	internal/registry/model_definitions.go	commandcode	CommandCode model type aliases remain present
+commandcode	contains	internal/registry/model_definitions.go	commandCodeBuiltinModelInfosV115	Command Code 1.15.0 static fallback call site remains present
+commandcode	contains	internal/registry/commandcode_models_test.go	TestGetCommandCodeModelsMatchesPublished115Catalog	Command Code 1.15.0 catalog regression remains
+commandcode	contains	sdk/cliproxy/usage/accounting.go	tokenAccountingSemanticsCommandCode	Command Code token accounting semantics remain present
+commandcode	contains	sdk/cliproxy/usage/accounting_test.go	TestEnsureTokenBreakdownForCommandCodeUsesIndependentCacheBuckets	Command Code token accounting regression remains
 commandcode	contains	sdk/cliproxy/service.go	case "commandcode":	CommandCode executor registration remains present
 commandcode	contains	internal/watcher/synthesizer/config.go	synthesizeCommandCodeKeys	CommandCode config synthesizer remains present
 kiro	contains	internal/watcher/synthesizer/config.go	synthesizeKiroKeys	Kiro config synthesizer remains present
