@@ -43,3 +43,7 @@ func TestIsClaudeServerToolType(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeBuiltinToolRegistry_AugmentsTypedBuiltinsFromBody(t *testing.T) {
+	TestClaudeBuiltinToolRegistry_AugmentsKnownTypedBuiltinsFromBody(t)
+}

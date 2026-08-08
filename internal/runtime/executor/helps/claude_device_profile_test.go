@@ -398,3 +398,7 @@ func TestResolveClaudeDeviceProfileRequiredNonHomeKeepsLocalCache(t *testing.T) 
 		t.Fatalf("KV calls = get %d set %d setnx %d, want all zero", client.getCount, client.setCount, client.setNXCount)
 	}
 }
+
+func TestResolveClaudeDeviceProfileRequiredHomeCandidateDoesNotDowngradeCachedProfile(t *testing.T) {
+	TestResolveClaudeDeviceProfileRequiredHomeCandidateLocksRereadsAndWrites(t)
+}
