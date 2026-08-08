@@ -20,7 +20,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
@@ -1214,7 +1213,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				closeCursorSessions([]*cursorSession{session})
 			} else {
 				log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
-				result, resumeErr := e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+				result, resumeErr := e.resumeWithToolResults(ctx, sessionKey, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
 				if resumeErr == nil {
 					return result, nil
 				}
@@ -1320,19 +1319,25 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var outMu sync.Mutex
 	currentOut := chunks
 	currentOutputCtx := ctx
+	closeCurrentOutput := func() {
+		outMu.Lock()
+		if currentOut != nil {
+			closeCursorStreamChunkChannel(currentOut)
+			currentOut = nil
+		}
+		outMu.Unlock()
+	}
 
 	emitToOut := func(chunk cliproxyexecutor.StreamChunk) bool {
 		outMu.Lock()
-		out := currentOut
-		outputCtx := currentOutputCtx
-		outMu.Unlock()
-		if out == nil {
+		defer outMu.Unlock()
+		if currentOut == nil {
 			return false
 		}
 		select {
-		case out <- chunk:
+		case currentOut <- chunk:
 			return true
-		case <-outputCtx.Done():
+		case <-currentOutputCtx.Done():
 			return false
 		case <-sessionCtx.Done():
 			return false
@@ -1457,17 +1462,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()
 
-				// Close current output to end the current HTTP SSE response
-				outMu.Lock()
-				if currentOut != nil {
-					closeCursorStreamChunkChannel(currentOut)
-					currentOut = nil
-				}
-				outMu.Unlock()
-
-				// Create new resume output channel, reuse the same toolResultCh
+				// Publish the resumable session before closing the current output.
+				// An immediate tool-result request must never observe an empty session map.
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
 				log.Debugf("cursor: saving session %s for MCP tool resume (tools=%d first=%s)", sessionKey, len(execs), execs[0].ToolName)
+				outMu.Lock()
 				session := &cursorSession{
 					stream:             stream,
 					blobStore:          params.BlobStore,
@@ -1478,7 +1477,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					authID:             authID,
 					conversationID:     conversationId,
 					executionSessionID: conversation.ExecutionSessionID,
-					toolResultCh:       toolResultCh, // reuse same channel across rounds
+					toolResultCh:       toolResultCh,
 					resumeOutCh:        resumeOut,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context) {
 						outMu.Lock()
@@ -1498,6 +1497,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				e.sessions[sessionKey] = session
 				e.mu.Unlock()
 				storedToolSession = session
+
+				// Publish and close under the output lock. An immediate resume can
+				// find the session, but switchOutput cannot replace currentOut until
+				// the original response has been closed.
+				if currentOut != nil {
+					closeCursorStreamChunkChannel(currentOut)
+					currentOut = nil
+				}
+				outMu.Unlock()
 
 				// processH2SessionFrames will now block on toolResultCh (inline wait loop)
 				// while continuing to handle KV messages.
@@ -1530,21 +1538,24 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// A partial response must terminate with an error, never a successful stop.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
 				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream interrupted after partial response: %w", streamErr))})
+				closeCurrentOutput()
+				sessionCancel()
+				stream.Close()
 				return
 			} else if upstreamStarted.Load() {
 				log.Warnf("cursor: stream error after upstream bootstrap (auth=%s conv=%s): %v", authID, conversationId, streamErr)
 				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))})
+				closeCurrentOutput()
+				sessionCancel()
+				stream.Close()
 				return
 			} else {
 				// No protocol activity yet; let the conductor retry another credential.
 				log.Warnf("cursor: stream error before upstream bootstrap (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
 				streamErrCh <- streamErr
-				outMu.Lock()
-				if currentOut != nil {
-					closeCursorStreamChunkChannel(currentOut)
-					currentOut = nil
-				}
-				outMu.Unlock()
+				closeCurrentOutput()
+				sessionCancel()
+				stream.Close()
 				return
 			}
 		}
@@ -1566,6 +1577,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		sendDoneSwitchable()
 
+		// Close whatever output channel is still active
+		closeCurrentOutput()
+		sessionCancel()
+		stream.Close()
 	}()
 
 	// Wait for either upstream protocol activity, first visible payload, a
@@ -1585,6 +1600,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 // handling KV messages the whole time.
 func (e *CursorExecutor) resumeWithToolResults(
 	ctx context.Context,
+	sessionKey string,
 	session *cursorSession,
 	parsed *parsedOpenAIRequest,
 	from, to sdktranslator.Format,
@@ -1603,13 +1619,46 @@ func (e *CursorExecutor) resumeWithToolResults(
 		return nil, fmt.Errorf("cursor: no tool result matches pending calls")
 	}
 
+	closeSession := func() {
+		if session.cancel != nil {
+			session.cancel()
+		}
+		if session.stream != nil {
+			session.stream.Close()
+		}
+	}
+	restoreSession := func() {
+		restored := false
+		e.mu.Lock()
+		if _, exists := e.sessions[sessionKey]; !exists {
+			e.sessions[sessionKey] = session
+			restored = true
+		}
+		e.mu.Unlock()
+		if !restored {
+			// A concurrent request replaced this session while ownership was in
+			// transit. It is no longer safe to restore, so release its resources.
+			closeSession()
+		}
+	}
 	if session.toolResultCh == nil {
+		closeSession()
 		return nil, fmt.Errorf("cursor: session has no toolResultCh (stale session?)")
 	}
 	if session.resumeOutCh == nil {
+		closeSession()
 		return nil, fmt.Errorf("cursor: session has no resumeOutCh")
 	}
+	if err := ctx.Err(); err != nil {
+		restoreSession()
+		return nil, err
+	}
+	if !cursorToolResultsMatchPending(parsed.ToolResults, session.pending) {
+		restoreSession()
+		return nil, fmt.Errorf("cursor: tool results do not match all pending tool calls")
+	}
 	if cursorH2StreamDone(session.stream) {
+		closeSession()
 		return nil, fmt.Errorf("cursor: session stream is no longer active")
 	}
 
@@ -1626,6 +1675,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 	select {
 	case session.toolResultCh <- matchedToolResults:
 	case <-ctx.Done():
+		restoreSession()
 		return nil, ctx.Err()
 	case <-session.stream.Done():
 		return nil, fmt.Errorf("cursor: session stream closed before tool result injection")
@@ -3153,15 +3203,10 @@ func cursorMcpArgKeys(args map[string][]byte) []string {
 }
 
 func normalizeToolCallID(id string) string {
-	var normalized strings.Builder
-	for _, r := range id {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			fmt.Fprintf(&normalized, "_u%04x_", r)
-			continue
-		}
-		normalized.WriteRune(r)
+	if id == "" {
+		return ""
 	}
-	return normalized.String()
+	return "cursor_call_" + base64.RawURLEncoding.EncodeToString([]byte(id))
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
