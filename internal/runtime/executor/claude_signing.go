@@ -489,6 +489,19 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return entry.Cloak
 }
 
+// experimentalCCHSigningEnabled preserves the previous overlay symbol while
+// delegating to the current credential-and-endpoint CCH policy. The legacy
+// config flag no longer enables signing for arbitrary custom API-key endpoints.
+func experimentalCCHSigningEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	_ = cfg
+	apiKey, baseURL := claudeCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/messages?beta=true"
+	return claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, endpoint)
+}
+
 func rebuildMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["rebuild_mid_system_message"]), "true") {
 		return true

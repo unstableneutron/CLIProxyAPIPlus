@@ -272,7 +272,7 @@ func xaiBaseURLSource(baseURL string) string {
 
 // logXAIResolvedBaseURL emits a console log for the resolved upstream base URL.
 func logXAIResolvedBaseURL(ctx context.Context, baseURL string) {
-	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", baseURL, xaiBaseURLSource(baseURL))
+	helps.LogWithRequestID(ctx).Infof("xai: using base_url=%s source=%s", xaiBaseURLForLog(baseURL), xaiBaseURLSource(baseURL))
 }
 
 func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
