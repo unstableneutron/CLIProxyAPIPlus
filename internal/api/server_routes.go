@@ -816,6 +816,16 @@ func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
 	for _, entry := range entries {
 		out = append(out, formatHomeClaudeModel(entry))
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		displayNameI, _ := out[i]["display_name"].(string)
+		displayNameJ, _ := out[j]["display_name"].(string)
+		if displayNameI != displayNameJ {
+			return displayNameI < displayNameJ
+		}
+		idI, _ := out[i]["id"].(string)
+		idJ, _ := out[j]["id"].(string)
+		return idI < idJ
+	})
 	return out
 }
 
