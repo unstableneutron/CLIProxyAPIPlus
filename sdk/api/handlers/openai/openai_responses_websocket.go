@@ -612,13 +612,22 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
 
+		attemptedUpstreamModes := make(map[string]string)
+		attemptedIncrementalInput := make(map[string]bool)
 		runner := responsesWebsocketTurnRunner{
 			execute: func(attemptCtx context.Context, attemptPayload []byte, preferredAuthID string, excludedAuthIDs []string, selected func(string)) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
 				attemptCtx = handlers.WithExcludedAuthIDs(attemptCtx, excludedAuthIDs)
 				if strings.TrimSpace(preferredAuthID) != "" && !routeOverridesModelResolution {
 					attemptCtx = handlers.WithPinnedAuthID(attemptCtx, preferredAuthID)
 				}
-				attemptCtx = handlers.WithAdditionalSelectedAuthIDCallback(attemptCtx, selected)
+				attemptCtx = handlers.WithAdditionalSelectedAuthIDCallback(attemptCtx, func(authID string) {
+					authID = strings.TrimSpace(authID)
+					if selectedAuth, ok := sessionAuthByID(authID); ok {
+						attemptedUpstreamModes[authID] = upstreamModeForAuth(selectedAuth)
+						attemptedIncrementalInput[authID] = websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata)
+					}
+					selected(authID)
+				})
 				data, _, errs := h.ExecuteStreamWithAuthManager(attemptCtx, h.HandlerType(), modelName, attemptPayload, "")
 				return data, errs
 			},
@@ -708,13 +717,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		lastResponsePendingToolCallIDs = append([]string(nil), completedPendingToolCallIDs...)
 
 		attemptedUpstreamMode := responsesWebsocketUpstreamModeHTTP
+		selectedAuthSupportsIncrementalInput := false
 		pinnedAuthID = ""
 		if outcome.SelectedAuthID != "" {
-			if selectedAuth, ok := sessionAuthByID(outcome.SelectedAuthID); ok && selectedAuth != nil {
+			if selectedMode, ok := attemptedUpstreamModes[outcome.SelectedAuthID]; ok {
+				attemptedUpstreamMode = selectedMode
+			}
+			if supportsIncrementalInput, ok := attemptedIncrementalInput[outcome.SelectedAuthID]; ok {
+				selectedAuthSupportsIncrementalInput = supportsIncrementalInput
+			} else if selectedAuth, ok := sessionAuthByID(outcome.SelectedAuthID); ok && selectedAuth != nil {
 				attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
-				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					rememberPinnedAuth(outcome.SelectedAuthID, modelName)
-				}
+				selectedAuthSupportsIncrementalInput = websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata)
+			}
+			if selectedAuthSupportsIncrementalInput {
+				rememberPinnedAuth(outcome.SelectedAuthID, modelName)
 			}
 		}
 		upstreamMode = attemptedUpstreamMode
