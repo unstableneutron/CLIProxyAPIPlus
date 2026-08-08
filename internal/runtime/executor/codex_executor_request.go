@@ -359,6 +359,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	util.ApplyCustomQueryParamsFromAttrs(r, attrs)
 	applyCodexCloakingHeaders(r.Header, cfg)
 }
 
