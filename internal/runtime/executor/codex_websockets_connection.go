@@ -25,6 +25,9 @@ import (
 const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
+	codexResponsesWebsocketPongWait        = 90 * time.Second
+	codexResponsesWebsocketPingPeriod      = 30 * time.Second
+	codexResponsesWebsocketPingWriteTO     = 10 * time.Second
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
 

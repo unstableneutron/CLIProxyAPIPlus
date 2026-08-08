@@ -67,8 +67,19 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, errReplay
 	}
 
+	executionSessionID := executionSessionIDFromOptions(opts)
+	if xaiInputHasItemType(body, "compaction_trigger") {
+		if streamResult, handled, errCompact := e.executeCompactionTriggerFromWebsocketContext(ctx, auth, req, opts, body, executionSessionID); handled || errCompact != nil {
+			return streamResult, errCompact
+		}
+	}
+
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
+	if err != nil {
+		return nil, err
+	}
+	wsURL, err = applyCodexWebsocketQueryParams(wsURL, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +101,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	authLabel = auth.Label
 	authType, authValue = auth.AccountInfo()
 
-	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
@@ -254,6 +264,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
+	if streamResult, handled := e.executeCodexContinueFoldWebsocketStream(ctx, auth, req, responseFormat, to, clientBody, clientBody, upstreamBody, identityState, reporter, executionSessionID, sess, readCh, conn, wsReqBody, wsURL, wsHeaders, upstreamHeaders, authID, baseURL, baseModel); handled {
+		return streamResult, nil
+	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -288,6 +301,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
+		transcriptState := getXAIWebsocketIDState(e.idStore, executionSessionID)
+		recordedTranscript := false
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for {
@@ -356,7 +371,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
 				return
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErr(payload); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErr(payload); ok && opts.ExecutionLifecycle != nil {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				if sess != nil {
@@ -385,7 +400,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if eventType == "response.completed" || eventType == "response.done" {
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
+				payload = completedPayload
 				cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
+				if !recordedTranscript && transcriptState != nil {
+					transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, completedPayload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
+					recordedTranscript = true
+				}
 				if detail, ok := helps.ParseCodexUsage(completedPayload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -393,12 +413,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
+				if isCodexWebsocketFailureTerminalEvent(eventType) {
+					reporter.PublishFailure(ctx, codexWebsocketTerminalResponseErr(payload))
+				}
 				if !send(cliproxyexecutor.StreamChunk{Payload: clientPayload}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
 				}
-				if isTerminalEvent {
+				if isCodexWebsocketTerminalEvent(eventType) || isTerminalEvent {
 					return
 				}
 				continue
@@ -407,6 +430,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = normalizeCodexWebsocketCompletion(payload)
 			if eventType == "response.completed" || eventType == "response.done" {
 				payload = completedPayload
+			} else if isCodexWebsocketFailureTerminalEvent(eventType) {
+				reporter.PublishFailure(ctx, codexWebsocketTerminalResponseErr(payload))
 			}
 			eventType = gjson.GetBytes(payload, "type").String()
 			clientPayload = applyCodexIdentityExposeResponsePayload(payload, identityState)
@@ -419,7 +444,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if isCodexWebsocketTerminalEvent(eventType) {
 				return
 			}
 		}

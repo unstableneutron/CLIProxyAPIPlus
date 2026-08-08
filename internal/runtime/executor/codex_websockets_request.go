@@ -322,3 +322,11 @@ func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, ke
 		target.Set(key, val)
 	}
 }
+
+func applyCodexWebsocketQueryParams(wsURL string, auth *cliproxyauth.Auth) (string, error) {
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	return util.ApplyCustomQueryParamsToURL(wsURL, attrs)
+}
