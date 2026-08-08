@@ -136,6 +136,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue

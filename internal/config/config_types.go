@@ -683,6 +683,9 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// QueryParams optionally adds extra URL query parameters for requests sent to this provider.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
+
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
