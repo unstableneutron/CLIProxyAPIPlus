@@ -282,6 +282,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	seedTriedWithExcludedAuthIDs(tried, opts.Metadata)
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
