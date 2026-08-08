@@ -645,12 +645,13 @@ func TestCursorCanResumeToolSessionRejectsInteractionToolCallsWithoutExecMetadat
 func TestCursorResumeWithToolResultsRejectsMissingStream(t *testing.T) {
 	exec := &CursorExecutor{}
 	session := &cursorSession{
+		pending:      []pendingMcpExec{{ToolCallId: "call_read"}},
 		toolResultCh: make(chan []toolResultInfo, 1),
 		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
 	}
 	parsed := &parsedOpenAIRequest{ToolResults: []toolResultInfo{{ToolCallId: "call_read", Content: "ok"}}}
 
-	if _, err := exec.resumeWithToolResults(context.Background(), session, parsed, sdktranslator.FromString(""), sdktranslator.FromString(""), cliproxyexecutor.Request{}, nil, nil, false); err == nil {
+	if _, err := exec.resumeWithToolResults(context.Background(), "cursor-test:missing-stream", session, parsed, sdktranslator.FromString(""), sdktranslator.FromString(""), cliproxyexecutor.Request{}, nil, nil, false); err == nil {
 		t.Fatal("resumeWithToolResults() error = nil, want missing/dead stream error")
 	}
 }
@@ -1427,7 +1428,7 @@ func cursorStreamPayload(chunks []cliproxyexecutor.StreamChunk) string {
 }
 
 func TestCursorExecuteReturnsReasoningAndUsage(t *testing.T) {
-	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, usage *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, usage *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		onText("plan", true)
 		onText("answer", false)
 		usage.addOutput(7)
@@ -1458,7 +1459,7 @@ func TestCursorExecuteReturnsReasoningAndUsage(t *testing.T) {
 
 func TestCursorExecuteReasoningOnlyErrorIsFailure(t *testing.T) {
 	boom := errors.New("upstream reset")
-	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		onText("partial thought", true)
 		return boom
 	})
@@ -1469,7 +1470,7 @@ func TestCursorExecuteReasoningOnlyErrorIsFailure(t *testing.T) {
 
 func TestCursorExecuteStreamPostChunkErrorIsTerminalError(t *testing.T) {
 	boom := errors.New("upstream reset")
-	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		onText("partial", false)
 		return boom
 	})
@@ -1498,16 +1499,16 @@ func TestCursorExecuteStreamClaudeThinkingToolBoundaryAndResume(t *testing.T) {
 	rawToolCallID := "call-a b\n\t"
 	clientToolCallID := normalizeToolCallID(rawToolCallID)
 	processorResult := make(chan error, 1)
-	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, usage *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), onMcpExec func([]pendingMcpExec), toolResultCh <-chan []toolResultInfo, usage *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		onText("plan", true)
 		onText("answer", false)
-		onMcpExec(pendingMcpExec{
+		onMcpExec([]pendingMcpExec{{
 			ExecMsgId:  1,
 			ExecId:     "exec-1",
 			ToolCallId: clientToolCallID,
 			ToolName:   "read",
 			Args:       `{"path":"README.md"}`,
-		})
+		}})
 		select {
 		case results := <-toolResultCh:
 			if len(results) != 1 || results[0].ToolCallId != clientToolCallID || results[0].Content != "file contents" {
@@ -1696,7 +1697,7 @@ func TestCursorStreamCoalescerFlushesOnCadence(t *testing.T) {
 
 func TestCursorExecuteStreamCancellationBeforeFirstChunkReturns(t *testing.T) {
 	processorExited := make(chan struct{})
-	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		<-ctx.Done()
 		close(processorExited)
 		return nil
@@ -1718,6 +1719,7 @@ func TestCursorResumeCancellationRestoresSession(t *testing.T) {
 	e := NewCursorExecutor(nil)
 	sessionKey := "cursor-test:conversation"
 	session := &cursorSession{
+		pending:      []pendingMcpExec{{ToolCallId: "call-1"}},
 		toolResultCh: make(chan []toolResultInfo, 1),
 		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
 		cancel:       func() {},
@@ -1759,6 +1761,7 @@ func TestCursorResumeInvalidSessionIsDiscarded(t *testing.T) {
 	canceled := false
 	session := &cursorSession{
 		stream:      stream,
+		pending:     []pendingMcpExec{{ToolCallId: "call-1"}},
 		resumeOutCh: make(chan cliproxyexecutor.StreamChunk, 1),
 		cancel:      func() { canceled = true },
 	}
@@ -1795,7 +1798,10 @@ func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) 
 	sessionKey := "cursor-test:pending-session"
 	switched := false
 	session := &cursorSession{
-		pending:      []pendingMcpExec{{ToolCallId: "call-good"}},
+		pending: []pendingMcpExec{
+			{ToolCallId: "call-good"},
+			{ToolCallId: "call-missing"},
+		},
 		toolResultCh: make(chan []toolResultInfo, 1),
 		resumeOutCh:  make(chan cliproxyexecutor.StreamChunk, 1),
 		cancel:       func() {},
@@ -1805,7 +1811,7 @@ func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) 
 		context.Background(),
 		sessionKey,
 		session,
-		&parsedOpenAIRequest{ToolResults: []toolResultInfo{{ToolCallId: "call-wrong", Content: "ok"}}},
+		&parsedOpenAIRequest{ToolResults: []toolResultInfo{{ToolCallId: "call-good", Content: "ok"}}},
 		sdktranslator.FromString("openai"),
 		sdktranslator.FromString("openai"),
 		cursorTestRequest(true),
@@ -1831,8 +1837,8 @@ func TestCursorResumeRejectsUnmatchedToolResultAndRestoresSession(t *testing.T) 
 
 func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
 	clientID := normalizeToolCallID("call immediate")
-	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), onMcpExec func(pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
-		onMcpExec(pendingMcpExec{ToolCallId: clientID, ToolName: "read", Args: `{}`})
+	e := newCursorExecutorHarness(func(ctx context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, _ func(string, bool), onMcpExec func([]pendingMcpExec), toolResultCh <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
+		onMcpExec([]pendingMcpExec{{ExecMsgId: 1, ExecId: "exec-1", ToolCallId: clientID, ToolName: "read", Args: `{}`}})
 		select {
 		case results := <-toolResultCh:
 			if len(results) != 1 || results[0].ToolCallId != clientID {
@@ -1894,7 +1900,7 @@ func TestCursorToolBoundaryImmediateResumeUsesPublishedSession(t *testing.T) {
 func TestCursorExecuteStreamConcurrentCancelAndFirstEmit(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		gate := make(chan struct{})
-		e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+		e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 			<-gate
 			onText("first", false)
 			return nil
@@ -1927,7 +1933,7 @@ func TestCursorExecuteStreamConcurrentCancelAndFirstEmit(t *testing.T) {
 
 func TestCursorExecuteStreamBackpressureCancellationUnblocks(t *testing.T) {
 	processorExited := make(chan struct{})
-	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		defer close(processorExited)
 		for i := 0; i < 256; i++ {
 			onText("x", i%2 == 0)
@@ -1949,7 +1955,7 @@ func TestCursorExecuteStreamBackpressureCancellationUnblocks(t *testing.T) {
 }
 
 func TestCursorOpenAIExecutorEmitsNoDoneChunk(t *testing.T) {
-	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func(pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte)) error {
+	e := newCursorExecutorHarness(func(_ context.Context, _ cursorStream, _ map[string][]byte, _ anyMCPTools, onText func(string, bool), _ func([]pendingMcpExec), _ <-chan []toolResultInfo, _ *cursorTokenUsage, _ func([]byte), _ func(), _ *cursorRawProtoLogger) error {
 		onText("ok", false)
 		return nil
 	})
