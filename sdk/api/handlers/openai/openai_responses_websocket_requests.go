@@ -45,6 +45,24 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, last
 	}
 }
 
+func stripUnsupportedResponsesWebsocketInputItemMetadata(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+	sanitized := payload
+	for i, item := range input.Array() {
+		if !item.Get("metadata").Exists() {
+			continue
+		}
+		updated, errDelete := sjson.DeleteBytes(sanitized, fmt.Sprintf("input.%d.metadata", i))
+		if errDelete == nil {
+			sanitized = updated
+		}
+	}
+	return sanitized
+}
+
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {

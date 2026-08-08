@@ -9,6 +9,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai/responsesreplay"
 )
 
+func responsesErrorStatus(errMsg *interfaces.ErrorMessage) int {
+	if errMsg == nil {
+		return 0
+	}
+	if errMsg.StatusCode > 0 {
+		return errMsg.StatusCode
+	}
+	if statusErr, ok := errMsg.Error.(interface{ StatusCode() int }); ok && statusErr != nil {
+		return statusErr.StatusCode()
+	}
+	return 0
+}
+
 type responsesReplayExecution struct {
 	ctx       context.Context
 	modelName string
