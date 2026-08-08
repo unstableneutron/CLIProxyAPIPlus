@@ -2086,7 +2086,7 @@ func (d *cursorExecDeduper) mark(msg *cursorproto.DecodedServerMessage) bool {
 	return true
 }
 
-func cursorSendInvalidMcpExecResult(stream *cursorproto.H2Stream, msg *cursorproto.DecodedServerMessage, reason string) bool {
+func cursorSendInvalidMcpExecResult(stream cursorStream, msg *cursorproto.DecodedServerMessage, reason string) bool {
 	if stream == nil || msg == nil || msg.InteractionToolCall || (msg.ExecMsgId == 0 && strings.TrimSpace(msg.ExecId) == "") {
 		return false
 	}
