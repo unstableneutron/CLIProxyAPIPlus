@@ -124,3 +124,31 @@ func TestBuildConfigModelsDisplayNameFallback(t *testing.T) {
 		t.Fatalf("DisplayName = %q, want upstream model name", model.DisplayName)
 	}
 }
+
+func TestBuildCodexConfigModelsPreservesBuiltinDisplayNames(t *testing.T) {
+	models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{
+		{Name: "gpt-image-1.5", DisplayName: "Configured Image 1.5"},
+		{Name: "gpt-image-2", DisplayName: "Configured Image 2"},
+	}})
+
+	wantDisplayNames := map[string]string{
+		"gpt-image-1.5": "Configured Image 1.5",
+		"gpt-image-2":   "Configured Image 2",
+	}
+	for _, model := range models {
+		wantDisplayName, ok := wantDisplayNames[model.ID]
+		if !ok {
+			continue
+		}
+		if model.DisplayName != wantDisplayName {
+			t.Errorf("%s DisplayName = %q, want %q", model.ID, model.DisplayName, wantDisplayName)
+		}
+		if model.Object != "model" || model.OwnedBy != "openai" || model.Type != "openai" || model.Created != 1704067200 || model.Version != model.ID || model.UserDefined {
+			t.Errorf("%s builtin metadata was not preserved: %#v", model.ID, model)
+		}
+		delete(wantDisplayNames, model.ID)
+	}
+	for modelID := range wantDisplayNames {
+		t.Errorf("missing builtin model %s", modelID)
+	}
+}

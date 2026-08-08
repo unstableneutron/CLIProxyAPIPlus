@@ -905,7 +905,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return registry.GetCodexProModels()
 	}
 
-	models := buildConfigModels(entry.Models, "openai", "openai")
+	models := registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
 	configuredDisplayNames := make(map[string]string, len(entry.Models))
 	seenConfiguredModels := make(map[string]struct{}, len(entry.Models))
 	for i := range entry.Models {
