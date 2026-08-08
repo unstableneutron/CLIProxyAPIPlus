@@ -90,7 +90,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
 	if provider == "gemini" {
-		return nil
+		return nil, nil
 	}
 	if ctx.PluginAuthParser != nil {
 		auths, handled, errParse := parsePluginFileAuths(ctx.PluginAuthParser, pluginapi.AuthParseRequest{
@@ -246,13 +246,6 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		}
 	}
 	if provider == "qoder" {
-		// Deserialize the on-disk JSON directly into the storage struct so
-		// every persisted field — including the cached model_configs map
-		// written by SaveTokenToFile — survives restarts and hot-reloads.
-		// Field-by-field copying from the metadata map drops nested types
-		// like ModelConfigs (map[string]json.RawMessage) and would force
-		// buildQoderModelConfig to fail with "model config cache is empty"
-		// whenever /algo/api/v2/model/list is unavailable.
 		var storage qoderauth.QoderTokenStorage
 		if errStorage := json.Unmarshal(data, &storage); errStorage == nil {
 			if storage.Type == "" {
@@ -263,8 +256,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
-			for _, v := range virtuals {
-				ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
+			for _, virtual := range virtuals {
+				ApplyAuthExcludedModelsMeta(virtual, cfg, perAccountExcluded, "oauth")
 			}
 			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
 			out = append(out, a)

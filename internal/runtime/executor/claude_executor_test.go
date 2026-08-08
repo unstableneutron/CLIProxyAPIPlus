@@ -613,7 +613,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, nil, cfg, nil, false)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", "MacOS", "arm64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
@@ -4517,12 +4517,15 @@ func TestApplyCloaking_EmptyCredentialModeRespectsDefaultAndGlobalPrecedence(t *
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, errCloaking := applyCloaking(context.Background(), tt.cfg, &cliproxyauth.Auth{}, payload, "claude-3-5-sonnet-20241022", "test-key")
+			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, &cliproxyauth.Auth{}, payload, "test-key", false, false)
 			if errCloaking != nil {
 				t.Fatalf("applyCloaking() error = %v", errCloaking)
 			}
-			if gotCloaked := !bytes.Equal(got, payload); gotCloaked != tt.wantCloaked {
+			if gotCloaked != tt.wantCloaked {
 				t.Fatalf("applyCloaking() cloaked = %t, want %t", gotCloaked, tt.wantCloaked)
+			}
+			if payloadChanged := !bytes.Equal(got, payload); payloadChanged != tt.wantCloaked {
+				t.Fatalf("applyCloaking() payload changed = %t, want %t", payloadChanged, tt.wantCloaked)
 			}
 		})
 	}

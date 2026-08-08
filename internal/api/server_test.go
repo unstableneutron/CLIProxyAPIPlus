@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -1221,6 +1222,7 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 	})
 
 	server := newTestServer(t)
+	server.mgmt.SetUsageStatistics(internalusage.NewRequestStatistics())
 
 	redisqueue.Enqueue([]byte(`{"id":1}`))
 	redisqueue.Enqueue([]byte(`{"id":2}`))
@@ -1413,6 +1415,36 @@ func TestManagementAmpRoutesRegistered(t *testing.T) {
 	for _, route := range expected {
 		if _, ok := routes[route]; !ok {
 			t.Errorf("missing management route %s", route)
+		}
+	}
+}
+
+func TestPlusServerModulesCallbacksAndCompatibilityRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := make(map[string]struct{})
+	for _, route := range server.engine.Routes() {
+		routes[route.Method+" "+route.Path] = struct{}{}
+	}
+
+	expected := []string{
+		"POST /api/internal",
+		"GET /auth/*path",
+		"POST /api/provider/:provider/v1/messages",
+		"GET /v0/oauth/kiro",
+		"GET /v0/oauth/kiro/start",
+		"POST /v0/oauth/kiro/import",
+		"GET /gitlab/callback",
+		"GET /google/callback",
+		"GET /kiro/callback",
+		"GET /iflow/callback",
+		"POST /api/event_logging/batch",
+		"GET /v0/management/copilot-quota",
+	}
+	for _, route := range expected {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("missing Plus compatibility route %s", route)
 		}
 	}
 }

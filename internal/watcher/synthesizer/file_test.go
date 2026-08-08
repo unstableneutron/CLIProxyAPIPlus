@@ -195,7 +195,10 @@ func TestSynthesizeAuthFileRejectsRawGeminiBeforePluginDispatch(t *testing.T) {
 				}),
 			}
 
-			auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini.json"), tt.raw)
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
 			if len(auths) != 0 {
 				t.Fatalf("SynthesizeAuthFile() len = %d, want no auths for raw Gemini input", len(auths))
 			}
@@ -857,7 +860,10 @@ func TestSynthesizeAuthFileExpandsTrustedGeminiCLIPluginAuth(t *testing.T) {
 		}),
 	}
 
-	auths := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini-cli.json"), data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "gemini-cli.json"), data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 3 {
 		t.Fatalf("expected 3 auths (1 primary + 2 virtuals), got %d", len(auths))
 	}
@@ -916,7 +922,10 @@ func TestSynthesizeFileAuths_QoderPreservesModelConfigs(t *testing.T) {
 		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	auths := SynthesizeAuthFile(ctx, authPath, data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 1 {
 		t.Fatalf("expected 1 auth, got %d", len(auths))
 	}
@@ -970,7 +979,10 @@ func TestSynthesizeFileAuths_QoderHandlesMissingModelConfigs(t *testing.T) {
 		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	auths := SynthesizeAuthFile(ctx, authPath, data)
+	auths, errSynthesize := SynthesizeAuthFile(ctx, authPath, data)
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 1 {
 		t.Fatalf("expected 1 auth, got %d", len(auths))
 	}

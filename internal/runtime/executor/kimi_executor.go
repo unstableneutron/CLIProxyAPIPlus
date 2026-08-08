@@ -40,6 +40,7 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 			cfg:                     cfg,
 			requestLogProvider:      "kimi",
 			upstreamModelNormalizer: normalizeKimiUpstreamModel,
+			cacheControlDisabled:    true,
 		},
 		cfg: cfg,
 	}
