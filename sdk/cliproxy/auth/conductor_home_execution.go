@@ -87,6 +87,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
+			recordProxySelection(execCtx, preparedAuth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
 			if restoreExecutionModel {

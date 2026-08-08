@@ -53,16 +53,16 @@ func isAPIKeyAuth(auth *Auth) bool {
 }
 
 func isConfiguredOpenAICompatAuth(auth *Auth) bool {
+	if isOpenAICompatAPIKeyAuth(auth) {
+		return true
+	}
 	if !isConfiguredModelRoutingAuth(auth) {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return true
 	}
-	if auth.Attributes == nil {
-		return false
-	}
-	return strings.TrimSpace(auth.Attributes["compat_name"]) != ""
+	return auth.Attributes != nil && strings.TrimSpace(auth.Attributes["compat_name"]) != ""
 }
 
 func openAICompatProviderKey(auth *Auth) string {
@@ -395,8 +395,16 @@ func configuredModelAliasEntries(cfg *internalconfig.Config, auth *Auth) []model
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "commandcode":
+		if entry := resolveCommandCodeAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	case "vertex":
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
+	case "bedrock":
+		if entry := resolveBedrockAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
 	default:
@@ -551,8 +559,16 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "commandcode":
+			if entry := resolveCommandCodeAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		case "vertex":
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "bedrock":
+			if entry := resolveBedrockAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		default:
@@ -673,8 +689,12 @@ func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSn
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "xai":
 		upstreamModel = resolveUpstreamModelForXAIAPIKey(cfg, auth, requestedModel)
+	case "commandcode":
+		upstreamModel = resolveUpstreamModelForCommandCodeAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "bedrock":
+		upstreamModel = resolveUpstreamModelForBedrockAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}

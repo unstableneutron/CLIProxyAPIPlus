@@ -336,6 +336,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
 			if restoreExecutionModel {
@@ -463,6 +464,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			recordProxySelection(execCtx, auth, routeModel, upstreamModel)
 			execReq := req
 			execReq.Model = upstreamModel
 			if restoreExecutionModel {

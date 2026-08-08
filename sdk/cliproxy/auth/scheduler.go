@@ -490,8 +490,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 
 // scheduledAuthPredicate filters request-ineligible auths before scheduler state advances.
 func scheduledAuthPredicate(eligibility authSelectionEligibility, tried map[string]struct{}, pinnedAuthID string, requirePositiveWeight bool) func(*scheduledAuth) bool {
+	notTried := triedPredicate(tried)
 	return func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil || !eligibility.allows(entry.auth) {
+		if !notTried(entry) || !eligibility.allows(entry.auth) {
 			return false
 		}
 		if requirePositiveWeight && (entry.meta == nil || entry.meta.weight <= 0) {
@@ -499,11 +500,6 @@ func scheduledAuthPredicate(eligibility authSelectionEligibility, tried map[stri
 		}
 		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
 			return false
-		}
-		if len(tried) > 0 {
-			if _, ok := tried[entry.auth.ID]; ok {
-				return false
-			}
 		}
 		return true
 	}

@@ -176,9 +176,19 @@ func compileAPIKeyModelCapabilitiesForAuth(cfg *internalconfig.Config, auth *Aut
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 			compileConfiguredModelCapabilities(out, entry.Models, "xai")
 		}
+	case "commandcode":
+		if entry := resolveCommandCodeAPIKeyConfig(cfg, auth); entry != nil {
+			for i := range entry.Models {
+				addConfiguredModelCapability(out, entry.Models[i].Name, entry.Models[i].Alias, "commandcode", nil, false)
+			}
+		}
 	case "vertex":
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 			compileConfiguredModelCapabilities(out, entry.Models, "gemini")
+		}
+	case "bedrock":
+		if entry := resolveBedrockAPIKeyConfig(cfg, auth); entry != nil {
+			compileConfiguredModelCapabilities(out, entry.Models, "bedrock")
 		}
 	default:
 		providerKey, compatName := "", ""

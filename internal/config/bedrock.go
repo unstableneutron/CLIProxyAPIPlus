@@ -31,8 +31,10 @@ type BedrockProvider struct {
 	ExcludedModels []string          `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
-func (p BedrockProvider) GetAPIKey() string  { return p.ResolvedAPIKey() }
-func (p BedrockProvider) GetBaseURL() string { return p.BaseURL }
+func (p BedrockProvider) GetAPIKey() string   { return p.ResolvedAPIKey() }
+func (p BedrockProvider) GetBaseURL() string  { return p.BaseURL }
+func (p BedrockProvider) GetPrefix() string   { return p.Prefix }
+func (p BedrockProvider) GetProxyURL() string { return p.ProxyURL }
 
 type BedrockAuth struct {
 	Type      string            `yaml:"type,omitempty" json:"type,omitempty"`
@@ -51,10 +53,11 @@ type BedrockModel struct {
 	Thinking     *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
-func (m BedrockModel) GetName() string        { return m.Name }
-func (m BedrockModel) GetAlias() string       { return m.Alias }
-func (m BedrockModel) GetDisplayName() string { return m.DisplayName }
-func (m BedrockModel) GetForceMapping() bool  { return m.ForceMapping }
+func (m BedrockModel) GetName() string                        { return m.Name }
+func (m BedrockModel) GetAlias() string                       { return m.Alias }
+func (m BedrockModel) GetDisplayName() string                 { return m.DisplayName }
+func (m BedrockModel) GetForceMapping() bool                  { return m.ForceMapping }
+func (m BedrockModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
 func (p BedrockProvider) ResolvedAPIKey() string {
 	if key := strings.TrimSpace(p.Auth.APIKey); key != "" {

@@ -87,6 +87,10 @@ func (k CommandCodeKey) GetAPIKey() string { return k.APIKey }
 
 func (k CommandCodeKey) GetBaseURL() string { return k.BaseURL }
 
+func (k CommandCodeKey) GetPrefix() string { return k.Prefix }
+
+func (k CommandCodeKey) GetProxyURL() string { return k.ProxyURL }
+
 // CommandCodeModel describes a mapping between an alias and the upstream model name.
 type CommandCodeModel struct {
 	Name         string `yaml:"name" json:"name"`

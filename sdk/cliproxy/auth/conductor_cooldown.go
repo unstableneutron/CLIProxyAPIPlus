@@ -1490,7 +1490,7 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
 	}
-	return clienterror.IsItemNotPersisted(err.Message)
+	return isRequestScopedNotFoundMessage(err.Message)
 }
 
 func isRequestScopedResultError(err *Error) bool {

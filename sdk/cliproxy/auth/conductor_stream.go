@@ -219,6 +219,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
+		recordProxySelection(ctx, auth, routeModel, execModel)
 		execReq := req
 		execReq.Model = execModel
 		if executionModel != "" {

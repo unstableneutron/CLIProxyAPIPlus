@@ -499,7 +499,18 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 
 func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsBlocked(t *testing.T) {
 	t.Parallel()
+	assertUnavailableWithoutNextRetryIsBlocked(t)
+}
 
+// Keep the pre-sync test symbol while adopting Original's corrected behavior:
+// permanent unavailability without a recovery timestamp remains blocked.
+func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
+	t.Parallel()
+	assertUnavailableWithoutNextRetryIsBlocked(t)
+}
+
+func assertUnavailableWithoutNextRetryIsBlocked(t *testing.T) {
+	t.Helper()
 	now := time.Now()
 	model := "test-model"
 	auth := &Auth{
