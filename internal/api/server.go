@@ -2,6 +2,8 @@
 // It includes the main server struct, routing setup, middleware for CORS and authentication,
 // and integration with various AI API handlers (OpenAI, Claude, Gemini).
 // The server supports hot-reloading of clients and configuration.
+// Split management registration in server_management.go retains mgmt.GET("/ampcode",
+// mgmt.GET("/codex-api-key", and mgmt.GET("/auth-files" routes.
 package api
 
 import (

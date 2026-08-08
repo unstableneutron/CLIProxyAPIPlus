@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -24,6 +25,13 @@ type CodexWebsocketsExecutor struct {
 	store   *codexWebsocketSessionStore
 	idStore *xaiWebsocketIDStateStore
 }
+
+// Keep split websocket compatibility seams compile-bound to the root executor.
+var (
+	_ = patchCodexCompletedOutput
+	_ = appendCodexWebsocketCompactionPendingInputItems
+	_ = helps.MarkCodexMissingPreviousResponseRequestScoped
+)
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
 	return &CodexWebsocketsExecutor{

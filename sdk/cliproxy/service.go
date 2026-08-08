@@ -1,6 +1,7 @@
 // Package cliproxy provides the core service implementation for the CLI Proxy API.
 // It includes service lifecycle management, authentication handling, file watching,
 // and integration with various AI service providers through a unified interface.
+// Split registration remains in service_executors.go under case "commandcode":.
 package cliproxy
 
 import (
