@@ -392,7 +392,7 @@ func cursorPendingExecsCanUseExecResult(pending []pendingMcpExec) bool {
 	return true
 }
 
-func cursorH2StreamDone(stream *cursorproto.H2Stream) bool {
+func cursorH2StreamDone(stream cursorStream) bool {
 	if stream == nil {
 		return true
 	}

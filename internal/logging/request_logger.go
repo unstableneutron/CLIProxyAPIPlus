@@ -6,6 +6,7 @@ package logging
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -144,6 +145,9 @@ type FileRequestLogger struct {
 	errorLogsMaxFiles int
 
 	homeEnabled bool
+
+	requestEventsMu sync.RWMutex
+	requestEvents   *AsyncRequestEventLogger
 }
 
 // NewFileRequestLogger creates a new file-based request logger.

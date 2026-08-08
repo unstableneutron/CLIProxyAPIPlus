@@ -198,7 +198,9 @@ type CodexConfig struct {
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
-	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	OptimizeMultiAgentV2 bool                  `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	TLSProfile           CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
+	ContinueThinking     CodexContinueThinking `yaml:"continue-thinking" json:"continue-thinking"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
@@ -485,6 +487,9 @@ type CodexKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -495,6 +500,9 @@ type CodexKey struct {
 	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
 	AlphaSearch bool `yaml:"alpha-search,omitempty" json:"alpha-search,omitempty"`
 
+	// ResponsesState controls whether HTTP/SSE Responses previous_response_id state is supported.
+	ResponsesState ResponsesStateCapability `yaml:"responses-state,omitempty" json:"responses-state,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -503,6 +511,9 @@ type CodexKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// QueryParams optionally adds extra URL query parameters for requests sent with this key.
+	QueryParams map[string]string `yaml:"query-params,omitempty" json:"query-params,omitempty"`
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`

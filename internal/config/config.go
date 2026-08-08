@@ -128,6 +128,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CommandCodeKey defines a list of Command Code API key configurations.
+	CommandCodeKey []CommandCodeKey `yaml:"commandcode-api-key" json:"commandcode-api-key"`
+
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
@@ -159,9 +162,14 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	Bedrock []BedrockProvider `yaml:"bedrock" json:"bedrock"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// AmpCode contains the fork-maintained Amp CLI routing and management configuration.
+	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`

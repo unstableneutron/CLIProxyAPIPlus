@@ -175,7 +175,9 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 		e := entries[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ResponsesState = ResponsesStateCapability(strings.TrimSpace(string(e.ResponsesState)))
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
 			continue
