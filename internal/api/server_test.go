@@ -138,6 +138,9 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	if statusCode == 0 {
 		statusCode = http.StatusOK
 	}
+	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
+		statusCode = e.statuses[e.httpCalls-1]
+	}
 	responseBody := e.responseByAuth[selected.ID]
 	responseReader := e.responseBody
 	if responseReader == nil {
@@ -145,10 +148,6 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 			responseBody = `{"results":[{"url":"https://example.com"}]}`
 		}
 		responseReader = io.NopCloser(strings.NewReader(responseBody))
-	}
-	statusCode := http.StatusOK
-	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
-		statusCode = e.statuses[e.httpCalls-1]
 	}
 	return &http.Response{
 		StatusCode: statusCode,
@@ -823,7 +822,7 @@ func TestCodexAlphaSearchSanitizesResponsesOnlyFields(t *testing.T) {
 	}
 }
 
-func TestCodexAlphaSearchCredentialPolicy(t *testing.T) {
+func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
 	newServer := func(t *testing.T, credentials ...*auth.Auth) (*Server, *codexSearchCaptureExecutor) {
 		t.Helper()
 		server := newTestServer(t)

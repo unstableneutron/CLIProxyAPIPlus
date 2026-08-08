@@ -300,6 +300,21 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	c.AbortWithStatus(http.StatusNotFound)
 }
 
+func (s *Server) noRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") || strings.HasPrefix(path, "/v0/resource/plugins/") {
+		s.pluginManagementNoRoute(c)
+		return
+	}
+	s.handleChatGPTBackendPassthroughNoRoute(c)
+}
+
 func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
 		if c != nil {

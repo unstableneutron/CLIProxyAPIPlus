@@ -36,8 +36,26 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
 	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
 	return logger
+}
+
+func requestEventConfigFromConfig(cfg *config.Config) logging.FileRequestEventConfig {
+	if cfg == nil {
+		return logging.FileRequestEventConfig{}
+	}
+	requestEvents := cfg.RequestEvents.Normalized()
+	return logging.FileRequestEventConfig{
+		LoggerOptions: logging.RequestEventLoggerOptions{
+			Enabled:              requestEvents.IsEnabled() && !cfg.CommercialMode,
+			QueueSize:            requestEvents.QueueSize,
+			MaxQueuedPayloadSize: int64(requestEvents.MaxQueuedPayloadMB) * 1024 * 1024,
+			FlushInterval:        time.Duration(requestEvents.FlushIntervalMS) * time.Millisecond,
+		},
+		MaxFileSize:     int64(requestEvents.MaxFileSizeMB) * 1024 * 1024,
+		WriteBufferSize: requestEvents.WriteBufferSizeKB * 1024,
+	}
 }
 
 func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {

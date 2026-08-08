@@ -663,7 +663,23 @@ func rewriteCodexAgentMessageContent(payload []byte) []byte {
 }
 
 func codexSpawnAgentToolPaths(payload []byte) []string {
-	return codexToolPathsByNames(payload, map[string]struct{}{"spawn_agent": {}})
+	paths := make([]string, 0, 1)
+	collectCodexSpawnAgentToolPaths(gjson.GetBytes(payload, "tools"), "tools", &paths)
+
+	input := gjson.GetBytes(payload, "input")
+	if input.IsArray() {
+		for index, item := range input.Array() {
+			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+				continue
+			}
+			collectCodexSpawnAgentToolPaths(item.Get("tools"), fmt.Sprintf("input.%d.tools", index), &paths)
+		}
+	}
+	return paths
+}
+
+func collectCodexSpawnAgentToolPaths(tools gjson.Result, path string, paths *[]string) {
+	collectCodexToolPathsByNames(tools, path, paths, map[string]struct{}{"spawn_agent": {}})
 }
 
 // codexCollaborationMessageToolPaths discovers function tools named

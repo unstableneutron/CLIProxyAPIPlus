@@ -76,6 +76,14 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 
+	if oldCfg == nil || oldCfg.CommercialMode != cfg.CommercialMode || oldCfg.RequestEvents.Normalized() != cfg.RequestEvents.Normalized() {
+		if setter, ok := s.requestLogger.(interface {
+			ConfigureRequestEvents(logging.FileRequestEventConfig)
+		}); ok {
+			setter.ConfigureRequestEvents(requestEventConfigFromConfig(cfg))
+		}
+	}
+
 	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)

@@ -85,6 +85,9 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// ampModule owns fork-maintained Amp routing and configuration reload behavior.
+	ampModule *ampmodule.AmpModule
+
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
 
@@ -106,6 +109,12 @@ type Server struct {
 
 	exampleAPIKeySafeModeEnabled bool
 	exampleAPIKeySafeModeActive  atomic.Bool
+
+	// chatGPTBackendPassthroughBaseURL is the upstream base for gated ChatGPT backend passthrough routes.
+	chatGPTBackendPassthroughBaseURL string
+
+	// chatGPTBackendPassthroughClient optionally overrides the upstream HTTP client in tests.
+	chatGPTBackendPassthroughClient *http.Client
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -255,7 +264,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
-	engine.NoRoute(s.pluginManagementNoRoute)
+	engine.NoRoute(s.noRoute)
 
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
