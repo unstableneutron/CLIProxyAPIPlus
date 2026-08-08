@@ -1100,6 +1100,51 @@ func establishWebsocketUpstreamDisconnectFixture(t *testing.T, conn *websocket.C
 	return sessionID
 }
 
+type websocketReadResult struct {
+	messageType int
+	payload     []byte
+	err         error
+}
+
+// armWebsocketReadAfterServerReady uses the websocket control path as a barrier.
+// Receiving the pong proves the handler returned to its read loop after the
+// preceding data frame and no longer owns the downstream write lock.
+func armWebsocketReadAfterServerReady(t *testing.T, conn *websocket.Conn) <-chan websocketReadResult {
+	t.Helper()
+
+	pongPayload := "ready-" + t.Name()
+	pongCh := make(chan struct{}, 1)
+	conn.SetPongHandler(func(appData string) error {
+		if appData == pongPayload {
+			select {
+			case pongCh <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	})
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+
+	resultCh := make(chan websocketReadResult, 1)
+	go func() {
+		messageType, payload, err := conn.ReadMessage()
+		resultCh <- websocketReadResult{messageType: messageType, payload: payload, err: err}
+	}()
+	if err := conn.WriteControl(websocket.PingMessage, []byte(pongPayload), time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("write websocket readiness ping: %v", err)
+	}
+	select {
+	case <-pongCh:
+	case result := <-resultCh:
+		t.Fatalf("websocket closed before readiness pong: %v", result.err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for websocket readiness pong")
+	}
+	return resultCh
+}
+
 func (e *websocketUpstreamDisconnectExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
@@ -2877,23 +2922,17 @@ func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) 
 			}
 			defer func() { _ = conn.Close() }()
 			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
+			resultCh := armWebsocketReadAfterServerReady(t, conn)
 
 			executor.TriggerDisconnect(sessionID, &websocket.CloseError{
 				Code: websocket.CloseMessageTooBig,
 				Text: "message too big",
 			})
 
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			result := <-resultCh
 			var closeErr *websocket.CloseError
-			for {
-				_, _, err = conn.ReadMessage()
-				if err == nil {
-					continue
-				}
-				if !errors.As(err, &closeErr) {
-					t.Fatalf("expected downstream websocket close error, got %v", err)
-				}
-				break
+			if !errors.As(result.err, &closeErr) {
+				t.Fatalf("expected downstream websocket close error, got %v", result.err)
 			}
 			if closeErr.Code != websocket.CloseMessageTooBig {
 				t.Fatalf("downstream close code = %d, want %d", closeErr.Code, websocket.CloseMessageTooBig)
@@ -2928,6 +2967,7 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 	defer func() { _ = conn.Close() }()
 
 	sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
+	resultCh := armWebsocketReadAfterServerReady(t, conn)
 
 	cyberPolicyErr := websocketPinnedFailoverStatusError{
 		status: http.StatusBadRequest,
@@ -2935,13 +2975,13 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 	}
 	executor.TriggerDisconnect(sessionID, cyberPolicyErr)
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	msgType, payload, err := conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("expected downstream text error payload before socket close, got read error: %v", err)
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("expected downstream text error payload before socket close, got read error: %v", result.err)
 	}
-	if msgType != websocket.TextMessage {
-		t.Fatalf("msgType = %d, want TextMessage (%d)", msgType, websocket.TextMessage)
+	payload := result.payload
+	if result.messageType != websocket.TextMessage {
+		t.Fatalf("msgType = %d, want TextMessage (%d)", result.messageType, websocket.TextMessage)
 	}
 
 	if gjson.GetBytes(payload, "type").String() != "error" {
@@ -3019,17 +3059,17 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 			defer func() { _ = conn.Close() }()
 
 			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
+			resultCh := armWebsocketReadAfterServerReady(t, conn)
 			executor.TriggerDisconnect(sessionID, tc.err)
 
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			_, payload, errRead := conn.ReadMessage()
-			if errRead == nil {
-				t.Fatalf("non-client upstream error was exposed: %s", payload)
+			result := <-resultCh
+			if result.err == nil {
+				t.Fatalf("non-client upstream error was exposed: %s", result.payload)
 			}
 			// Nothing may be written downstream: no error frame and no close frame
 			// carrying proxy-internal detail, so the client just reconnects.
 			var closeErr *websocket.CloseError
-			if errors.As(errRead, &closeErr) && closeErr.Code != websocket.CloseAbnormalClosure {
+			if errors.As(result.err, &closeErr) && closeErr.Code != websocket.CloseAbnormalClosure {
 				t.Fatalf("non-client upstream error produced a close frame: %#v", closeErr)
 			}
 		})
@@ -3067,13 +3107,14 @@ func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
 			defer func() { _ = conn.Close() }()
 
 			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
+			resultCh := armWebsocketReadAfterServerReady(t, conn)
 			executor.TriggerDisconnect(sessionID, websocketPinnedFailoverStatusError{status: status, msg: cyberPolicyBody})
 
-			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			_, payload, errRead := conn.ReadMessage()
-			if errRead != nil {
-				t.Fatalf("cyber_policy rejection was hidden at status %d: %v", status, errRead)
+			result := <-resultCh
+			if result.err != nil {
+				t.Fatalf("cyber_policy rejection was hidden at status %d: %v", status, result.err)
 			}
+			payload := result.payload
 			if got := gjson.GetBytes(payload, "error.code").String(); got != "cyber_policy" {
 				t.Fatalf("error.code = %q, want cyber_policy: %s", got, payload)
 			}
