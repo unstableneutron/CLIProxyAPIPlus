@@ -54,10 +54,13 @@ const (
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
 type CursorExecutor struct {
-	cfg         *config.Config
-	mu          sync.Mutex
-	sessions    map[string]*cursorSession
-	checkpoints map[string]*savedCheckpoint // keyed by conversationId
+	cfg                   *config.Config
+	mu                    sync.Mutex
+	sessions              map[string]*cursorSession
+	checkpoints           map[string]*savedCheckpoint // keyed by conversationId
+	openStream            func(string) (cursorStream, error)
+	openStreamWithHeaders func(map[string]string) (cursorStream, error)
+	processFrames         cursorFrameProcessor
 }
 
 // savedCheckpoint stores the server's conversation_checkpoint_update for reuse.
@@ -69,19 +72,42 @@ type savedCheckpoint struct {
 	updatedAt          time.Time
 }
 
+type cursorStream interface {
+	ID() string
+	Write([]byte) error
+	Data() <-chan []byte
+	Done() <-chan struct{}
+	Err() error
+	Close()
+}
+
+type cursorFrameProcessor func(
+	ctx context.Context,
+	stream cursorStream,
+	blobStore map[string][]byte,
+	mcpTools []cursorproto.McpToolDef,
+	onText func(text string, isThinking bool),
+	onMcpExec func(execs []pendingMcpExec),
+	toolResultCh <-chan []toolResultInfo,
+	tokenUsage *cursorTokenUsage,
+	onCheckpoint func(data []byte),
+	onActivity func(),
+	rawLogger *cursorRawProtoLogger,
+) error
+
 type cursorSession struct {
-	stream             *cursorproto.H2Stream
+	stream             cursorStream
 	blobStore          map[string][]byte
 	mcpTools           []cursorproto.McpToolDef
 	pending            []pendingMcpExec
-	cancel             context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
+	cancel             context.CancelFunc
 	createdAt          time.Time
-	authID             string // auth file ID that created this session (for multi-account isolation)
+	authID             string
 	conversationID     string
 	executionSessionID string
-	toolResultCh       chan []toolResultInfo                      // receives tool results from the next HTTP request
-	resumeOutCh        chan cliproxyexecutor.StreamChunk          // output channel for resumed response
-	switchOutput       func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
+	toolResultCh       chan []toolResultInfo
+	resumeOutCh        chan cliproxyexecutor.StreamChunk
+	switchOutput       func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context)
 }
 
 type pendingMcpExec struct {
@@ -571,9 +597,23 @@ func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
 		cfg:         cfg,
 		sessions:    make(map[string]*cursorSession),
 		checkpoints: make(map[string]*savedCheckpoint),
+		openStreamWithHeaders: func(headers map[string]string) (cursorStream, error) {
+			return openCursorH2StreamWithHeaders(headers)
+		},
+		processFrames: processH2SessionFrames,
 	}
 	go e.cleanupLoop()
 	return e
+}
+
+func (e *CursorExecutor) openCursorStream(accessToken string, headers map[string]string) (cursorStream, error) {
+	if e != nil && e.openStream != nil {
+		return e.openStream(accessToken)
+	}
+	if e != nil && e.openStreamWithHeaders != nil {
+		return e.openStreamWithHeaders(headers)
+	}
+	return openCursorH2StreamWithHeaders(headers)
 }
 
 // Identifier implements ProviderExecutor.
@@ -1019,7 +1059,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestHeaders := cursorH2RequestHeaders(accessToken)
 	cursorRecordRunAPIRequest(ctx, e.cfg, auth, requestHeaders, requestBytes, framedRequest)
 
-	stream, err := openCursorH2StreamWithHeaders(requestHeaders)
+	stream, err := e.openCursorStream(accessToken, requestHeaders)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -1044,7 +1084,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var pendingToolCalls []pendingMcpExec
 	usage := &cursorTokenUsage{}
 	usage.setInputEstimate(len(payload))
-	if streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
+	if streamErr := e.processFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 		func(text string, isThinking bool) {
 			if isThinking {
 				thinkingText.WriteString(text)
@@ -1244,7 +1284,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestHeaders := cursorH2RequestHeaders(accessToken)
 	cursorRecordRunAPIRequest(ctx, e.cfg, auth, requestHeaders, requestBytes, framedRequest)
 
-	stream, err := openCursorH2StreamWithHeaders(requestHeaders)
+	stream, err := e.openCursorStream(accessToken, requestHeaders)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -1279,12 +1319,24 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// it switches to `resumeOutCh` (created by resumeWithToolResults).
 	var outMu sync.Mutex
 	currentOut := chunks
+	currentOutputCtx := ctx
 
-	emitToOut := func(chunk cliproxyexecutor.StreamChunk) {
+	emitToOut := func(chunk cliproxyexecutor.StreamChunk) bool {
 		outMu.Lock()
 		out := currentOut
+		outputCtx := currentOutputCtx
 		outMu.Unlock()
-		sendCursorStreamChunk(out, chunk)
+		if out == nil {
+			return false
+		}
+		select {
+		case out <- chunk:
+			return true
+		case <-outputCtx.Done():
+			return false
+		case <-sessionCtx.Done():
+			return false
+		}
 	}
 
 	// Wrap sendChunk/sendDone to use emitToOut
@@ -1342,16 +1394,16 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		default:
 		}
 	}
-	emitToOut = func(chunk cliproxyexecutor.StreamChunk) {
+	emitToOut = func(chunk cliproxyexecutor.StreamChunk) bool {
 		if chunk.Bootstrap {
 			signalBootstrapActivity()
-			return
+			return true
 		}
 		if len(chunk.Payload) > 0 {
 			signalBootstrapActivity()
 			cursorSignalOnce(payloadSent, &visiblePayloadSent)
 		}
-		origEmitToOut(chunk)
+		return origEmitToOut(chunk)
 	}
 
 	go func() {
@@ -1387,7 +1439,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			emitTextDelta,
 		)
 
-		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
+		streamErr := e.processFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			streamCoalescer.push,
 			func(execs []pendingMcpExec) {
 				if len(execs) == 0 {
@@ -1428,11 +1480,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					executionSessionID: conversation.ExecutionSessionID,
 					toolResultCh:       toolResultCh, // reuse same channel across rounds
 					resumeOutCh:        resumeOut,
-					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
+					switchOutput: func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context) {
 						outMu.Lock()
 						currentOut = ch
-						// Reset translator state so the new HTTP response gets
-						// a fresh message_start, content_block_start, etc.
+						currentOutputCtx = outputCtx
 						streamParam = nil
 						// New response needs its own message ID and fresh per-message
 						// tool-call indexes. OpenAI streaming indexes are scoped to
@@ -1476,15 +1527,16 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if streamErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			if visiblePayloadSent.Load() {
-				// Chunks were already sent to client — can't transparently retry.
-				// Preserve existing behavior for post-content Cursor stream errors.
+				// A partial response must terminate with an error, never a successful stop.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
+				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream interrupted after partial response: %w", streamErr))})
+				return
 			} else if upstreamStarted.Load() {
 				log.Warnf("cursor: stream error after upstream bootstrap (auth=%s conv=%s): %v", authID, conversationId, streamErr)
 				emitToOut(cliproxyexecutor.StreamChunk{Err: classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))})
 				return
 			} else {
-				// No protocol activity yet — propagate error for transparent conductor retry.
+				// No protocol activity yet; let the conductor retry another credential.
 				log.Warnf("cursor: stream error before upstream bootstrap (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
 				streamErrCh <- streamErr
 				outMu.Lock()
@@ -1567,7 +1619,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 	// processH2SessionFrames unblocks and starts emitting text, it writes
 	// to the resumeOutCh which the new HTTP handler is reading from.
 	if session.switchOutput != nil {
-		session.switchOutput(session.resumeOutCh)
+		session.switchOutput(session.resumeOutCh, ctx)
 	}
 
 	// Inject tool results — this unblocks the waiting processH2SessionFrames.
@@ -1620,7 +1672,7 @@ func cursorTraceParent() string {
 	return "00-" + traceID + "-" + spanID + "-01"
 }
 
-func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
+func cursorH2Heartbeat(ctx context.Context, stream cursorStream) {
 	ticker := time.NewTicker(cursorHeartbeatInterval)
 	defer ticker.Stop()
 	for {
@@ -2020,7 +2072,7 @@ func cursorShouldEndAfterKV(receivedContent bool, msgType cursorproto.ServerMess
 
 func processH2SessionFrames(
 	ctx context.Context,
-	stream *cursorproto.H2Stream,
+	stream cursorStream,
 	blobStore map[string][]byte,
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
@@ -3101,12 +3153,15 @@ func cursorMcpArgKeys(args map[string][]byte) []string {
 }
 
 func normalizeToolCallID(id string) string {
-	return strings.Map(func(r rune) rune {
+	var normalized strings.Builder
+	for _, r := range id {
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return -1
+			fmt.Fprintf(&normalized, "_u%04x_", r)
+			continue
 		}
-		return r
-	}, id)
+		normalized.WriteRune(r)
+	}
+	return normalized.String()
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
