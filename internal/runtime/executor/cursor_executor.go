@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
@@ -1035,8 +1036,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	defer sessionCancel()
 	go cursorH2Heartbeat(sessionCtx, stream)
 
-	// Collect full text from streaming response, or capture tool calls if the
-	// model pauses for MCP execution.
+	// Collect full text from the streaming response while keeping reasoning and tool calls separate.
 	var fullText strings.Builder
 	var thinkingText strings.Builder
 	var pendingToolCalls []pendingMcpExec
@@ -1311,9 +1311,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for _, d := range done {
 				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(d)})
 			}
-		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")})
 		}
+		// No explicit [DONE] in the non-translated (OpenAI) case: the HTTP
+		// handler already writes `data: [DONE]` when the chunk channel closes,
+		// so emitting one here produced a duplicated [DONE] marker downstream.
 	}
 
 	// Pre-response error detection for transparent failover:
@@ -1373,6 +1374,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		rawProtoLogger := newCursorRawProtoLogger(ctx, e.cfg)
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
+				// Emit thinking as the standard OpenAI `reasoning_content` delta
+				// field instead of inline <think>...</think> tags. Inline tags
+				// pollute `content` for OpenAI clients and end up rendered as
+				// literal text in Anthropic/Claude clients; `reasoning_content`
+				// is understood by the translators (mapped to thinking blocks
+				// for Claude) and by downstream proxies.
 				if isThinking {
 					sendChunkSwitchable(cursorStreamingThinkingDeltaJSON(text), "")
 				} else {
@@ -2909,7 +2916,7 @@ func jsonString(s string) string {
 
 func cursorPendingMcpExecFromMessage(msg *cursorproto.DecodedServerMessage) pendingMcpExec {
 	decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
-	toolCallId := msg.McpToolCallId
+	toolCallId := normalizeToolCallID(msg.McpToolCallId)
 	if toolCallId == "" {
 		toolCallId = uuid.New().String()
 	}
@@ -2939,6 +2946,15 @@ func cursorMcpArgKeys(args map[string][]byte) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func normalizeToolCallID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, id)
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
