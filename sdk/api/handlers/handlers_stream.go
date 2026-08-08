@@ -415,6 +415,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				bootstrapStreamErr = chunk.Err
 				return
 			}
+			if chunk.Bootstrap {
+				// The auth conductor consumes the provider marker and re-emits it to
+				// prove that retry is no longer safe. Leave later chunks for the
+				// forwarding goroutine without exposing the marker downstream.
+				return
+			}
 			if len(chunk.Payload) == 0 {
 				continue
 			}

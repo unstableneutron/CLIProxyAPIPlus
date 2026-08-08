@@ -205,6 +205,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
+	if responsesStateMode := responsesStateModeFromContext(ctx); responsesStateMode != "" {
+		meta[coreexecutor.ResponsesStateModeMetadataKey] = responsesStateMode
+	}
 	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
 		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
@@ -457,6 +460,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
+	if requestCtx != nil {
+		if trace := logging.GetTraceContext(requestCtx); trace.Traceparent != "" {
+			newCtx = logging.WithTraceContext(newCtx, trace)
+		}
+		newCtx = logging.WithProxyStatusHolderFrom(newCtx, requestCtx)
+	}
 
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
@@ -470,6 +479,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	if h != nil && h.AuthManager != nil {
+		callbackCtx := newCtx
+		newCtx = WithAdditionalSelectedAuthIDCallback(newCtx, func(authID string) {
+			h.recordSelectedUpstream(callbackCtx, authID)
+		})
+	}
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())

@@ -42,6 +42,21 @@ func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) cont
 	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
 }
 
+// WithAdditionalSelectedAuthIDCallback composes a callback with any existing selection observer.
+func WithAdditionalSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	previous := selectedAuthIDCallbackFromContext(ctx)
+	if previous == nil {
+		return WithSelectedAuthIDCallback(ctx, callback)
+	}
+	return WithSelectedAuthIDCallback(ctx, func(authID string) {
+		previous(authID)
+		callback(authID)
+	})
+}
+
 // PrepareStreamModelRoute resolves a stream route once and stores it on the returned context for execution.
 // The boolean reports whether the route overrides normal model-to-provider resolution.
 func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerType string, modelName string, rawJSON []byte) (context.Context, bool) {
@@ -93,7 +108,11 @@ func headersFromContext(ctx context.Context) http.Header {
 		return nil
 	}
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.Request.Header.Clone()
+		headers := ginCtx.Request.Header.Clone()
+		headers.Del("Traceparent")
+		headers.Del("Tracestate")
+		headers.Del(ForceModelPrefixHeader)
+		return headers
 	}
 	return nil
 }
