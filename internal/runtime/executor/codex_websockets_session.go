@@ -23,6 +23,10 @@ var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 	sessions: make(map[string]*codexWebsocketSession),
 }
 
+var globalCodexWebsocketIDStates = &xaiWebsocketIDStateStore{
+	sessions: make(map[string]*xaiWebsocketIDState),
+}
+
 type websocketConnectionCloser struct {
 	conn *websocket.Conn
 	once sync.Once
@@ -399,6 +403,19 @@ func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
 		}
 		close(s.upstreamDisconnectCh)
 	})
+}
+
+func codexWebsocketTranscriptProvenance(auth *cliproxyauth.Auth, baseURL string, model string) websocketTranscriptProvenance {
+	authID := ""
+	if auth != nil {
+		authID = strings.TrimSpace(auth.ID)
+	}
+	return websocketTranscriptProvenance{
+		Provider: "codex",
+		AuthID:   authID,
+		BaseURL:  strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		Model:    strings.TrimSpace(model),
+	}
 }
 
 func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {

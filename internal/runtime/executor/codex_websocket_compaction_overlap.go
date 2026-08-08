@@ -3,10 +3,40 @@ package executor
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func codexWebsocketCompactionReplayInput(transcriptInput []byte, requestPayload []byte) []byte {
+	pendingItems := codexWebsocketCompactionPendingInputItems(requestPayload)
+	if len(pendingItems) == 0 {
+		return transcriptInput
+	}
+	transcriptItems := xaiJSONRawMessages(gjson.ParseBytes(transcriptInput))
+	if len(transcriptItems) == 0 {
+		return transcriptInput
+	}
+	transcriptItems = appendCodexWebsocketCompactionPendingInputItems(transcriptItems, pendingItems)
+	return xaiMarshalRawMessages(transcriptItems)
+}
+
+func codexWebsocketCompactionPendingInputItems(requestPayload []byte) []json.RawMessage {
+	input := gjson.GetBytes(requestPayload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return nil
+	}
+	items := xaiJSONRawMessages(input)
+	pendingItems := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(gjson.GetBytes(item, "type").String()) == "compaction_trigger" {
+			continue
+		}
+		pendingItems = append(pendingItems, bytes.Clone(item))
+	}
+	return pendingItems
+}
 
 func appendCodexWebsocketCompactionPendingInputItems(transcriptItems, pendingItems []json.RawMessage) []json.RawMessage {
 	overlap := codexWebsocketCompactionInputOverlap(transcriptItems, pendingItems)

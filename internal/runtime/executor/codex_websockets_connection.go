@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -104,20 +105,50 @@ func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) 
 	return body
 }
 
-func buildCodexWebsocketRequestBody(body []byte) []byte {
+func buildCodexWebsocketRequestBody(body []byte, websocketURL ...string) []byte {
+	wsURL := ""
+	if len(websocketURL) > 0 {
+		wsURL = websocketURL[0]
+	}
 	if len(body) == 0 {
 		return nil
+	}
+
+	requestBody := bytes.Clone(body)
+	if isChatGPTCodexBackendWebsocketURL(wsURL) {
+		requestBody = stripCodexWebsocketUnsupportedTokenLimits(requestBody)
 	}
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
-	body = helps.SanitizeCodexInputItemIDs(body)
-	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
+	requestBody = helps.SanitizeCodexInputItemIDs(requestBody)
+	wsReqBody, errSet := sjson.SetBytes(requestBody, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
+	fallback := bytes.Clone(requestBody)
+	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
+	return fallback
+}
+
+func stripCodexWebsocketUnsupportedTokenLimits(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
+	body, _ = sjson.DeleteBytes(body, "max_completion_tokens")
+	body, _ = sjson.DeleteBytes(body, "max_tokens")
 	return body
+}
+
+func isChatGPTCodexBackendWebsocketURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
+		return false
+	}
+	path := strings.ToLower(strings.TrimRight(parsed.EscapedPath(), "/"))
+	return path == "/backend-api/codex/responses" || strings.HasPrefix(path, "/backend-api/codex/responses/")
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

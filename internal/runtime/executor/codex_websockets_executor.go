@@ -21,13 +21,15 @@ import (
 type CodexWebsocketsExecutor struct {
 	*CodexExecutor
 
-	store *codexWebsocketSessionStore
+	store   *codexWebsocketSessionStore
+	idStore *xaiWebsocketIDStateStore
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
 	return &CodexWebsocketsExecutor{
 		CodexExecutor: NewCodexExecutor(cfg),
 		store:         globalCodexWebsocketSessionStore,
+		idStore:       globalCodexWebsocketIDStates,
 	}
 }
 
