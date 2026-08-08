@@ -1047,6 +1047,9 @@ func parseXAIWebsocketError(payload []byte) (error, bool) {
 	if wsErr, ok := parseCodexWebsocketError(payload); ok {
 		if statusError, okStatus := wsErr.(statusErrWithHeaders); okStatus {
 			xaiError := xaiStatusErr(statusError.code, payload)
+			// Apply normalized status (e.g. 403 bad-credentials -> 401) and any
+			// provider-specific retry hint while preserving websocket headers.
+			statusError.code = xaiError.code
 			if xaiError.retryAfter != nil {
 				statusError.retryAfter = xaiError.retryAfter
 			}
@@ -1658,6 +1661,11 @@ func NewXAIAutoExecutor(cfg *config.Config) *XAIAutoExecutor {
 }
 
 func (e *XAIAutoExecutor) Identifier() string { return "xai" }
+
+// UsesConfig reports whether the executor was created for cfg.
+func (e *XAIAutoExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.httpExec != nil && e.httpExec.cfg == cfg
+}
 
 func (e *XAIAutoExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if e == nil || e.httpExec == nil {
