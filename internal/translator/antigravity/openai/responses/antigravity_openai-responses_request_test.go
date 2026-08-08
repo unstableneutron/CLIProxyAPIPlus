@@ -265,3 +265,9 @@ func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeTho
 		t.Fatalf("parts[0].thoughtSignature = %q, want preserved Gemini signature. Output: %s", got, out)
 	}
 }
+
+// This alias retains the fork-overlay test symbol while running the newer
+// Original replacement coverage.
+func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeVisibleSignaturePlacement(t *testing.T) {
+	TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeThoughtSignaturePlacement(t)
+}

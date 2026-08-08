@@ -779,3 +779,17 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSign
 		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
 	}
 }
+
+// These aliases retain fork-overlay test symbols while running the newer
+// Original replacement coverage.
+func TestConvertGeminiRequestToAntigravity_AddsSkipSentinelToStringThoughtPart(t *testing.T) {
+	TestConvertGeminiRequestToAntigravity_LeavesUnsignedThoughtPartUnsigned(t)
+}
+
+func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
+	TestConvertGeminiRequestToAntigravity_ParallelFunctionCallsOnlyFirstGetsSentinel(t)
+}
+
+func TestConvertGeminiRequestToAntigravity_ReplacesClientSignatureOnTextPart(t *testing.T) {
+	TestConvertGeminiRequestToAntigravity_DropsIncompatibleClientSignatureOnTextPart(t)
+}

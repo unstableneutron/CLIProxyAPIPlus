@@ -404,6 +404,13 @@ func classifyGeminiThoughtSignatureEnvelope(decoded []byte) (GeminiThoughtSignat
 	return GeminiThoughtSignatureEnvelopeUnknown, false
 }
 
+// isGeminiField1Envelope remains available for fork-overlay compatibility.
+// The classifier intentionally keeps legacy Gemini 2.5 field-1 envelopes unknown.
+func isGeminiField1Envelope(decoded []byte) bool {
+	info, ok := inspectGeminiField1Envelope(decoded)
+	return ok && info.RecordCount > 0
+}
+
 func isGeminiField2Envelope(decoded []byte) bool {
 	info, ok := inspectGeminiField2Envelope(decoded)
 	return ok && info.RecordCount == 1 && info.OpaquePayloadLen > 0
@@ -421,6 +428,26 @@ func inspectGeminiEnvelope(decoded []byte, envelope GeminiThoughtSignatureEnvelo
 type geminiEnvelopeInfo struct {
 	RecordCount      int
 	OpaquePayloadLen int
+}
+
+func inspectGeminiField1Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
+	var info geminiEnvelopeInfo
+	offset := 0
+	for offset < len(decoded) {
+		num, typ, n := protowire.ConsumeTag(decoded[offset:])
+		if n < 0 || num != 1 || typ != protowire.BytesType {
+			return geminiEnvelopeInfo{}, false
+		}
+		offset += n
+		value, n := protowire.ConsumeBytes(decoded[offset:])
+		if n < 0 || !isLikelyGeminiOpaquePayload(value) {
+			return geminiEnvelopeInfo{}, false
+		}
+		info.RecordCount++
+		info.OpaquePayloadLen += len(value)
+		offset += n
+	}
+	return info, offset == len(decoded) && info.RecordCount > 0
 }
 
 func inspectGeminiField2Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {

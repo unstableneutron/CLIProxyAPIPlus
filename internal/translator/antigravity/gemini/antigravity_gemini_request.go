@@ -294,6 +294,10 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 }
 
 func SanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
+	return sanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
+}
+
+func sanitizeAntigravityClaudeGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {
 	var root map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(rawJSON))
 	decoder.UseNumber()

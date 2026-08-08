@@ -469,3 +469,25 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_NormalizesValidThinkingAndDrops
 		t.Fatalf("remaining second role = %q, want user", got)
 	}
 }
+
+// These aliases retain fork-overlay test symbols while running the newer
+// Original replacement coverage.
+func TestGeminiWrappedUUIDFunctionCallSignatureIsUnknown(t *testing.T) {
+	TestGeminiWrappedUUIDFunctionCallSignatureIsCompatible(t)
+}
+
+func TestInspectGeminiThoughtSignature_AcceptsGemini25Field1Envelope(t *testing.T) {
+	TestInspectGeminiThoughtSignature_RejectsGemini25Field1Envelope(t)
+}
+
+func TestInspectGrokEncryptedContent_RejectsGemini25Field1Envelope(t *testing.T) {
+	TestInspectGrokEncryptedContent_RetiredGemini25Field1Envelope(t)
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesReplacesField2WrappedUUIDFunctionCall(t *testing.T) {
+	TestSanitizeGeminiRequestThoughtSignaturesPreservesField2WrappedUUIDFunctionCall(t)
+}
+
+func TestValidateGeminiThoughtSignatures_FunctionCallRequiresSignature(t *testing.T) {
+	TestValidateGeminiThoughtSignatures_FirstFunctionCallRequiresSignature(t)
+}

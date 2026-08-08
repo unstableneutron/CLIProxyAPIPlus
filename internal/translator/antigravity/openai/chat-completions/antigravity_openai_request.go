@@ -610,3 +610,10 @@ func setAntigravityOpenAIRawIfDifferent(out []byte, path string, value gjson.Res
 	}
 	return updated
 }
+
+// antigravityOpenAIDefaultIncludeThoughts remains available for fork-overlay
+// compatibility; the canonical thinking pipeline now applies summary visibility.
+func antigravityOpenAIDefaultIncludeThoughts(modelName string) bool {
+	modelName = strings.ToLower(modelName)
+	return strings.Contains(modelName, "gemini-3")
+}
