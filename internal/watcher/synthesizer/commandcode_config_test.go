@@ -76,7 +76,10 @@ func TestConfigSynthesizer_CommandCodeKeys(t *testing.T) {
 
 func TestSynthesizeAuthFile_CommandCodeExtractsAPIKey(t *testing.T) {
 	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: "/auth", Now: time.Now(), IDGenerator: NewStableIDGenerator()}
-	auths := SynthesizeAuthFile(ctx, "/auth/commandcode.json", []byte(`{"type":"commandcode","apiKey":"user_file","label":"Command Code"}`))
+	auths, errSynthesize := SynthesizeAuthFile(ctx, "/auth/commandcode.json", []byte(`{"type":"commandcode","apiKey":"user_file","label":"Command Code"}`))
+	if errSynthesize != nil {
+		t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+	}
 	if len(auths) != 1 {
 		t.Fatalf("expected one auth, got %d", len(auths))
 	}

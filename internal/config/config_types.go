@@ -385,6 +385,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -581,6 +584,9 @@ type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -677,6 +683,9 @@ type OpenAICompatibility struct {
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
+	// APIKeyEnv names an environment variable containing an API key.
+	APIKeyEnv string `yaml:"api-key-env,omitempty" json:"api-key-env,omitempty"`
+
 	// Models defines the model configurations including aliases for routing.
 	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
 
@@ -697,6 +706,9 @@ type OpenAICompatibility struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Label is an optional display name for this credential in management views.
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.

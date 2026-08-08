@@ -135,6 +135,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.APIKeyEnv = strings.TrimSpace(e.APIKeyEnv)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.QueryParams = NormalizeQueryParams(e.QueryParams)
 		if e.BaseURL == "" {
