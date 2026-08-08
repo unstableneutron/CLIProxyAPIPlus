@@ -21,8 +21,9 @@ import (
 )
 
 type responsesWebsocketForwardOptions struct {
-	toolCacheTurn *responsesWebsocketToolCacheTurn
-	suppressError func(*interfaces.ErrorMessage) bool
+	toolCacheTurn             *responsesWebsocketToolCacheTurn
+	suppressError             func(*interfaces.ErrorMessage) bool
+	hideIncompleteStreamError bool
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -52,6 +53,42 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 
 	for {
+		if responsesWebsocketResultChannelsClosed(data, errs) {
+			if completed {
+				cancel(nil)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
+			}
+			errMsg := &interfaces.ErrorMessage{
+				StatusCode: http.StatusRequestTimeout,
+				Error:      fmt.Errorf("stream closed before response.completed"),
+			}
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+			if opts.suppressError != nil && opts.suppressError(errMsg) {
+				cancel(errMsg.Error)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
+			}
+			markAPIResponseTimestamp(c)
+			if opts.hideIncompleteStreamError {
+				_, errClose := writer.closeWithoutError()
+				cancel(errMsg.Error)
+				if errClose != nil {
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
+				}
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
+			}
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+			if errWrite == nil {
+				log.Infof(
+					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+					sessionID,
+					websocket.TextMessage,
+					websocketPayloadEventType(errorPayload),
+					websocketPayloadPreview(errorPayload),
+				)
+			}
+			cancel(errMsg.Error)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errWrite
+		}
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
@@ -94,22 +131,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
 		case chunk, ok := <-data:
 			if !ok {
-				if !completed {
-					errMsg := &interfaces.ErrorMessage{
-						StatusCode: http.StatusRequestTimeout,
-						Error:      fmt.Errorf("stream closed before response.completed"),
-					}
-					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-					markAPIResponseTimestamp(c)
-					_, errClose := writer.closeWithoutError()
-					cancel(errMsg.Error)
-					if errClose != nil {
-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errClose
-					}
-					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
-				}
-				cancel(nil)
-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
+				data = nil
+				continue
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)

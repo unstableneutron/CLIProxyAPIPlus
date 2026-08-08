@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 )
 
@@ -692,6 +694,22 @@ type websocketProviderCaptureExecutor struct {
 	websocketCaptureExecutor
 }
 
+type websocketProviderRouteHost struct{}
+
+func (*websocketProviderRouteHost) HasModelRouters() bool { return true }
+
+func (*websocketProviderRouteHost) RouteModel(_ context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+	if !gjson.GetBytes(req.Body, "route_to_claude").Bool() {
+		return pluginapi.ModelRouteResponse{}, false
+	}
+	return pluginapi.ModelRouteResponse{
+		Handled:     true,
+		TargetKind:  pluginapi.ModelRouteTargetProvider,
+		Target:      "claude",
+		TargetModel: "claude-provider-route-target",
+	}, true
+}
+
 type websocketCompactionCaptureExecutor struct {
 	mu             sync.Mutex
 	streamPayloads [][]byte
@@ -747,13 +765,16 @@ type websocketBootstrapFallbackExecutor struct {
 }
 
 type websocketDirectCaptureExecutor struct {
-	mu       sync.Mutex
-	provider string
-	authIDs  []string
-	payloads [][]byte
-	options  []coreexecutor.Options
-	done     chan struct{}
-	doneOnce sync.Once
+	mu                        sync.Mutex
+	provider                  string
+	failStatus                int
+	authIDs                   []string
+	models                    []string
+	payloads                  [][]byte
+	options                   []coreexecutor.Options
+	requiredUpstreamWebsocket []bool
+	done                      chan struct{}
+	doneOnce                  sync.Once
 }
 
 type websocketCanonicalRollbackExecutor struct {
@@ -848,19 +869,30 @@ func (e *websocketDirectCaptureExecutor) Execute(context.Context, *coreauth.Auth
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
-func (e *websocketDirectCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
 	}
 	e.mu.Lock()
 	e.authIDs = append(e.authIDs, authID)
+	e.models = append(e.models, req.Model)
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
 	e.options = append(e.options, opts)
+	e.requiredUpstreamWebsocket = append(e.requiredUpstreamWebsocket, coreexecutor.RequiredUpstreamWebsocket(ctx))
 	count := len(e.payloads)
+	failStatus := e.failStatus
 	e.mu.Unlock()
 
 	chunks := make(chan coreexecutor.StreamChunk, 1)
+	if failStatus > 0 {
+		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+			status: failStatus,
+			msg:    `{"error":{"message":"routed provider failed","type":"authentication_error","code":"invalid_api_key"}}`,
+		}}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
 	responseID := fmt.Sprintf("resp-%d", count)
 	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf("data: "+`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d","role":"assistant","content":[{"type":"output_text","text":"state-output-%d"}]}]}}`+"\n\n", responseID, count, count))}
 	close(chunks)
@@ -898,6 +930,18 @@ func (e *websocketDirectCaptureExecutor) AuthIDs() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketDirectCaptureExecutor) Models() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.models...)
+}
+
+func (e *websocketDirectCaptureExecutor) RequiredUpstreamWebsocketFlags() []bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]bool(nil), e.requiredUpstreamWebsocket...)
 }
 
 func (e *websocketDirectCaptureExecutor) Options() []coreexecutor.Options {
@@ -1018,12 +1062,53 @@ func (e *websocketUpstreamDisconnectExecutor) TriggerDisconnect(sessionID string
 	close(ch)
 }
 
+func registerWebsocketUpstreamDisconnectFixture(t *testing.T, manager *coreauth.Manager, executor *websocketUpstreamDisconnectExecutor) string {
+	t.Helper()
+	provider := executor.Identifier()
+	testName := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+	authID := "upstream-disconnect-" + provider + "-" + testName
+	modelName := authID + "-model"
+	auth := &coreauth.Auth{ID: authID, Provider: provider, Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register upstream disconnect auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	return modelName
+}
+
+func establishWebsocketUpstreamDisconnectFixture(t *testing.T, conn *websocket.Conn, executor *websocketUpstreamDisconnectExecutor, modelName string) string {
+	t.Helper()
+	request := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"connect upstream"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+		t.Fatalf("write subscription-triggering request: %v", errWrite)
+	}
+
+	var sessionID string
+	select {
+	case sessionID = <-executor.subscribed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream disconnect subscription")
+	}
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read subscription-triggering response: %v", errRead)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("subscription-triggering response type = %q, want completed: %s", got, payload)
+	}
+	return sessionID
+}
+
 func (e *websocketUpstreamDisconnectExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
 func (e *websocketUpstreamDisconnectExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-disconnect-fixture","output":[]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (e *websocketUpstreamDisconnectExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -2776,6 +2861,7 @@ func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) 
 			executor := &websocketUpstreamDisconnectExecutor{provider: provider, subscribed: make(chan string, 1)}
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.RegisterExecutor(executor)
+			modelName := registerWebsocketUpstreamDisconnectFixture(t, manager, executor)
 			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 			h := NewOpenAIResponsesAPIHandler(base)
 
@@ -2790,23 +2876,7 @@ func TestResponsesWebsocketMirrorsUpstreamMessageTooBigDisconnect(t *testing.T) 
 				t.Fatalf("dial websocket: %v", err)
 			}
 			defer func() { _ = conn.Close() }()
-			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"unsupported"}`)); errWrite != nil {
-				t.Fatalf("write websocket message: %v", errWrite)
-			}
-
-			var sessionID string
-			select {
-			case sessionID = <-executor.subscribed:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for upstream disconnect subscription")
-			}
-			_, payload, errRead := conn.ReadMessage()
-			if errRead != nil {
-				t.Fatalf("read subscription-triggering response: %v", errRead)
-			}
-			if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
-				t.Fatalf("subscription-triggering response type = %q, want error: %s", got, payload)
-			}
+			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
 
 			executor.TriggerDisconnect(sessionID, &websocket.CloseError{
 				Code: websocket.CloseMessageTooBig,
@@ -2841,6 +2911,7 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 	executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
+	modelName := registerWebsocketUpstreamDisconnectFixture(t, manager, executor)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 
@@ -2856,12 +2927,7 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 	}
 	defer func() { _ = conn.Close() }()
 
-	var sessionID string
-	select {
-	case sessionID = <-executor.subscribed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect subscription")
-	}
+	sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
 
 	cyberPolicyErr := websocketPinnedFailoverStatusError{
 		status: http.StatusBadRequest,
@@ -2936,6 +3002,7 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 			executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.RegisterExecutor(executor)
+			modelName := registerWebsocketUpstreamDisconnectFixture(t, manager, executor)
 			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 			h := NewOpenAIResponsesAPIHandler(base)
 
@@ -2951,12 +3018,7 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 			}
 			defer func() { _ = conn.Close() }()
 
-			var sessionID string
-			select {
-			case sessionID = <-executor.subscribed:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for upstream disconnect subscription")
-			}
+			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
 			executor.TriggerDisconnect(sessionID, tc.err)
 
 			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -2988,6 +3050,7 @@ func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
 			executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.RegisterExecutor(executor)
+			modelName := registerWebsocketUpstreamDisconnectFixture(t, manager, executor)
 			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 			h := NewOpenAIResponsesAPIHandler(base)
 
@@ -3003,12 +3066,7 @@ func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
 			}
 			defer func() { _ = conn.Close() }()
 
-			var sessionID string
-			select {
-			case sessionID = <-executor.subscribed:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for upstream disconnect subscription")
-			}
+			sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
 			executor.TriggerDisconnect(sessionID, websocketPinnedFailoverStatusError{status: status, msg: cyberPolicyBody})
 
 			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -3755,6 +3813,12 @@ func TestResponsesWebsocketClosesAfterNonRetryableClientError(t *testing.T) {
 	if got := len(executor.Payloads()); got != 2 {
 		t.Fatalf("executor payload count = %d, want 2", got)
 	}
+}
+
+func TestResponsesWebsocketRollsBackCanonicalTranscriptAfterNonRetryableError(t *testing.T) {
+	// Non-retryable client errors now terminate the websocket, which discards the
+	// whole session transcript instead of attempting an in-place third turn.
+	TestResponsesWebsocketClosesAfterNonRetryableClientError(t)
 }
 
 // itemNotPersistedUpstreamMessage is the verbatim upstream 404 text raised when a
@@ -4761,7 +4825,7 @@ func (e *websocketPinnedPrematureCloseExecutor) Payloads(authID string) [][]byte
 func TestResponsesWebsocketReleasesPinnedAuthAfterStreamClosed408(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
+	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-a", "auth-b"}}
 	executor := &websocketPinnedPrematureCloseExecutor{}
 	manager := coreauth.NewManager(nil, selector, nil)
 	manager.RegisterExecutor(executor)
@@ -4811,10 +4875,9 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterStreamClosed408(t *testing.T) 
 		}
 	}()
 
-	requests := []string{
-		`{"type":"response.create","model":"stream-model","input":[{"type":"message","id":"msg-1"}]}`,
-		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`,
-		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-3"}]}`,
+	firstRequest := `{"type":"response.create","model":"stream-model","input":[{"type":"message","id":"msg-1"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(firstRequest)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
 	}
 	if _, payload, errRead := conn.ReadMessage(); errRead != nil || gjson.GetBytes(payload, "type").String() != wsEventTypeCompleted {
 		t.Fatalf("first websocket response = %s, err=%v", payload, errRead)
@@ -4850,22 +4913,21 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterStreamClosed408(t *testing.T) 
 		t.Fatalf("full replay response = %s, err=%v", replayResponse, errReadReplay)
 	}
 	authIDs := executor.AuthIDs()
-	if len(authIDs) != 3 || authIDs[0] != "auth-a" || authIDs[1] != "auth-a" {
-		t.Fatalf("selected auth IDs = %v, want auth-a for first two turns", authIDs)
+	if len(authIDs) != 3 || authIDs[0] != "auth-a" || authIDs[1] != "auth-a" || authIDs[2] != "auth-b" {
+		t.Fatalf("selected auth IDs = %v, want [auth-a auth-a auth-b]", authIDs)
 	}
 
-	replayAuthID := authIDs[2]
-	replayPayloads := executor.Payloads(replayAuthID)
+	replayPayloads := executor.Payloads(authIDs[2])
 	if len(replayPayloads) == 0 {
-		t.Fatalf("replay auth %s has no payloads", replayAuthID)
+		t.Fatalf("replay auth %s has no payloads", authIDs[2])
 	}
 	replayPayload := replayPayloads[len(replayPayloads)-1]
 	if gjson.GetBytes(replayPayload, "previous_response_id").Exists() {
 		t.Fatalf("previous_response_id leaked after stream-closed replay: %s", replayPayload)
 	}
-	replayInput := gjson.GetBytes(replayPayload, "input").Raw
-	if !strings.Contains(replayInput, `"id":"msg-1"`) || !strings.Contains(replayInput, `"id":"msg-3"`) {
-		t.Fatalf("replay input missing expected transcript items: %s", replayInput)
+	replayInput := gjson.GetBytes(replayPayload, "input").Array()
+	if len(replayInput) != 3 || replayInput[0].Get("id").String() != "msg-1" || replayInput[1].Get("id").String() != "out-auth-a-1" || replayInput[2].Get("id").String() != "msg-2" {
+		t.Fatalf("replay input = %s, want full ordered transcript", gjson.GetBytes(replayPayload, "input").Raw)
 	}
 }
 

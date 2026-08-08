@@ -454,6 +454,9 @@ func previousResponseNotFoundMessage(message string) bool {
 
 func providerItemNotFoundMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "items are not persisted when `store` is set to false") {
+		return false
+	}
 	if !strings.Contains(lower, "item") || !strings.Contains(lower, "not found") {
 		return false
 	}

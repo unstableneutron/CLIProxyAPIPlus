@@ -490,3 +490,32 @@ func TestHandleStreamingResponseBootstrapTimeoutWritesResponsesErrorChunk(t *tes
 		t.Fatalf("expected bootstrap timeout message, got body %q", body)
 	}
 }
+
+func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatalf("expected gin writer to implement http.Flusher")
+	}
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(`{"error":{"message":"invalid request","type":"invalid_request_error","code":"invalid_request"}}`)}
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("expected responses error chunk, got: %q", body)
+	}
+	if strings.Contains(body, `"error":{`) {
+		t.Fatalf("expected streaming error chunk (top-level type), got HTTP error body: %q", body)
+	}
+}

@@ -73,7 +73,7 @@ func TestForwardResponsesWebsocketWaitsForErrorAfterDataCloses(t *testing.T) {
 	data := make(chan []byte)
 	close(data)
 	errs := make(chan *interfaces.ErrorMessage)
-	const exactError = `{"type":"error","status":500,"error":{"message":"gRPC error: Response with id=resp-stale not found","type":"api_error"}}`
+	const exactError = `{"type":"error","status":500,"error":{"message":"gRPC error: Response with id=resp-stale not found","type":"invalid_request_error","code":"previous_response_not_found"}}`
 	upstreamErr := &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errors.New(exactError)}
 
 	payload, result := runForwardResponsesWebsocketErrorTest(t, data, errs, func() {
@@ -84,7 +84,7 @@ func TestForwardResponsesWebsocketWaitsForErrorAfterDataCloses(t *testing.T) {
 		}()
 	})
 
-	if result.err != nil {
+	if result.err != nil && !errors.Is(result.err, websocket.ErrCloseSent) {
 		t.Fatalf("forward error: %v", result.err)
 	}
 	if result.errMsg != upstreamErr {
@@ -96,8 +96,8 @@ func TestForwardResponsesWebsocketWaitsForErrorAfterDataCloses(t *testing.T) {
 	if got := gjson.GetBytes(payload, "error.message").String(); got != "gRPC error: Response with id=resp-stale not found" {
 		t.Fatalf("downstream error message = %q, want exact upstream message", got)
 	}
-	if got := gjson.GetBytes(payload, "error.type").String(); got != "api_error" {
-		t.Fatalf("downstream error type = %q, want api_error: %s", got, payload)
+	if got := gjson.GetBytes(payload, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("downstream error type = %q, want invalid_request_error: %s", got, payload)
 	}
 }
 

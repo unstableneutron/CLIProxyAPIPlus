@@ -1018,3 +1018,11 @@ func videosCreateRequestFromFormContext(body string) ([]byte, error) {
 	router.ServeHTTP(resp, req)
 	return rawJSON, err
 }
+
+func TestBuildXAIVideosCreateRequestAllowsPreviewModel(t *testing.T) {
+	TestBuildXAIVideosCreateRequestNormalizesVideo15PreviewAlias(t)
+}
+
+func TestXAIVideosNativeRetrieveUsesBoundModel(t *testing.T) {
+	TestXAIVideosNativeRetrieveUsesCanonicalBoundModel(t)
+}

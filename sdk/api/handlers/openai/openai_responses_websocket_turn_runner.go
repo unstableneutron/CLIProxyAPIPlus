@@ -21,6 +21,7 @@ type responsesWebsocketTurnInput struct {
 	NativeProviderBound bool
 	Compaction          bool
 	InitialPinnedAuthID string
+	PreventAuthFailover bool
 }
 
 type responsesWebsocketTurnOutcome struct {
@@ -194,6 +195,10 @@ func (r responsesWebsocketTurnRunner) run(
 
 		processFailure := func(kind responsesreplay.FailureKind) bool {
 			if committed {
+				terminalFailure = kind
+				return false
+			}
+			if kind == responsesreplay.FailureAuthOrRoute && input.PreventAuthFailover {
 				terminalFailure = kind
 				return false
 			}
