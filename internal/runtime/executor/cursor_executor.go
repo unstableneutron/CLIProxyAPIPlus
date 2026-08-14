@@ -57,6 +57,7 @@ type CursorExecutor struct {
 	mu                    sync.Mutex
 	sessions              map[string]*cursorSession
 	checkpoints           map[string]*savedCheckpoint // keyed by conversationId
+	stateOwners           map[string]*cursorStateOwner
 	openStream            func(string) (cursorStream, error)
 	openStreamWithHeaders func(map[string]string) (cursorStream, error)
 	processFrames         cursorFrameProcessor
@@ -69,6 +70,11 @@ type savedCheckpoint struct {
 	authID             string            // auth that produced this checkpoint (checkpoint is auth-specific)
 	executionSessionID string            // downstream execution session that owns this checkpoint, when known
 	updatedAt          time.Time
+}
+
+type cursorStateOwner struct {
+	cancel context.CancelFunc
+	stream cursorStream
 }
 
 type cursorStream interface {
@@ -104,6 +110,7 @@ type cursorSession struct {
 	authID             string
 	conversationID     string
 	executionSessionID string
+	owner              *cursorStateOwner
 	toolResultCh       chan []toolResultInfo
 	resumeOutCh        chan cliproxyexecutor.StreamChunk
 	switchOutput       func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context)
@@ -596,6 +603,7 @@ func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
 		cfg:         cfg,
 		sessions:    make(map[string]*cursorSession),
 		checkpoints: make(map[string]*savedCheckpoint),
+		stateOwners: make(map[string]*cursorStateOwner),
 		openStreamWithHeaders: func(headers map[string]string) (cursorStream, error) {
 			return openCursorH2StreamWithHeaders(headers)
 		},
@@ -891,6 +899,102 @@ func (e *CursorExecutor) findSessionByConversationLocked(convId string) string {
 	return ""
 }
 
+// retireConversationState atomically makes all existing owners for a
+// conversation stale before releasing their streams. A late checkpoint write
+// from a canceled processor is rejected after its ownership token is removed.
+func (e *CursorExecutor) retireConversationState(conversationID string) {
+	var retired []*cursorSession
+	var owner *cursorStateOwner
+	suffix := ":" + conversationID
+
+	e.mu.Lock()
+	owner = e.stateOwners[conversationID]
+	delete(e.stateOwners, conversationID)
+	for key, session := range e.sessions {
+		if strings.HasSuffix(key, suffix) {
+			delete(e.sessions, key)
+			retired = append(retired, session)
+		}
+	}
+	delete(e.checkpoints, conversationID)
+	e.mu.Unlock()
+
+	if owner != nil {
+		if owner.cancel != nil {
+			owner.cancel()
+		}
+		if owner.stream != nil {
+			owner.stream.Close()
+		}
+	}
+	for _, session := range retired {
+		if owner != nil && session.owner == owner {
+			continue
+		}
+		if session.cancel != nil {
+			session.cancel()
+		}
+		if session.stream != nil {
+			session.stream.Close()
+		}
+	}
+}
+
+func (e *CursorExecutor) beginConversationStream(conversationID string) *cursorStateOwner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners == nil {
+		e.stateOwners = make(map[string]*cursorStateOwner)
+	}
+	owner := &cursorStateOwner{}
+	e.stateOwners[conversationID] = owner
+	return owner
+}
+
+func (e *CursorExecutor) releaseConversationStream(conversationID string, owner *cursorStateOwner) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] == owner {
+		delete(e.stateOwners, conversationID)
+	}
+}
+
+func (e *CursorExecutor) attachConversationStream(conversationID string, owner *cursorStateOwner, cancel context.CancelFunc, stream cursorStream) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	owner.cancel = cancel
+	owner.stream = stream
+	return true
+}
+
+func (e *CursorExecutor) publishConversationSession(conversationID, sessionKey string, owner *cursorStateOwner, session *cursorSession, replace bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	if _, exists := e.sessions[sessionKey]; exists && !replace {
+		return false
+	}
+	session.conversationID = conversationID
+	session.owner = owner
+	e.sessions[sessionKey] = session
+	return true
+}
+
+func (e *CursorExecutor) saveCheckpoint(conversationID string, owner *cursorStateOwner, checkpoint *savedCheckpoint) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stateOwners[conversationID] != owner {
+		return false
+	}
+	e.checkpoints[conversationID] = checkpoint
+	return true
+}
+
 // cursorStatusErr implements the StatusError and RetryAfter interfaces so the
 // conductor can classify Cursor errors (e.g. 429 → quota cooldown).
 type cursorStatusErr struct {
@@ -1022,20 +1126,20 @@ func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	log.Debugf("cursor Execute: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
-		if r := recover(); r != nil {
-			log.Errorf("cursor Execute PANIC: %v", r)
-			err = fmt.Errorf("cursor: internal panic: %v", r)
+		if recovered := recover(); recovered != nil {
+			log.Errorf("cursor Execute PANIC: %v", recovered)
+			err = fmt.Errorf("cursor: internal panic: %v", recovered)
 		}
 		if err != nil {
 			log.Warnf("cursor Execute error: %v", err)
 		}
 	}()
+
 	accessToken := cursorAccessToken(auth)
 	if accessToken == "" {
 		return resp, fmt.Errorf("cursor: access token not found")
 	}
 
-	// Translate input to OpenAI format if needed (e.g. Claude /v1/messages format)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	payload := req.Payload
@@ -1048,9 +1152,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err := e.resolveCursorRemoteImages(ctx, auth, parsed); err != nil {
 		return resp, err
 	}
-	flattenConversationIntoUserText(parsed)
 	conversation := resolveCursorConversation(apiKeyFromContext(ctx), parsed.SystemPrompt, req, opts, payload)
 	conversationId := conversation.ConversationID
+	if isOpenAICompatibleSourceFormat(from) && len(parsed.ToolResults) > 0 {
+		e.retireConversationState(conversationId)
+		log.Infof("cursor: using cold continuation for %d non-stream tool result(s)", len(parsed.ToolResults))
+	}
+	flattenConversationIntoUserText(parsed)
 	params := buildRunRequestParams(parsed, conversationId)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
@@ -1072,7 +1180,6 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, fmt.Errorf("cursor: failed to send request: %w", err)
 	}
 
-	// Start heartbeat
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 	go cursorH2Heartbeat(sessionCtx, stream)
@@ -1124,11 +1231,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	return resp, nil
 }
 
-// ExecuteStream handles streaming requests.
-// It supports MCP tool call sessions: when Cursor returns an MCP tool call,
-// the H2 stream is kept alive. When Claude Code returns the tool result in
-// the next request, the result is sent back on the same stream (session resume).
-// This mirrors the activeSessions/resumeWithToolResults pattern in cursor-fetch.ts.
+func isOpenAICompatibleSourceFormat(format sdktranslator.Format) bool {
+	return format.String() == "" || format.String() == "openai"
+}
+
+// ExecuteStream handles streaming requests. Native Claude requests can resume
+// a parked MCP/H2 session; OpenAI-compatible tool results use a fresh request
+// rebuilt from the complete client transcript.
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	log.Debugf("cursor ExecuteStream: model=%s sourceFormat=%s payloadLen=%d", req.Model, opts.SourceFormat, len(req.Payload))
 	defer func() {
@@ -1172,16 +1281,23 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
 	log.Debugf("cursor: conversationId=%s authID=%s sessionSource=%s", conversationId, authID, conversation.SessionSource)
 
-	// Session key includes authID (H2 stream is auth-specific, not transferable).
-	// Checkpoint key uses conversationId only — allows detecting auth migration.
+	// Native Claude requests retain the current resumable-H2 behavior. OpenAI
+	// clients may cross a gateway boundary between the tool call and its result,
+	// so their continuation is rebuilt from the complete transcript instead.
+	openAICompatible := isOpenAICompatibleSourceFormat(from)
+	coldToolContinuation := openAICompatible && len(parsed.ToolResults) > 0
 	sessionKey := authID + ":" + conversationId
 	checkpointKey := conversationId
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
-	forceFlattenToolFallback := false
+	forceFlattenToolFallback := coldToolContinuation
+	if coldToolContinuation {
+		e.retireConversationState(conversationId)
+		log.Infof("cursor: using cold continuation for %d tool result(s)", len(parsed.ToolResults))
+	}
 
 	// Check if we can resume an existing session with tool results
-	if len(parsed.ToolResults) > 0 {
+	if len(parsed.ToolResults) > 0 && !coldToolContinuation {
 		forceFlattenToolFallback = true
 		var staleSessionsToClose []*cursorSession
 		e.mu.Lock()
@@ -1189,9 +1305,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if hasSession {
 			delete(e.sessions, sessionKey)
 		}
-		// If no session found for current auth, check for stale sessions from
-		// a different auth on the same conversation (quota failover scenario).
-		// Clean them up since the H2 stream belongs to the old account.
 		if !hasSession {
 			if oldKey := e.findSessionByConversationLocked(conversationId); oldKey != "" {
 				oldSession := e.sessions[oldKey]
@@ -1235,6 +1348,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	e.mu.Unlock()
 	closeCursorSessions(oldSessionsToClose)
+	streamOwner := e.beginConversationStream(conversationId)
+	workerOwnsState := false
+	defer func() {
+		if !workerOwnsState {
+			e.releaseConversationStream(conversationId, streamOwner)
+		}
+	}()
 
 	// Look up saved checkpoint for this conversation (keyed by conversationId only).
 	// Checkpoint is auth-specific: if auth changed (e.g. quota exhaustion failover),
@@ -1250,13 +1370,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		params = buildRunRequestParams(parsed, conversationId)
 		log.Debugf("cursor: using saved checkpoint (%d bytes) for conv=%s auth=%s", len(saved.data), checkpointKey, authID)
 		params.RawCheckpoint = saved.data
-		// Merge saved blobStore into params
 		if params.BlobStore == nil {
 			params.BlobStore = make(map[string][]byte)
 		}
-		for k, v := range saved.blobStore {
-			if _, exists := params.BlobStore[k]; !exists {
-				params.BlobStore[k] = v
+		for key, value := range saved.blobStore {
+			if _, exists := params.BlobStore[key]; !exists {
+				params.BlobStore[key] = value
 			}
 		}
 	} else {
@@ -1295,11 +1414,18 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		stream.Close()
 		return nil, fmt.Errorf("cursor: failed to send request: %w", err)
 	}
-
-	// Use a session-scoped context for the heartbeat that is NOT tied to the HTTP request.
-	// This ensures the heartbeat survives across request boundaries during MCP tool execution.
-	// Mirrors the TS plugin's setInterval-based heartbeat that lives independently of HTTP responses.
-	sessionCtx, sessionCancel := context.WithCancel(context.Background())
+	// The Cursor stream lives only for this HTTP request when serving an
+	// OpenAI-compatible client. Native Claude tool calls can still retain it.
+	sessionParent := context.Background()
+	if openAICompatible {
+		sessionParent = ctx
+	}
+	sessionCtx, sessionCancel := context.WithCancel(sessionParent)
+	if !e.attachConversationStream(conversationId, streamOwner, sessionCancel, stream) {
+		sessionCancel()
+		stream.Close()
+		return nil, context.Canceled
+	}
 	go cursorH2Heartbeat(sessionCtx, stream)
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
@@ -1308,14 +1434,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	var streamParam any
 
-	// Tool result channel for inline mode. processH2SessionFrames blocks on it
-	// when mcpArgs is received, while continuing to handle KV/heartbeat.
-	toolResultCh := make(chan []toolResultInfo, 1)
+	// OpenAI-compatible tool results use a fresh request with the full transcript.
+	// A nil channel tells the frame processor to finish immediately after emitting
+	// an MCP tool call instead of parking this H2 connection.
+	var toolResultCh chan []toolResultInfo
+	if !openAICompatible {
+		toolResultCh = make(chan []toolResultInfo, 1)
+	}
 
-	// Switchable output: initially writes to `chunks`. After mcpArgs, the
-	// onMcpExec callback closes `chunks` (ending the first HTTP response),
-	// then processH2SessionFrames blocks on toolResultCh. When results arrive,
-	// it switches to `resumeOutCh` (created by resumeWithToolResults).
+	// Switchable output starts with the current HTTP response channel.
 	var outMu sync.Mutex
 	currentOut := chunks
 	currentOutputCtx := ctx
@@ -1411,9 +1538,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return origEmitToOut(chunk)
 	}
 
+	workerOwnsState = true
 	go func() {
 		var storedToolSession *cursorSession
 		defer func() {
+			e.releaseConversationStream(conversationId, streamOwner)
 			if storedToolSession != nil && e.removeSessionIfCurrent(sessionKey, storedToolSession) {
 				closeCursorStreamChunkChannel(storedToolSession.resumeOutCh)
 			}
@@ -1462,6 +1591,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()
 
+				if openAICompatible {
+					closeCurrentOutput()
+					log.Debugf("cursor: ended H2 stream after MCP tool call (tool=%s)", execs[0].ToolName)
+					return
+				}
+
 				// Publish the resumable session before closing the current output.
 				// An immediate tool-result request must never observe an empty session map.
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
@@ -1477,6 +1612,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					authID:             authID,
 					conversationID:     conversationId,
 					executionSessionID: conversation.ExecutionSessionID,
+					owner:              streamOwner,
 					toolResultCh:       toolResultCh,
 					resumeOutCh:        resumeOut,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk, outputCtx context.Context) {
@@ -1493,9 +1629,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						outMu.Unlock()
 					},
 				}
-				e.mu.Lock()
-				e.sessions[sessionKey] = session
-				e.mu.Unlock()
+				if !e.publishConversationSession(conversationId, sessionKey, streamOwner, session, true) {
+					outMu.Unlock()
+					sessionCancel()
+					stream.Close()
+					return
+				}
 				storedToolSession = session
 
 				// Publish and close under the output lock. An immediate resume can
@@ -1513,17 +1652,18 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			toolResultCh,
 			usage,
 			func(cpData []byte) {
-				// Save checkpoint keyed by conversationId, tagged with authID for migration detection
-				e.mu.Lock()
-				e.checkpoints[checkpointKey] = &savedCheckpoint{
+				checkpoint := &savedCheckpoint{
 					data:               cpData,
 					blobStore:          params.BlobStore,
 					authID:             authID,
 					executionSessionID: conversation.ExecutionSessionID,
 					updatedAt:          time.Now(),
 				}
-				e.mu.Unlock()
-				log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
+				if e.saveCheckpoint(checkpointKey, streamOwner, checkpoint) {
+					log.Debugf("cursor: saved checkpoint (%d bytes) for conv=%s auth=%s", len(cpData), checkpointKey, authID)
+				} else {
+					log.Debugf("cursor: ignored checkpoint from retired stream for conv=%s auth=%s", checkpointKey, authID)
+				}
 			},
 			signalBootstrapActivity,
 			rawProtoLogger,
@@ -1628,13 +1768,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 		}
 	}
 	restoreSession := func() {
-		restored := false
-		e.mu.Lock()
-		if _, exists := e.sessions[sessionKey]; !exists {
-			e.sessions[sessionKey] = session
-			restored = true
-		}
-		e.mu.Unlock()
+		restored := e.publishConversationSession(session.conversationID, sessionKey, session.owner, session, false)
 		if !restored {
 			// A concurrent request replaced this session while ownership was in
 			// transit. It is no longer safe to restore, so release its resources.
@@ -2641,9 +2775,6 @@ func cursorFlattenMessages(messages []gjson.Result) string {
 				callID = "(unknown)"
 			}
 			text := extractTextContent(msg.Get("content"))
-			if len(text) > 8000 {
-				text = text[:8000] + "\n... [truncated]"
-			}
 			lines = append(lines, fmt.Sprintf("Tool result (%s): %s", callID, text))
 		default:
 			text := extractTextContent(msg.Get("content"))

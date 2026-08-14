@@ -39,7 +39,7 @@ func (e *forceModelPrefixCaptureExecutor) ExecuteStream(_ context.Context, auth 
 	e.calls++
 	e.captureRequest(auth, req, opts)
 	chunks := make(chan coreexecutor.StreamChunk, 1)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-test","output":[]}}`)}
+	chunks <- coreexecutor.StreamChunk{Payload: successfulResponsesWebsocketCompletion("resp-test", "out-test")}
 	close(chunks)
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }

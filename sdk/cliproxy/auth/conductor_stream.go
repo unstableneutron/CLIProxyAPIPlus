@@ -86,6 +86,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 		return nil, true, false, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var bootstrap streamBootstrapState
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -110,7 +111,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return buffered, false, true, nil
 		}
 		buffered = append(buffered, chunk)
-		if len(chunk.Payload) > 0 {
+		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, false, nil
 		}
 	}
@@ -359,8 +360,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
-		if closed && len(buffered) == 0 {
-			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+		if closed && (len(buffered) == 0 || isEmptyCompletion(buffered)) {
+			emptyErr := errEmptyCompletion
+			if len(buffered) == 0 {
+				emptyErr = &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			if idx < len(execModels)-1 {
