@@ -37,7 +37,7 @@ const attemptCleanupInterval = 1 * time.Hour
 // attemptMaxIdleTime controls how long an IP can be idle before cleanup
 const attemptMaxIdleTime = 2 * time.Hour
 
-const cpaExposedResponseHeaders = "X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, X-CPA-TRACE-ID"
+const cpaExposedResponseHeaders = "X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, X-CPA-TRACE-ID, Location, Retry-After, X-Request-Id, OpenAI-Request-Id"
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {

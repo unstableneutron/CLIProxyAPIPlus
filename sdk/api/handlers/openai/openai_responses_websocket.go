@@ -587,15 +587,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		subscribeUpstreamDisconnect()
-		toolCacheTurn := newResponsesWebsocketToolCacheTurn(downstreamSessionKey)
+		var toolCacheTurn *responsesWebsocketToolCacheTurn
 		if nativeWebsocketPassthrough {
 			if modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String()); modelName != "" {
 				passthroughModelName = modelName
 			}
 		} else {
-			toolCacheTurn.recordRequest(requestJSON)
-			requestJSON = repairResponsesWebsocketToolCallsWithoutRecording(downstreamSessionKey, requestJSON)
-			requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
+			requestJSON, toolCacheTurn = prepareResponsesWebsocketFallbackTurn(downstreamSessionKey, requestJSON)
 			replayJSON = bytes.Clone(requestJSON)
 			candidateLastRequest = bytes.Clone(requestJSON)
 		}
