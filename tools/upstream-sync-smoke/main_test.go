@@ -162,6 +162,41 @@ func TestMarkerValidationRejectsWrongOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesPayloadUsesConfiguredOutputBudget(t *testing.T) {
+	payload, err := responsesPayload(responsesConfig{
+		Model:           "test-model",
+		Marker:          "EXPECTED_MARKER",
+		MaxOutputTokens: 256,
+	}, true)
+	if err != nil {
+		t.Fatalf("responsesPayload() error = %v", err)
+	}
+	var request map[string]any
+	if errUnmarshal := json.Unmarshal(payload, &request); errUnmarshal != nil {
+		t.Fatalf("decode Responses payload: %v", errUnmarshal)
+	}
+	if got := int(request["max_output_tokens"].(float64)); got != 256 {
+		t.Fatalf("max_output_tokens = %d, want 256", got)
+	}
+	if stream, ok := request["stream"].(bool); !ok || !stream {
+		t.Fatalf("stream = %#v, want true", request["stream"])
+	}
+}
+
+func TestResponsesPayloadDefaultsOutputBudget(t *testing.T) {
+	payload, err := responsesPayload(responsesConfig{Model: "test-model", Marker: "EXPECTED_MARKER"}, false)
+	if err != nil {
+		t.Fatalf("responsesPayload() error = %v", err)
+	}
+	var request map[string]any
+	if errUnmarshal := json.Unmarshal(payload, &request); errUnmarshal != nil {
+		t.Fatalf("decode Responses payload: %v", errUnmarshal)
+	}
+	if got := int(request["max_output_tokens"].(float64)); got != defaultMaxOutputTokens {
+		t.Fatalf("max_output_tokens = %d, want %d", got, defaultMaxOutputTokens)
+	}
+}
+
 func TestCompactSmokeUsesListInput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any

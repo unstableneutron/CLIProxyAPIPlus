@@ -24,6 +24,7 @@ const (
 	outcomeFailed              = "failed"
 	outcomeExternalAuthBlocked = "external-auth-blocked"
 	maxResponseBytes           = 4 << 20
+	defaultMaxOutputTokens     = 64
 )
 
 var bearerValuePattern = regexp.MustCompile(`(?i)(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+`)
@@ -42,13 +43,14 @@ type smokeResult struct {
 }
 
 type responsesConfig struct {
-	BaseURL    string
-	Model      string
-	Marker     string
-	APIKey     string
-	Transport  string
-	HTTPClient *http.Client
-	Dialer     *websocket.Dialer
+	BaseURL         string
+	Model           string
+	Marker          string
+	APIKey          string
+	Transport       string
+	MaxOutputTokens int
+	HTTPClient      *http.Client
+	Dialer          *websocket.Dialer
 }
 
 func main() {
@@ -80,6 +82,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		transport := flags.String("transport", "", "rest, sse, or websocket")
 		model := flags.String("model", "", "model identifier")
 		marker := flags.String("marker", "", "exact output marker")
+		maxOutputTokens := flags.Int("max-output-tokens", defaultMaxOutputTokens, "maximum output token budget")
 		apiKeyEnv := flags.String("api-key-env", "", "environment variable containing the API key")
 		if err := flags.Parse(args[1:]); err != nil {
 			return 2
@@ -90,11 +93,12 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return emitResultWithSecrets(stdout, result, errKey)
 		}
 		result, err := runResponses(ctx, responsesConfig{
-			BaseURL:   *baseURL,
-			Model:     *model,
-			Marker:    *marker,
-			APIKey:    apiKey,
-			Transport: *transport,
+			BaseURL:         *baseURL,
+			Model:           *model,
+			Marker:          *marker,
+			APIKey:          apiKey,
+			Transport:       *transport,
+			MaxOutputTokens: *maxOutputTokens,
 		})
 		return emitResultWithSecrets(stdout, result, err, apiKey)
 
@@ -230,6 +234,9 @@ func runResponses(ctx context.Context, cfg responsesConfig) (result smokeResult,
 		result.Outcome = outcomeExternalAuthBlocked
 		return result, fmt.Errorf("API key is required")
 	}
+	if cfg.MaxOutputTokens < 0 {
+		return result, fmt.Errorf("maximum output tokens must not be negative")
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
@@ -248,10 +255,14 @@ func runResponses(ctx context.Context, cfg responsesConfig) (result smokeResult,
 }
 
 func responsesPayload(cfg responsesConfig, stream bool) ([]byte, error) {
+	maxOutputTokens := cfg.MaxOutputTokens
+	if maxOutputTokens == 0 {
+		maxOutputTokens = defaultMaxOutputTokens
+	}
 	payload := map[string]any{
 		"model":             cfg.Model,
 		"input":             responsesMessageInput("Reply exactly with " + cfg.Marker),
-		"max_output_tokens": 64,
+		"max_output_tokens": maxOutputTokens,
 	}
 	if stream {
 		payload["stream"] = true
