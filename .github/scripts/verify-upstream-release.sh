@@ -129,7 +129,9 @@ if ! jq -e '.isDraft == false and .isPrerelease == false and (.url | length > 0)
 fi
 RELEASE_URL=$(jq -r '.url' <<< "${RELEASE_JSON}")
 RELEASE_ASSETS=$(jq -c \
-  '[.assets[].name | select(. != "upstream-sync-receipt.json")] | sort' \
+  '[.assets[].name |
+    select(. != "upstream-sync-receipt.json" and . != "hotfix-release-receipt.json")] |
+    sort' \
   <<< "${RELEASE_JSON}")
 if ! jq -e 'index("checksums.txt") != null' <<< "${RELEASE_ASSETS}" >/dev/null; then
   die "Release ${TAG} is missing checksums.txt"

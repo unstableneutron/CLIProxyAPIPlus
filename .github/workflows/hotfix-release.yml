@@ -1,0 +1,467 @@
+name: Hotfix Release
+
+# Dedicated publication path for a reviewed fix after an accepted upstream-sync
+# release. It never changes upstream representation and accepts only one exact
+# current-main SHA, previous accepted release, and next immutable tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact next fork release tag to create
+        required: true
+        type: string
+      expected_commit:
+        description: Exact 40-character current main commit to release
+        required: true
+        type: string
+      base_tag:
+        description: Previous accepted release tag containing the same upstream state
+        required: true
+        type: string
+      expected_base_commit:
+        description: Exact 40-character peeled commit for base_tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: hotfix-release
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ORIGINAL_REMOTE: original-upstream
+  ORIGINAL_REPOSITORY: router-for-me/CLIProxyAPI
+  PLUS_REMOTE: plus-upstream
+  PLUS_REPOSITORY: kaitranntt/CLIProxyAPIPlus
+  IMAGE: ghcr.io/unstableneutron/cli-proxy-api-plus
+  HOTFIX_WORK_DIR: /tmp/hotfix-release-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_commit: ${{ steps.policy.outputs.base_commit }}
+      base_tag: ${{ steps.policy.outputs.base_tag }}
+      expected_commit: ${{ steps.policy.outputs.expected_commit }}
+      plan_fingerprint: ${{ steps.policy.outputs.plan_fingerprint }}
+      sync_id: ${{ steps.policy.outputs.sync_id }}
+      tag: ${{ steps.policy.outputs.tag }}
+      upstream_state_sha256: ${{ steps.policy.outputs.upstream_state_sha256 }}
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Reject unauthorized or unpinned invocation
+        env:
+          ACTOR: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          if [ "${REPOSITORY}" != unstableneutron/CLIProxyAPIPlus ] || \
+             [ "${EVENT_NAME}" != workflow_dispatch ] || \
+             [ "${ACTOR}" != unstableneutron ] || \
+             [ "${WORKFLOW_REF}" != refs/heads/main ]; then
+            echo "Hotfix release requires an unstableneutron dispatch of this workflow on main." >&2
+            exit 1
+          fi
+
+      # actions/setup-go v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      # docker/setup-buildx-action v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      # docker/login-action v4.4.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch exact repository and upstream state
+        run: |
+          git fetch --quiet --force origin main --tags
+          git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
+          git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
+          mkdir -p "${HOTFIX_WORK_DIR}"
+
+      - name: Validate pinned hotfix policy
+        id: policy
+        env:
+          BASE_TAG: ${{ inputs.base_tag }}
+          EXPECTED_BASE_COMMIT: ${{ inputs.expected_base_commit }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          .github/scripts/validate-hotfix-release.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --base-tag "${BASE_TAG}" \
+            --expected-base-commit "${EXPECTED_BASE_COMMIT}"
+
+      - name: Require fresh represented upstream state
+        env:
+          BASE_TAG: ${{ steps.policy.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ steps.policy.outputs.expected_commit }}
+          EXPECTED_FINGERPRINT: ${{ steps.policy.outputs.plan_fingerprint }}
+          EXPECTED_SYNC_ID: ${{ steps.policy.outputs.sync_id }}
+          TAG: ${{ steps.policy.outputs.tag }}
+        run: |
+          PLAN="${HOTFIX_WORK_DIR}/plan.out"
+          GITHUB_OUTPUT="${PLAN}" .github/scripts/upstream-sync.sh plan
+          cat "${PLAN}"
+          plan_value() {
+            awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
+          }
+          if [ "$(plan_value "${PLAN}" pre_sync_head)" != "${EXPECTED_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN}" has_changes)" != false ] || \
+             [ "$(plan_value "${PLAN}" target_drift)" != false ] || \
+             [ "$(plan_value "${PLAN}" blocked)" != false ] || \
+             [ "$(plan_value "${PLAN}" latest_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" expected_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" next_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${PLAN}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
+             [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
+            echo "Fresh planner does not preserve the exact accepted upstream state and next release slot." >&2
+            exit 1
+          fi
+
+      - name: Verify previous accepted release receipt
+        env:
+          BASE_COMMIT: ${{ steps.policy.outputs.base_commit }}
+          BASE_TAG: ${{ steps.policy.outputs.base_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_FINGERPRINT: ${{ steps.policy.outputs.plan_fingerprint }}
+          SYNC_ID: ${{ steps.policy.outputs.sync_id }}
+        run: |
+          RECEIPT_DIR="${HOTFIX_WORK_DIR}/base-release"
+          mkdir -p "${RECEIPT_DIR}"
+          gh release download "${BASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern upstream-sync-receipt.json \
+            --dir "${RECEIPT_DIR}"
+          .github/scripts/verify-upstream-release.sh \
+            --tag "${BASE_TAG}" \
+            --expected-commit "${BASE_COMMIT}" \
+            --expected-sync-id "${SYNC_ID}" \
+            --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
+            --image "${IMAGE}" \
+            --main-policy descendant \
+            --require-architecture-tags true \
+            --require-latest-parity true \
+            --receipt "${RECEIPT_DIR}/verified.json"
+          diff -u \
+            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/upstream-sync-receipt.json") \
+            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/verified.json")
+
+      - name: Reject reused or partially published identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.policy.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists remotely." >&2
+            exit 1
+          fi
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists." >&2
+            exit 1
+          fi
+          for REF in "${IMAGE}:${TAG}" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"; do
+            if docker buildx imagetools inspect "${REF}" >/dev/null 2>&1; then
+              echo "Image identity ${REF} already exists." >&2
+              exit 1
+            fi
+          done
+
+      - name: Run complete repository and upstream validation
+        env:
+          BASE_COMMIT: ${{ steps.policy.outputs.base_commit }}
+        run: |
+          test -z "$(gofmt -l .)"
+          git diff --check
+          go vet ./...
+          go test -count=1 -timeout=10m ./...
+          go build -o test-output ./cmd/server
+          rm test-output
+          .github/scripts/upstream-sync.sh replay-plan
+          .github/scripts/test-upstream-sync.sh
+          .github/scripts/test-verify-upstream-release.sh
+          .github/scripts/test-hotfix-release.sh
+          .github/scripts/test-verify-hotfix-release.sh
+          .github/scripts/upstream-sync.sh check-invariants
+          .github/scripts/upstream-sync.sh check-symbol-survival "${BASE_COMMIT}"
+          shellcheck .github/scripts/*.sh
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hotfix-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.HOTFIX_WORK_DIR }}
+          if-no-files-found: error
+          retention-days: 90
+
+  tag:
+    needs: validate
+    runs-on: ubuntu-24.04
+    outputs:
+      base_commit: ${{ needs.validate.outputs.base_commit }}
+      base_tag: ${{ needs.validate.outputs.base_tag }}
+      commit: ${{ steps.tag.outputs.commit }}
+      plan_fingerprint: ${{ needs.validate.outputs.plan_fingerprint }}
+      sync_id: ${{ needs.validate.outputs.sync_id }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.expected_commit }}
+
+      # docker/setup-buildx-action v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      # docker/login-action v4.4.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Revalidate exact identity and source freshness
+        env:
+          BASE_COMMIT: ${{ needs.validate.outputs.base_commit }}
+          BASE_TAG: ${{ needs.validate.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.expected_commit }}
+          EXPECTED_FINGERPRINT: ${{ needs.validate.outputs.plan_fingerprint }}
+          EXPECTED_SYNC_ID: ${{ needs.validate.outputs.sync_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git fetch --quiet --force origin main --tags
+          git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
+          git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
+          .github/scripts/validate-hotfix-release.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --base-tag "${BASE_TAG}" \
+            --expected-base-commit "${BASE_COMMIT}"
+          FINAL_PREFLIGHT=$(mktemp)
+          trap 'rm -f "${FINAL_PREFLIGHT}"' EXIT
+          GITHUB_OUTPUT="${FINAL_PREFLIGHT}" .github/scripts/upstream-sync.sh plan
+          plan_value() {
+            awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
+          }
+          if [ "$(plan_value "${FINAL_PREFLIGHT}" has_changes)" != false ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" target_drift)" != false ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" blocked)" != false ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" latest_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" next_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
+             [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
+            echo "Upstream or release state moved after validation." >&2
+            exit 1
+          fi
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG} appeared after validation." >&2
+            exit 1
+          fi
+          for REF in "${IMAGE}:${TAG}" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"; do
+            if docker buildx imagetools inspect "${REF}" >/dev/null 2>&1; then
+              echo "Image identity ${REF} appeared after validation." >&2
+              exit 1
+            fi
+          done
+
+      - name: Create exact annotated hotfix tag
+        id: tag
+        env:
+          BASE_TAG: ${{ needs.validate.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.expected_commit }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git config user.name "cliproxy-hotfix-release[bot]"
+          git config user.email "cliproxy-hotfix-release@users.noreply.github.com"
+          git tag -a "${TAG}" "${EXPECTED_COMMIT}" \
+            -m "Hotfix release ${TAG} after ${BASE_TAG}"
+          git push origin "refs/tags/${TAG}"
+          REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{ print $1; exit }')"
+          git fetch --quiet origin main
+          if [ "${REMOTE_TAG_COMMIT}" != "${EXPECTED_COMMIT}" ] || \
+             [ "$(git rev-parse origin/main)" != "${EXPECTED_COMMIT}" ]; then
+            echo "Published tag or main no longer matches ${EXPECTED_COMMIT}." >&2
+            exit 1
+          fi
+          {
+            echo "commit=${EXPECTED_COMMIT}"
+            echo "tag=${TAG}"
+          } >> "${GITHUB_OUTPUT}"
+
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yaml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      expected_commit: ${{ needs.tag.outputs.commit }}
+    secrets: inherit
+
+  docker_build:
+    needs: tag
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      expected_commit: ${{ needs.tag.outputs.commit }}
+      mode: build
+    secrets: inherit
+
+  docker:
+    needs: [tag, release, docker_build]
+    if: >-
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success'
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      expected_commit: ${{ needs.tag.outputs.commit }}
+      publish_latest: true
+      mode: publish
+    secrets: inherit
+
+  verify:
+    needs: [tag, release, docker_build, docker]
+    if: >-
+      needs.release.result == 'success' &&
+      needs.docker_build.result == 'success' &&
+      needs.docker.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.tag.outputs.commit }}
+
+      # docker/setup-buildx-action v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      # docker/login-action v4.4.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify hotfix release, assets, checksums, and image
+        env:
+          BASE_COMMIT: ${{ needs.tag.outputs.base_commit }}
+          BASE_TAG: ${{ needs.tag.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.docker.outputs.image_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_FINGERPRINT: ${{ needs.tag.outputs.plan_fingerprint }}
+          SYNC_ID: ${{ needs.tag.outputs.sync_id }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          .github/scripts/verify-hotfix-release.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --base-tag "${BASE_TAG}" \
+            --expected-base-commit "${BASE_COMMIT}" \
+            --expected-sync-id "${SYNC_ID}" \
+            --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
+            --image "${IMAGE}" \
+            --main-policy exact \
+            --require-latest-parity true \
+            --receipt hotfix-release-receipt.json
+          if [ "$(jq -r '.image_digest' hotfix-release-receipt.json)" != "${EXPECTED_IMAGE_DIGEST}" ]; then
+            echo "Verified image digest does not match publisher output ${EXPECTED_IMAGE_DIGEST}." >&2
+            exit 1
+          fi
+
+      - name: Attach and independently regenerate hotfix receipt
+        env:
+          BASE_COMMIT: ${{ needs.tag.outputs.base_commit }}
+          BASE_TAG: ${{ needs.tag.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_FINGERPRINT: ${{ needs.tag.outputs.plan_fingerprint }}
+          SYNC_ID: ${{ needs.tag.outputs.sync_id }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          gh release upload "${TAG}" hotfix-release-receipt.json \
+            --repo "${GITHUB_REPOSITORY}"
+          mkdir attached-receipt
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern hotfix-release-receipt.json \
+            --dir attached-receipt
+          .github/scripts/verify-hotfix-release.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --base-tag "${BASE_TAG}" \
+            --expected-base-commit "${BASE_COMMIT}" \
+            --expected-sync-id "${SYNC_ID}" \
+            --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
+            --image "${IMAGE}" \
+            --main-policy exact \
+            --require-latest-parity true \
+            --attached-receipt attached-receipt/hotfix-release-receipt.json \
+            --receipt independently-verified-receipt.json
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          if [ "$(grep -Fxc hotfix-release-receipt.json <<< "${ASSETS}")" -ne 1 ] || \
+             grep -Fx upstream-sync-receipt.json <<< "${ASSETS}" >/dev/null; then
+            echo "Hotfix release has a missing, duplicate, or semantically wrong receipt." >&2
+            exit 1
+          fi
+
+      - name: Require final fetched no-op plan and immutable identity
+        env:
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
+          git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
+          git fetch --quiet --force origin main --tags
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
+          if [ "$(git rev-parse origin/main)" != "${EXPECTED_COMMIT}" ] || \
+             [ "${TAG_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "Final main or tag identity does not match ${EXPECTED_COMMIT}." >&2
+            exit 1
+          fi
+          FINAL_PLAN=final-plan.out
+          GITHUB_OUTPUT="${FINAL_PLAN}" .github/scripts/upstream-sync.sh plan
+          cat "${FINAL_PLAN}"
+          plan_value() {
+            awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
+          }
+          if [ "$(plan_value "${FINAL_PLAN}" has_changes)" != false ] || \
+             [ "$(plan_value "${FINAL_PLAN}" target_drift)" != false ] || \
+             [ "$(plan_value "${FINAL_PLAN}" blocked)" != false ] || \
+             [ "$(plan_value "${FINAL_PLAN}" latest_fork_tag)" != "${TAG}" ]; then
+            echo "Final planner did not reach clean no-op state at ${TAG}." >&2
+            exit 1
+          fi
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hotfix-release-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            hotfix-release-receipt.json
+            independently-verified-receipt.json
+            final-plan.out
+          if-no-files-found: error
+          retention-days: 90

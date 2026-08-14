@@ -5,12 +5,17 @@ fork-owned	.ccs-fork-upstream.env
 fork-owned	.dockerignore
 fork-owned	README-ccs-fork.md
 fork-owned	docker-compose.yml
+fork-owned	.agents/skills/validating-upstream-sync/
 fork-owned	.github/scripts/upstream-sync.sh
 fork-owned	.github/scripts/test-upstream-sync.sh
 fork-owned	.github/scripts/validate-upstream-sync.sh
 fork-owned	.github/scripts/render-upstream-sync-report.sh
 fork-owned	.github/scripts/verify-upstream-release.sh
 fork-owned	.github/scripts/test-verify-upstream-release.sh
+fork-owned	.github/scripts/validate-hotfix-release.sh
+fork-owned	.github/scripts/verify-hotfix-release.sh
+fork-owned	.github/scripts/test-hotfix-release.sh
+fork-owned	.github/scripts/test-verify-hotfix-release.sh
 fork-owned	.github/scripts/testdata/upstream-release/
 fork-owned	.github/upstream-sync-dropped-symbols.tsv
 fork-owned	.github/upstream-sync-ownership.tsv

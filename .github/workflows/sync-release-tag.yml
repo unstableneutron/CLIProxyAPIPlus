@@ -69,8 +69,15 @@ jobs:
           STATE="$(git show "${TAG_COMMIT}:.ccs-fork-upstream.env")"
           SYNC_ID="$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' <<< "${STATE}")"
           PLAN_FINGERPRINT="$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' <<< "${STATE}")"
-          if [ -z "${SYNC_ID}" ] || [ -z "${PLAN_FINGERPRINT}" ]; then
+          RECORDED_RELEASE_TAG="$(awk -F= '$1 == "EXPECTED_FORK_TAG" { print $2; exit }' <<< "${STATE}")"
+          if [ -z "${SYNC_ID}" ] || \
+             [ -z "${PLAN_FINGERPRINT}" ] || \
+             [ -z "${RECORDED_RELEASE_TAG}" ]; then
             echo "Tag ${TAG} does not contain schema-v2 upstream sync state." >&2
+            exit 1
+          fi
+          if [ "${TAG}" != "${RECORDED_RELEASE_TAG}" ]; then
+            echo "Tag ${TAG} is not the recorded upstream-sync release ${RECORDED_RELEASE_TAG}; use its dedicated publication policy." >&2
             exit 1
           fi
           LATEST_TAG="$({

@@ -102,7 +102,20 @@ gh workflow run upstream-sync-v2.yml \
 
 Never dispatch `.github/workflows-disabled/upstream-sync.yml`. Never create an accepted tag manually. Use `Recover Existing Release Tag` only when an already accepted tag needs publication recovery and its peeled commit is exact.
 
-### 6. Verify the published state independently
+### 6. Publish an explicitly authorized hotfix
+
+Use `Hotfix Release` only for a reviewed fork fix after a fully accepted upstream-sync release and only with explicit authorization to ship that fix. It is not an alternative way to accept upstream changes.
+
+- Land the focused fix and any release-policy change on `main` in separate reviewed commits. Re-run the stable full matrix and affected isolated runtime canaries before dispatch.
+- Require a fresh no-op plan, unchanged `.ccs-fork-upstream.env`, the latest accepted release tag and its exact peeled commit, the exact current `origin/main` SHA, and the exact next numeric fork-tag suffix.
+- Dispatch `.github/workflows/hotfix-release.yml` on `main` with all four pinned inputs: `tag`, `expected_commit`, `base_tag`, and `expected_base_commit`. Never create or move the hotfix tag manually.
+- The workflow must reject a stale or non-descendant SHA, changed upstream representation, wrong base or suffix, any existing tag/release/image identity, an invalid base receipt, or planner drift. It must rerun the full repository and upstream suite before creating an annotated tag.
+- Publish through the checked reusable GoReleaser and multi-platform Docker workflows. Require `hotfix-release-receipt.json`, not an upstream-promotion receipt. Independently regenerate it and verify its previous release, upstream-state hash, workflow/run identity, release asset digests, `checksums.txt`, OCI index, architecture tags, platform digests, and `latest` parity.
+- Require the final fetched planner to report `has_changes=false`, `target_drift=false`, and `blocked=false`, with the hotfix tag as `latest_fork_tag`. Subsequent v2 no-op runs must verify the hotfix receipt as the represented release.
+
+`Recover Existing Release Tag` is restricted to the tag recorded by the accepted upstream-sync state. It must not publish or recover a hotfix suffix; stop for a dedicated reviewed recovery policy if a hotfix run partially publishes.
+
+### 7. Verify the published state independently
 
 For a new release, require all of the following:
 

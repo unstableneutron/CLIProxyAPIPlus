@@ -862,6 +862,8 @@ test_publication_workflows_are_reusable_and_checked() {
   local dockerignore=${SCRIPT_DIR}/../../.dockerignore
 
   assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
+  assert_contains "${VALIDATOR}" "test-hotfix-release.sh"
+  assert_contains "${VALIDATOR}" "test-verify-hotfix-release.sh"
   assert_contains "${VALIDATOR}" "UPSTREAM_SYNC_TOOLING_MODE=auto"
 
   assert_contains "${release}" "workflow_call:"
@@ -902,6 +904,8 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${recovery}" "gh release upload"
   assert_contains "${recovery}" "upstream-sync-receipt.json"
   assert_contains "${recovery}" "--require-architecture-tags true"
+  # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
+  assert_contains "${recovery}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
   assert_not_contains "${recovery}" "gh workflow run"
 
   assert_contains "${dockerfile}" "# syntax=docker/dockerfile:1"

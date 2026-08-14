@@ -211,11 +211,20 @@ jobs:
           set +e
           git show "refs/tags/${EXPECTED_FORK_TAG}:.ccs-fork-upstream.env" > "${STATE_FILE}"
           STATE_EXIT=$?
+          RECEIPT_KIND=upstream-sync
           gh release download "${EXPECTED_FORK_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern upstream-sync-receipt.json \
             --dir "${RECEIPT_DIR}"
           DOWNLOAD_EXIT=$?
+          if [ "${DOWNLOAD_EXIT}" -ne 0 ]; then
+            RECEIPT_KIND=hotfix
+            gh release download "${EXPECTED_FORK_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern hotfix-release-receipt.json \
+              --dir "${RECEIPT_DIR}"
+            DOWNLOAD_EXIT=$?
+          fi
           set -e
 
           state_value() {
@@ -244,7 +253,7 @@ jobs:
               echo "Legacy release without a v2 receipt; shadow verification made no changes." >> "${GITHUB_STEP_SUMMARY}"
               exit 0
             fi
-            echo "Represented release lacks v2 state or upstream-sync-receipt.json." >&2
+            echo "Represented release lacks v2 state or a supported release receipt." >&2
             exit 1
           fi
           if [ "${STATE_ORIGINAL_COMMIT}" != "${PLAN_ORIGINAL_COMMIT}" ] || \
@@ -255,24 +264,58 @@ jobs:
             echo "Represented release state does not match the selected exact refs." >&2
             exit 1
           fi
-          REQUIRE_ARCHITECTURE_TAGS=false
-          if jq -e '(.schema_version // 1) >= 2' \
-            "${RECEIPT_DIR}/upstream-sync-receipt.json" >/dev/null; then
-            REQUIRE_ARCHITECTURE_TAGS=true
+          if [ "${RECEIPT_KIND}" = hotfix ]; then
+            HOTFIX_RECEIPT="${RECEIPT_DIR}/hotfix-release-receipt.json"
+            BASE_TAG="$(jq -r '.previous_release.tag // empty' "${HOTFIX_RECEIPT}")"
+            BASE_COMMIT="$(jq -r '.previous_release.commit // empty' "${HOTFIX_RECEIPT}")"
+            RECEIPT_WORKFLOW_REF="$(jq -r '.release_workflow.ref // empty' "${HOTFIX_RECEIPT}")"
+            RECEIPT_RUN_ID="$(jq -r '.release_workflow.run_id // empty' "${HOTFIX_RECEIPT}")"
+            RECEIPT_RUN_ATTEMPT="$(jq -r '.release_workflow.run_attempt // empty' "${HOTFIX_RECEIPT}")"
+            if [ -z "${BASE_TAG}" ] || \
+               ! [[ "${BASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || \
+               [ -z "${RECEIPT_WORKFLOW_REF}" ] || \
+               [ -z "${RECEIPT_RUN_ID}" ] || \
+               [ -z "${RECEIPT_RUN_ATTEMPT}" ]; then
+              echo "Hotfix receipt has incomplete base or workflow provenance." >&2
+              exit 1
+            fi
+            GITHUB_WORKFLOW_REF="${RECEIPT_WORKFLOW_REF}" \
+            GITHUB_RUN_ID="${RECEIPT_RUN_ID}" \
+            GITHUB_RUN_ATTEMPT="${RECEIPT_RUN_ATTEMPT}" \
+              .github/scripts/verify-hotfix-release.sh \
+                --tag "${EXPECTED_FORK_TAG}" \
+                --expected-commit "${TAG_COMMIT}" \
+                --base-tag "${BASE_TAG}" \
+                --expected-base-commit "${BASE_COMMIT}" \
+                --expected-sync-id "${STATE_SYNC_ID}" \
+                --expected-plan-fingerprint "${STATE_FINGERPRINT}" \
+                --image ghcr.io/unstableneutron/cli-proxy-api-plus \
+                --main-policy descendant \
+                --require-latest-parity true \
+                --receipt "${RECEIPT_DIR}/verified-receipt.json"
+            diff -u \
+              <(jq -S . "${HOTFIX_RECEIPT}") \
+              <(jq -S . "${RECEIPT_DIR}/verified-receipt.json")
+          else
+            REQUIRE_ARCHITECTURE_TAGS=false
+            if jq -e '(.schema_version // 1) >= 2' \
+              "${RECEIPT_DIR}/upstream-sync-receipt.json" >/dev/null; then
+              REQUIRE_ARCHITECTURE_TAGS=true
+            fi
+            .github/scripts/verify-upstream-release.sh \
+              --tag "${EXPECTED_FORK_TAG}" \
+              --expected-commit "${TAG_COMMIT}" \
+              --expected-sync-id "${STATE_SYNC_ID}" \
+              --expected-plan-fingerprint "${STATE_FINGERPRINT}" \
+              --image ghcr.io/unstableneutron/cli-proxy-api-plus \
+              --main-policy descendant \
+              --require-architecture-tags "${REQUIRE_ARCHITECTURE_TAGS}" \
+              --require-latest-parity true \
+              --receipt "${RECEIPT_DIR}/verified-receipt.json"
+            diff -u \
+              <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/upstream-sync-receipt.json") \
+              <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/verified-receipt.json")
           fi
-          .github/scripts/verify-upstream-release.sh \
-            --tag "${EXPECTED_FORK_TAG}" \
-            --expected-commit "${TAG_COMMIT}" \
-            --expected-sync-id "${STATE_SYNC_ID}" \
-            --expected-plan-fingerprint "${STATE_FINGERPRINT}" \
-            --image ghcr.io/unstableneutron/cli-proxy-api-plus \
-            --main-policy descendant \
-            --require-architecture-tags "${REQUIRE_ARCHITECTURE_TAGS}" \
-            --require-latest-parity true \
-            --receipt "${RECEIPT_DIR}/verified-receipt.json"
-          diff -u \
-            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/upstream-sync-receipt.json") \
-            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/verified-receipt.json")
           echo "Verified existing release receipt for ${EXPECTED_FORK_TAG}." >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Materialize target-specific candidate
