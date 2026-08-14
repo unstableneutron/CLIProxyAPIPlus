@@ -225,3 +225,36 @@ copyInteractionsSystemToOpenAI	original v7.2.89 replaced direct output mutation 
 isTeamScopedPlan	original v7.2.91 now includes the account hash for every plan when present, superseding team-only plan classification with expanded filename tests
 ensureGeminiGenerationConfig	original v7.2.92 removes the redundant precreation helper because nested sjson.SetBytes calls create generationConfig while preserving the same text-format output
 filterKimiEmptyAssistantMessages	original v7.2.92 folds empty-assistant filtering into normalizeKimiToolMessageLinks single-pass assembly while retaining shouldDropKimiAssistantMessage behavior and regression coverage
+TestAntigravityRequestHasMatchingFunctionResponseWhitespaceCallID	original v7.2.131 replaced the unused matching helper with indexed response lookup that trims call IDs at ingress
+TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresAdditionalCustomToolCall	original v7.2.131 expanded additional custom-tool restoration coverage to namespace-aware custom tools while direct custom response calls remain covered by CustomToolEmptyInputMatchesNonStream and DirectCustomWinsNamespaceCollision
+TestConvertClaudeResponseToOpenAIResponses_RestoresAdditionalCustomToolCall	original v7.2.131 expanded streaming additional custom-tool restoration coverage to namespace-aware custom tools while direct custom response calls remain covered by CustomToolEmptyInputMatchesNonStream and DirectCustomWinsNamespaceCollision
+TestCursorToolBoundaryImmediateResumeUsesPublishedSession	plus v7.2.127-3 intentionally replaced parked OpenAI Cursor tool sessions with cold continuation; TestCursorOpenAIToolResultUsesColdContinuation covers the new ownership contract
+TestForwardResponsesStreamExposesOnlyClientErrors	original v7.2.131 intentionally exposes every post-commit terminal Responses error; TestForwardResponsesStreamExposesTerminalErrors and framing tests cover the new contract
+TestStreamingTool_MixedSuppressedAndValid	original and plus now synthesize identity for signaled empty-name tool calls; TestStreamingTool_MixedEmptyNameAndValid covers the replacement behavior
+TestStreamingTool_StopReasonMixedSuppressedAndValid	original and plus now synthesize identity for signaled empty-name tool calls; TestStreamingTool_StopReasonMixedEmptyNameAndValid covers terminal behavior
+antigravityFunctionCallPartLocation	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.functionCallPartLocation
+antigravityFunctionCallPartLocationForReplay	original v7.2.131 folded replay lookup into antigravityReplayRequestIndex.functionCallPartLocationForReplayWithSchemas
+antigravityFunctionCallPartLocationForReplayWithSchemas	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.functionCallPartLocationForReplayWithSchemas
+antigravityFunctionCallProvenanceLocation	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.functionCallProvenanceLocation
+antigravityFunctionResponseContentIndex	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.functionResponseContentIndex
+antigravityFunctionResponseContentIndexForReplay	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.functionResponseContentIndexForReplay
+antigravityNeedsSignatureReplayForExistingFunctionCall	original v7.2.131 folded signature eligibility into indexed replay filtering
+antigravityPayloadHasFunctionCallID	original v7.2.131 replaced repeated payload scans with the replay index function-call map
+antigravityReasoningReplayPendingModelContentIndex	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.pendingModelContentIndex
+antigravityReplayContextFingerprint	original v7.2.131 replaced repeated context hashing with the lazily memoized replay index contextFingerprint method
+antigravityReplayItemContextMatches	original v7.2.131 replaced repeated context hashing with antigravityReplayRequestIndex.contextMatches
+antigravityRequestHasMatchingFunctionResponse	original v7.2.131 folded trimmed response matching into indexed replay filtering
+antigravityRequestHasThoughtSignatureAt	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.hasThoughtSignatureAt
+antigravitySetReplayItemContextHash	original v7.2.131 renamed the canonical context annotation helper to antigravitySetReplayItemContextHashValue
+antigravityThoughtSignatureReplayPartPath	original v7.2.131 replaced repeated payload scans with antigravityReplayRequestIndex.thoughtSignatureReplayPartPath
+convertResponsesNamespaceToolToOpenAIChat	original v7.2.131 replaced recursive namespace conversion with the canonical walkResponsesToolDeclarations traversal
+convertResponsesToolToOpenAIChatTools	original v7.2.131 replaced per-tool conversion with mergeResponsesRequestChatTools and first-wins name deduplication
+dedupeFunctionCallsByCallID	original v7.2.131 replaced raw JSON deduplication with typed dedupeResponsesWebsocketFunctionCalls and input-item reconciliation
+filterAntigravityReasoningReplayItemsForRequest	original v7.2.131 folded the no-schema wrapper into indexed filterAntigravityReasoningReplayItemsForRequestWithSchemas
+initAntigravityTransport	original v7.2.131 replaced the process-wide singleton with bounded credential-scoped HTTP/1.1 transport pools
+insertAntigravityReasoningReplayItems	original v7.2.131 replaced repeated scans with insertAntigravityReasoningReplayItemsWithSchemas over a replay index
+mergeAntigravityFunctionCallPartReplay	original v7.2.131 replaced repeated scans with mergeAntigravityFunctionCallPartReplayWithSchemas over a replay index
+mergeJSONArrayRaw	original v7.2.131 replaced raw Responses transcript concatenation with typed input-item parsing, reconciliation, and marshaling
+repairResponsesToolCallsArray	original v7.2.131 replaced the raw-array repair pass with typed repairResponsesToolCallItems and turn-local cache recording
+responsesWebsocketToolCacheTurn.recordRequest	original v7.2.131 replaced whole-request rescans with recordInputItem during the typed repair pass
+utlsRoundTripper.getOrCreateConnection	original v7.2.131 intentionally replaced shared HTTP/2 connections with request-scoped uTLS connections closed with each response body
