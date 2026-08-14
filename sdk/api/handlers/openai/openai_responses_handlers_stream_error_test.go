@@ -170,6 +170,9 @@ const (
 	directInitialErrorResponsesModel    = "direct-initial-error-responses-model"
 	crossChunkMultilineResponsesModel   = "cross-chunk-multiline-responses-model"
 	validThenMalformedResponsesModel    = "valid-then-malformed-responses-model"
+	splitBootstrapFramingResponsesModel = "split-bootstrap-framing-responses-model"
+	fullBootstrapFramingResponsesModel  = "full-bootstrap-framing-responses-model"
+	dataBootstrapFramingResponsesModel  = "data-bootstrap-framing-responses-model"
 )
 
 type prematureResponsesStreamExecutor struct{}
@@ -188,7 +191,30 @@ func (*prematureResponsesStreamExecutor) ExecuteStream(_ context.Context, _ *cor
 			Body:       []byte(`{"error":{"message":"plugin direct response"}}`),
 		}
 	}
-	chunks := make(chan coreexecutor.StreamChunk, 2)
+	chunks := make(chan coreexecutor.StreamChunk, 8)
+	if req.Model == splitBootstrapFramingResponsesModel || req.Model == fullBootstrapFramingResponsesModel || req.Model == dataBootstrapFramingResponsesModel {
+		frames := []struct {
+			event   string
+			payload string
+		}{
+			{event: "response.created", payload: `{"type":"response.created","sequence_number":0,"response":{"id":"resp-bootstrap","status":"in_progress"}}`},
+			{event: "response.output_text.delta", payload: `{"type":"response.output_text.delta","sequence_number":1,"delta":"bootstrap-framing-marker"}`},
+			{event: "response.completed", payload: `{"type":"response.completed","sequence_number":2,"response":{"id":"resp-bootstrap","status":"completed","output":[]}}`},
+		}
+		for _, frame := range frames {
+			switch req.Model {
+			case splitBootstrapFramingResponsesModel:
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("event: " + frame.event)}
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: " + frame.payload)}
+			case fullBootstrapFramingResponsesModel:
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("event: " + frame.event + "\ndata: " + frame.payload + "\n\n")}
+			case dataBootstrapFramingResponsesModel:
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: " + frame.payload)}
+			}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}
 	if req.Model == validThenMalformedResponsesModel {
 		chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n" +
 			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"\n\n")}
@@ -245,6 +271,91 @@ func (*prematureResponsesStreamExecutor) CountTokens(context.Context, *coreauth.
 
 func (*prematureResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
+}
+
+func TestResponsesHandlerPreservesBootstrapSSEFraming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &prematureResponsesStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "bootstrap-framing-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	models := []string{
+		splitBootstrapFramingResponsesModel,
+		fullBootstrapFramingResponsesModel,
+		dataBootstrapFramingResponsesModel,
+	}
+	modelInfos := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		modelInfos = append(modelInfos, &registry.ModelInfo{ID: model})
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, modelInfos)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hi","stream":true}`, model)))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if strings.Contains(body, "event: error") || strings.Contains(body, "event: response.failed") || strings.Contains(body, "[DONE]") {
+				t.Fatalf("completed stream had an unexpected terminal marker: %q", body)
+			}
+
+			parts := strings.Split(strings.TrimSpace(body), "\n\n")
+			if len(parts) != 3 {
+				t.Fatalf("SSE frame count = %d, want 3; body=%q", len(parts), body)
+			}
+			for sequence, part := range parts {
+				payload, ok := responsesSSEDataPayload([]byte(part))
+				if !ok || !gjson.ValidBytes(payload) {
+					t.Fatalf("frame %d has no valid JSON data payload: %q", sequence, part)
+				}
+				payloadType := gjson.GetBytes(payload, "type").String()
+				eventName := responsesSSEEventName([]byte(part))
+				if model == dataBootstrapFramingResponsesModel {
+					if eventName != "" {
+						t.Fatalf("data-only frame %d gained event %q: %q", sequence, eventName, part)
+					}
+				} else if eventName != payloadType {
+					t.Fatalf("frame %d event %q does not match data type %q: %q", sequence, eventName, payloadType, part)
+				}
+				sequenceNumber := gjson.GetBytes(payload, "sequence_number")
+				if !sequenceNumber.Exists() || sequenceNumber.Int() != int64(sequence) {
+					t.Fatalf("frame %d sequence_number = %s, want %d: %q", sequence, sequenceNumber.Raw, sequence, part)
+				}
+			}
+			if got := gjson.GetBytes(mustResponsesSSEPayload(t, []byte(parts[1])), "delta").String(); got != "bootstrap-framing-marker" {
+				t.Fatalf("marker delta = %q, want bootstrap-framing-marker; body=%q", got, body)
+			}
+			if got := gjson.GetBytes(mustResponsesSSEPayload(t, []byte(parts[2])), "type").String(); got != "response.completed" {
+				t.Fatalf("terminal payload type = %q, want response.completed; body=%q", got, body)
+			}
+		})
+	}
+}
+
+func mustResponsesSSEPayload(t *testing.T, frame []byte) []byte {
+	t.Helper()
+	payload, ok := responsesSSEDataPayload(frame)
+	if !ok {
+		t.Fatalf("SSE frame has no data payload: %q", frame)
+	}
+	return payload
 }
 
 func TestResponsesHandlerEmitsFailureWhenExecutorStopsAfterPartialOutput(t *testing.T) {

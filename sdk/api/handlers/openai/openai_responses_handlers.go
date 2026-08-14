@@ -170,7 +170,6 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 		return
 	}
 	if !responsesSSECanFlushWithoutDelimiter(f.pending) {
-		f.pending = f.pending[:0]
 		return
 	}
 	f.writeFrame(w, f.pending)

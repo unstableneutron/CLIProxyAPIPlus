@@ -224,6 +224,28 @@ func TestResponsesSSEFramerWaitsForEventFieldAfterData(t *testing.T) {
 	}
 }
 
+func TestResponsesSSEFramerFlushRetainsIncompleteEvent(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{}
+
+	framer.WriteChunk(&output, []byte("event: response.completed"))
+	framer.Flush(&output)
+	if output.Len() != 0 {
+		t.Fatalf("flush emitted an incomplete event-only frame: %q", output.String())
+	}
+	if got := string(framer.pending); got != "event: response.completed" {
+		t.Fatalf("flush changed the incomplete pending frame: %q", got)
+	}
+
+	framer.WriteChunk(&output, []byte(`data: {"type":"response.completed","sequence_number":0,"response":{"id":"resp-1","status":"completed"}}`))
+	if got := output.String(); !strings.Contains(got, "event: response.completed") || !strings.Contains(got, `"type":"response.completed"`) {
+		t.Fatalf("framer did not emit the completed frame after its data arrived: %q", got)
+	}
+	if len(framer.pending) != 0 {
+		t.Fatalf("framer retained a safely emitted frame: %q", framer.pending)
+	}
+}
+
 func TestResponsesSSEFramerFlushesMultilineDataWithoutDelimiter(t *testing.T) {
 	var output bytes.Buffer
 	framer := &responsesSSEFramer{}
