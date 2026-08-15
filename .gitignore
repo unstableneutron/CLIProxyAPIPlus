@@ -60,6 +60,7 @@ _bmad-output/*
 .mcp/cache/
 .gocache/
 .gitnexus/
+.amp/private/
 
 # macOS
 .DS_Store
