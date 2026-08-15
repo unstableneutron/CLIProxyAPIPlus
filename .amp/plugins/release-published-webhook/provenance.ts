@@ -154,9 +154,9 @@ interface ReceiptCore {
   architectureImages: JSONObject;
 }
 
-const PLAN_KEYS = ["original_repository","plus_repository","models_repository","original_head","plus_tag_head","plus_head","models_commit","plus_head_included","plus_head_already_represented","plus_head_delta_paths","unsafe_plus_head_delta_paths","blocked","block_reason","fork_tag_prefix","latest_fork_tag","latest_fork_models_commit","latest_fork_suffix","next_fork_tag","expected_fork_tag","safe_sync_id","plan_fingerprint","candidate_branch","snapshot_namespace","original_snapshot_ref","plus_tag_snapshot_ref","plus_head_snapshot_ref","models_snapshot_ref","target_drift","target_drift_summary","has_changes"];
+const PLAN_KEYS = ["original_tag","plus_tag","pre_sync_head","base_fork_commit","original_repository","plus_repository","models_repository","original_head","plus_tag_head","plus_head","models_commit","plus_head_included","plus_head_already_represented","plus_head_delta_paths","unsafe_plus_head_delta_paths","blocked","block_reason","fork_tag_prefix","latest_fork_tag","latest_fork_models_commit","latest_fork_suffix","next_fork_tag","expected_fork_tag","safe_sync_id","plan_fingerprint","candidate_branch","snapshot_namespace","original_snapshot_ref","plus_tag_snapshot_ref","plus_head_snapshot_ref","models_snapshot_ref","target_drift","target_drift_summary","has_changes"];
 
-function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string): void {
+function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, commit: string): void {
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new RejectedDelivery("final plan encoding differs"); }
   const values: JSONObject = {};
@@ -167,11 +167,13 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string): v
     values[match[1]] = match[2];
   }
   exactKeys(values, PLAN_KEYS, "final plan");
-  for (const key of ["original_head","plus_tag_head","plus_head","models_commit","plan_fingerprint"])
+  for (const key of ["pre_sync_head","base_fork_commit","original_head","plus_tag_head","plus_head","models_commit","plan_fingerprint"])
     sha(values[key], `final plan ${key}`);
   for (const key of ["plus_head_included","plus_head_already_represented","blocked","target_drift","has_changes"])
     if (values[key] !== "true" && values[key] !== "false") throw new RejectedDelivery("final plan boolean differs");
-  if (values.original_repository !== state.ORIGINAL_REPOSITORY || values.plus_repository !== state.PLUS_REPOSITORY ||
+  if (values.original_tag !== state.ORIGINAL_TAG || values.plus_tag !== state.PLUS_TAG ||
+      values.pre_sync_head !== commit || values.base_fork_commit !== commit ||
+      values.original_repository !== state.ORIGINAL_REPOSITORY || values.plus_repository !== state.PLUS_REPOSITORY ||
       values.models_repository !== state.MODELS_REPOSITORY || values.original_head !== state.ORIGINAL_COMMIT ||
       values.plus_tag_head !== state.PLUS_TAG_COMMIT || values.plus_head !== state.PLUS_HEAD_COMMIT || values.models_commit !== state.MODELS_COMMIT ||
       values.plus_head_included !== state.PLUS_HEAD_INCLUDED || values.safe_sync_id !== state.SYNC_ID ||
@@ -1373,7 +1375,7 @@ export async function validateRelease(
     const artifact = await workflowArtifact(client, core.workflowRunID, workflowRunAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
     const finalPlan = artifact.get("final-plan.out");
     if (!finalPlan) throw new RejectedDelivery("final plan artifact is missing");
-    parseFinalPlan(finalPlan, currentState.state, tag);
+    parseFinalPlan(finalPlan, currentState.state, tag, commit);
   }
 
   const architectures = await verifyRegistry(
