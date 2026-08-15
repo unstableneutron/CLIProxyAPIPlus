@@ -878,6 +878,35 @@ func TestGetPluginSyncCancellationInterruptsRead(t *testing.T) {
 	}
 }
 
+func TestPluginSyncCancelableConnCancellationClosesConnection(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapped := newPluginSyncCancelableConn(ctx, clientConn)
+	t.Cleanup(func() { _ = wrapped.Close() })
+
+	peerRead := make(chan error, 1)
+	go func() {
+		var buffer [1]byte
+		_, errRead := serverConn.Read(buffer[:])
+		peerRead <- errRead
+	}()
+
+	cancel()
+	select {
+	case errRead := <-peerRead:
+		if !errors.Is(errRead, io.EOF) {
+			t.Fatalf("peer read error = %v, want EOF from canceled connection", errRead)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("peer connection remained open after plugin sync cancellation")
+	}
+}
+
 func TestProcessPluginSyncCommandCancellationInterruptsTLSHandshake(t *testing.T) {
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
