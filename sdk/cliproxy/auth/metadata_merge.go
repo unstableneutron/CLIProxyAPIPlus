@@ -34,6 +34,13 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 			target.Metadata[k] = v
 		}
 	}
+	if disabled, ok := existingMap["disabled"].(bool); ok && disabled {
+		// Relogin refreshes credentials; only the explicit status API may re-enable
+		// an auth that an operator disabled.
+		target.Disabled = true
+		target.Status = StatusDisabled
+		target.Metadata["disabled"] = true
+	}
 	if setter, ok := target.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(target.Metadata)
 	}

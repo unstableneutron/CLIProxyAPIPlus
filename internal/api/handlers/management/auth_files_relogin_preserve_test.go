@@ -29,6 +29,7 @@ func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 		"email":         "user@example.com",
 		"access_token":  "old-access",
 		"refresh_token": "old-refresh",
+		"disabled":      true,
 		"prefix":        "custom-prefix",
 		"websockets":    false,
 		"note":          "my important account",
@@ -80,6 +81,9 @@ func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	if savedPath != filePath {
 		t.Fatalf("savedPath = %s, want %s", savedPath, filePath)
 	}
+	if !newRecord.Disabled || newRecord.Status != coreauth.StatusDisabled {
+		t.Fatalf("saved record disabled/status = %v/%s, want true/%s", newRecord.Disabled, newRecord.Status, coreauth.StatusDisabled)
+	}
 
 	savedRaw, errRead := os.ReadFile(filePath)
 	if errRead != nil {
@@ -96,6 +100,9 @@ func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	}
 	if saved["refresh_token"] != "new-refresh-token" {
 		t.Errorf("refresh_token = %v, want new-refresh-token", saved["refresh_token"])
+	}
+	if saved["disabled"] != true {
+		t.Errorf("disabled = %v, want true", saved["disabled"])
 	}
 
 	// Verify user-configured fields were preserved

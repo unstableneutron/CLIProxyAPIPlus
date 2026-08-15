@@ -39,6 +39,7 @@ func TestManagerLogin_PreservesExistingAuthFileMetadata(t *testing.T) {
 		"type":         "demo",
 		"email":        "user@example.com",
 		"access_token": "old-token",
+		"disabled":     true,
 		"prefix":       "my-prefix",
 		"websockets":   false,
 		"note":         "important note",
@@ -76,12 +77,15 @@ func TestManagerLogin_PreservesExistingAuthFileMetadata(t *testing.T) {
 		AuthDir: authDir,
 	}
 
-	_, savedPath, errLogin := mgr.Login(context.Background(), "demo", cfg, nil)
+	savedRecord, savedPath, errLogin := mgr.Login(context.Background(), "demo", cfg, nil)
 	if errLogin != nil {
 		t.Fatalf("Login error: %v", errLogin)
 	}
 	if savedPath != filePath {
 		t.Fatalf("savedPath = %s, want %s", savedPath, filePath)
+	}
+	if !savedRecord.Disabled || savedRecord.Status != coreauth.StatusDisabled {
+		t.Fatalf("saved record disabled/status = %v/%s, want true/%s", savedRecord.Disabled, savedRecord.Status, coreauth.StatusDisabled)
 	}
 
 	savedRaw, errRead := os.ReadFile(filePath)
@@ -95,6 +99,9 @@ func TestManagerLogin_PreservesExistingAuthFileMetadata(t *testing.T) {
 
 	if saved["access_token"] != "new-token" {
 		t.Errorf("access_token = %v, want new-token", saved["access_token"])
+	}
+	if saved["disabled"] != true {
+		t.Errorf("disabled = %v, want true", saved["disabled"])
 	}
 	if saved["prefix"] != "my-prefix" {
 		t.Errorf("prefix = %v, want my-prefix", saved["prefix"])
