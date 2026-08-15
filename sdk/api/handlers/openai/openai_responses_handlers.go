@@ -754,6 +754,10 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		return
 	}
 	rawJSON = updatedJSON
+	if err := validateOpenAIResponsesCompactRequest(rawJSON); err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Invalid request: " + err.Error(), Type: "invalid_request_error"}})
+		return
+	}
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {

@@ -1932,6 +1932,30 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 	}
 }
 
+func TestManager_Execute_CodexResponsesRouteNotFoundSuspendsModel(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	model := "codex-responses-route-model"
+	auth := &Auth{ID: "codex-responses-route-auth", Provider: "codex"}
+	executor := &authFallbackExecutor{id: "codex", executeErrors: map[string]error{
+		auth.ID: &Error{HTTPStatus: http.StatusNotFound, Message: `{"detail":"Not Found"}`},
+	}}
+	m.RegisterExecutor(executor)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	if _, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute == nil {
+		t.Fatal("expected normal responses route 404")
+	}
+	updated, _ := m.GetByID(auth.ID)
+	if state := updated.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("normal responses route 404 did not suspend model: %#v", state)
+	}
+}
+
 func TestManager_Execute_GenericRouteNotFoundStillSuspendsModel(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

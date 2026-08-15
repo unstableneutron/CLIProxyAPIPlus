@@ -34,6 +34,40 @@ func isResponsesCompactionTriggerRequest(rawJSON []byte) bool {
 	return false
 }
 
+func validateOpenAIResponsesCompactRequest(rawJSON []byte) error {
+	if !json.Valid(rawJSON) {
+		return fmt.Errorf("body must be valid JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(rawJSON))
+	var request map[string]any
+	if err := decoder.Decode(&request); err != nil || request == nil {
+		return fmt.Errorf("body must be a JSON object")
+	}
+	model, ok := request["model"].(string)
+	if !ok || strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model must be a nonempty string")
+	}
+	if input, exists := request["input"]; exists && input != nil {
+		if _, stringInput := input.(string); !stringInput {
+			items, arrayInput := input.([]any)
+			if !arrayInput {
+				return fmt.Errorf("input must be a string or an array")
+			}
+			for index, item := range items {
+				if _, objectInput := item.(map[string]any); !objectInput {
+					return fmt.Errorf("input[%d] must be an object", index)
+				}
+			}
+		}
+	}
+	if stream, exists := request["stream"]; exists {
+		if _, ok := stream.(bool); !ok {
+			return fmt.Errorf("stream must be a boolean")
+		}
+	}
+	return nil
+}
+
 func sanitizeOpenAIResponsesCompactRequest(rawJSON []byte) []byte {
 	if len(bytes.TrimSpace(rawJSON)) == 0 || !json.Valid(rawJSON) {
 		return rawJSON
@@ -48,10 +82,7 @@ func sanitizeOpenAIResponsesCompactRequest(rawJSON []byte) []byte {
 		"tool_choice",
 		"text",
 		"client_metadata",
-		"prompt_cache_key",
-		"prompt_cache_retention",
 		"safety_identifier",
-		"previous_response_id",
 		"generate",
 		"type",
 	} {

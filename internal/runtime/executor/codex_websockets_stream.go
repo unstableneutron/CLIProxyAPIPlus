@@ -69,12 +69,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	executionSessionID := executionSessionIDFromOptions(opts)
-	if xaiInputHasItemType(body, "compaction_trigger") {
-		if streamResult, handled, errCompact := e.executeCompactionTriggerFromWebsocketContext(ctx, auth, req, opts, body, executionSessionID); handled || errCompact != nil {
-			return streamResult, errCompact
-		}
-	}
-
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {

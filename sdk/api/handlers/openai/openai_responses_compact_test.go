@@ -114,6 +114,29 @@ func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesCompactRejectsMalformedContractRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	router := gin.New()
+	router.POST("/v1/responses/compact", NewOpenAIResponsesAPIHandler(base).Compact)
+
+	for _, body := range []string{`{`, `{"model":"test-model"} {}`, `{}`, `{"model":7}`, `{"model":"test-model","input":{}}`, `{"model":"test-model","stream":"false"}`, `{"model":"test-model","input":["text"]}`} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400; response=%s", body, resp.Code, resp.Body.String())
+		}
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	}
+}
+
 func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
@@ -237,6 +260,9 @@ func TestOpenAIResponsesCompactSanitizesAndTruncatesToolOutputs(t *testing.T) {
   "text":{"verbosity":"low"},
   "client_metadata":{"x":"y"},
   "prompt_cache_key":"cache-key",
+  "prompt_cache_options":{"type":"retention"},
+  "prompt_cache_retention":"24h",
+  "service_tier":"priority",
   "previous_response_id":"resp-prev",
   "input":[{"type":"function_call_output","call_id":"call-1","metadata":{"drop":true},"output":%q}]
 }`, largeOutput)
@@ -251,9 +277,14 @@ func TestOpenAIResponsesCompactSanitizesAndTruncatesToolOutputs(t *testing.T) {
 	if executor.alt != "responses/compact" {
 		t.Fatalf("alt = %q, want responses/compact", executor.alt)
 	}
-	for _, field := range []string{"stream", "stream_options", "store", "include", "tools", "tool_choice", "text", "client_metadata", "prompt_cache_key", "previous_response_id"} {
+	for _, field := range []string{"stream", "stream_options", "store", "include", "tools", "tool_choice", "text", "client_metadata"} {
 		if gjson.GetBytes(executor.payload, field).Exists() {
 			t.Fatalf("field %q was not removed: %s", field, string(executor.payload))
+		}
+	}
+	for _, field := range []string{"previous_response_id", "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "service_tier"} {
+		if !gjson.GetBytes(executor.payload, field).Exists() {
+			t.Fatalf("documented field %q was removed: %s", field, string(executor.payload))
 		}
 	}
 	if gjson.GetBytes(executor.payload, "input.0.metadata").Exists() {
