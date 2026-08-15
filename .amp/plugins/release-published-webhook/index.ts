@@ -17,6 +17,15 @@ export const description =
   "Verifies release provenance and starts one VN3 deployment thread.";
 const dir = join(".amp", "private", "release-published-webhook"),
   stateKey = "releasePublishedWebhookState";
+export function githubDownloadAccept(url: string): string {
+  const artifactArchive =
+    /^\/repos\/unstableneutron\/CLIProxyAPIPlus\/actions\/artifacts\/[1-9][0-9]*\/zip$/.test(
+      new URL(url).pathname,
+    );
+  return artifactArchive
+    ? "application/vnd.github+json"
+    : "application/octet-stream";
+}
 class GitHub implements GitHubClient {
   constructor(private token: string) {}
   async get(path: string, signal: AbortSignal) {
@@ -34,8 +43,9 @@ class GitHub implements GitHubClient {
   async bytes(url: string, signal: AbortSignal) {
     const r = await fetch(url, {
       headers: {
-        Accept: "application/octet-stream",
+        Accept: githubDownloadAccept(url),
         Authorization: `Bearer ${this.token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
       },
       signal,
     });
