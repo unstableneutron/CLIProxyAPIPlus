@@ -119,6 +119,17 @@ func TestClassify_does_not_retry_missing_compaction_encrypted_content(t *testing
 	}
 }
 
+func TestClassify_does_not_retry_unsupported_stateful_compact(t *testing.T) {
+	errText := `{"error":{"message":"Stateful compact requests are not supported for Codex OAuth. Resend the complete transcript in input and omit previous_response_id.","type":"invalid_request_error","code":"unsupported_stateful_compact"}}`
+
+	kind := Classify(http.StatusBadRequest, errText)
+	next, retry := NextAttempt(AttemptOriginal, kind)
+
+	if kind != ErrorNone || retry || next != AttemptOriginal {
+		t.Fatalf("Classify = %s, NextAttempt = %s retry=%v; want no stripping/retry", kind, next, retry)
+	}
+}
+
 func TestClassify_uses_structured_param_for_provider_state(t *testing.T) {
 	// Given
 	errText := `{"error":{"message":"input item not found","type":"invalid_request_error","code":"item_not_found","param":"input[2].id"}}`
