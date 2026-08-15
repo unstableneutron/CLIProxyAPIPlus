@@ -142,6 +142,7 @@ func (e *CodexExecutor) executeResponses(ctx context.Context, auth *cliproxyauth
 	lines := bytes.Split(upstreamData, []byte("\n"))
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	var compactOutputItems [][]byte
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -164,6 +165,10 @@ func (e *CodexExecutor) executeResponses(ctx context.Context, auth *cliproxyauth
 			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
 				continue
 			}
+			if !allowImageGeneration {
+				compactOutputItems = append(compactOutputItems, []byte(itemResult.Raw))
+				continue
+			}
 			outputIndexResult := gjson.GetBytes(eventData, "output_index")
 			if outputIndexResult.Exists() {
 				outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
@@ -183,6 +188,9 @@ func (e *CodexExecutor) executeResponses(ctx context.Context, auth *cliproxyauth
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
 		completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+		if !allowImageGeneration && eventType == "response.completed" {
+			completedData = patchCodexCompactCompletedOutput(completedData, compactOutputItems)
+		}
 		if eventType == "response.completed" {
 			cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
 		}

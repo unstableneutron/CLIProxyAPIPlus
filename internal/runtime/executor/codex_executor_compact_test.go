@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -118,14 +119,46 @@ func TestBuildCodexCompactEnvelopeSynthesizesContractFields(t *testing.T) {
 	}
 }
 
-func TestCodexCompactRetainsNewestWholeUserMessages(t *testing.T) {
+func TestCodexCompactTruncatesOversizedBoundaryUserMessages(t *testing.T) {
 	large := strings.Repeat("x", codexCompactMessageTokenBudget*4)
-	retained := codexCompactRetainedUserMessages([]any{
-		map[string]any{"id": "old", "role": "user", "content": large},
-		map[string]any{"id": "new", "role": "user", "content": "newest"},
-	})
-	if len(retained) != 1 || retained[0]["id"] != "new" {
-		t.Fatalf("retained = %#v", retained)
+	for _, tc := range []struct {
+		name  string
+		input []any
+		ids   []string
+	}{
+		{name: "sole oversized newest", input: []any{map[string]any{"id": "only", "role": "user", "content": large + "最新"}}, ids: []string{"only"}},
+		{name: "oversized boundary", input: []any{map[string]any{"id": "older", "role": "user", "content": "drop"}, map[string]any{"id": "boundary", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": large + "末尾"}, map[string]any{"type": "input_image", "image_url": "data:image/png;base64,opaque"}}}, map[string]any{"id": "new", "role": "user", "content": "newest"}}, ids: []string{"boundary", "new"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			retained := codexCompactRetainedUserMessages(tc.input)
+			if len(retained) != len(tc.ids) {
+				t.Fatalf("retained = %#v", retained)
+			}
+			total := 0
+			for index, message := range retained {
+				if message["id"] != tc.ids[index] {
+					t.Fatalf("retained[%d].id = %v, want %s", index, message["id"], tc.ids[index])
+				}
+				text := message["content"].([]any)[0].(map[string]any)["text"].(string)
+				if !utf8.ValidString(text) {
+					t.Fatalf("retained text is invalid UTF-8")
+				}
+				total += codexCompactEstimatedTokens(message)
+			}
+			if total > codexCompactMessageTokenBudget {
+				t.Fatalf("estimated tokens = %d, budget = %d", total, codexCompactMessageTokenBudget)
+			}
+			if tc.name == "oversized boundary" {
+				nontext := retained[0]["content"].([]any)[1].(map[string]any)
+				if nontext["type"] != "input_image" || nontext["image_url"] != "data:image/png;base64,opaque" {
+					t.Fatalf("nontext content changed: %#v", nontext)
+				}
+			}
+			latest := retained[len(retained)-1]["content"].([]any)[0].(map[string]any)["text"].(string)
+			if !strings.HasSuffix(latest, map[bool]string{true: "最新", false: "newest"}[tc.name == "sole oversized newest"]) {
+				t.Fatalf("latest text not preserved: %q", latest)
+			}
+		})
 	}
 }
 
@@ -266,7 +299,8 @@ func TestCodexExecutorOAuthCompactUsesResponsesAdapter(t *testing.T) {
 		gotPath = r.URL.Path
 		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1700000000,\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"encrypted_content\":\"opaque\",\"created_by\":\"server\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\",\"created_by\":\"server\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1700000000,\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"conflict\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -323,6 +357,8 @@ func TestCodexExecutorOAuthCompactSanitizesProtocolFailures(t *testing.T) {
 		{name: "truncated terminal", body: `data: {"type":"response.completed","response":{"secret":"SENTINEL_SECRET"}`},
 		{name: "response incomplete", body: "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"SENTINEL_SECRET\",\"status\":\"incomplete\"}}\n\n"},
 		{name: "malformed completed", body: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"SENTINEL_SECRET\",\"status\":\"completed\"}}\n\n"},
+		{name: "terminal only compaction", body: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1,\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"encrypted_content\":\"SENTINEL_SECRET\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"},
+		{name: "duplicate done output index", body: "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"SENTINEL_SECRET\"}}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"other\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1,\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

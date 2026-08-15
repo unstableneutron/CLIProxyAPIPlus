@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/sjson"
 )
 
 const codexCompactMessageTokenBudget = 64000
@@ -197,6 +199,23 @@ func finalizeCodexCompactAdapterBody(body []byte) ([]byte, error) {
 	return finalized, nil
 }
 
+func patchCodexCompactCompletedOutput(eventData []byte, items [][]byte) []byte {
+	var output bytes.Buffer
+	output.WriteByte('[')
+	for index, item := range items {
+		if index > 0 {
+			output.WriteByte(',')
+		}
+		output.Write(item)
+	}
+	output.WriteByte(']')
+	patched, err := sjson.SetRawBytes(eventData, "response.output", output.Bytes())
+	if err != nil {
+		return eventData
+	}
+	return patched
+}
+
 func codexCompactRetainedUserMessages(raw any) []map[string]any {
 	var messages []map[string]any
 	if text, ok := raw.(string); ok {
@@ -224,12 +243,83 @@ func codexCompactRetainedUserMessages(raw any) []map[string]any {
 	for start > 0 {
 		cost := codexCompactEstimatedTokens(messages[start-1])
 		if cost > budget {
+			if budget > 0 {
+				messages[start-1] = codexCompactTruncateMessage(messages[start-1], budget)
+				start--
+			}
 			break
 		}
 		budget -= cost
 		start--
 	}
 	return messages[start:]
+}
+
+const codexCompactTruncationMarker = "\n…[truncated]…\n"
+
+func codexCompactTruncateMessage(message map[string]any, tokenBudget int) map[string]any {
+	clone := codexCompactCloneAnyMap(message)
+	content, ok := message["content"].([]any)
+	if !ok {
+		return clone
+	}
+	clonedContent := make([]any, len(content))
+	for index, item := range content {
+		object, objectOK := item.(map[string]any)
+		if !objectOK {
+			clonedContent[index] = item
+			continue
+		}
+		clonedObject := codexCompactCloneAnyMap(object)
+		clonedContent[index] = clonedObject
+	}
+	remainingBytes := tokenBudget*4 + 3
+	for index := len(clonedContent) - 1; index >= 0; index-- {
+		object, okObject := clonedContent[index].(map[string]any)
+		if !okObject {
+			continue
+		}
+		text, okText := object["text"].(string)
+		if !okText {
+			continue
+		}
+		if len(text) <= remainingBytes {
+			remainingBytes -= len(text)
+			continue
+		}
+		object["text"] = codexCompactTruncateUTF8(text, remainingBytes)
+		remainingBytes = 0
+	}
+	clone["content"] = clonedContent
+	return clone
+}
+
+func codexCompactTruncateUTF8(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+	marker := codexCompactTruncationMarker
+	if maxBytes < len(marker) {
+		marker = "…"
+		if maxBytes < len(marker) {
+			return ""
+		}
+	}
+	available := maxBytes - len(marker)
+	headBytes := available / 2
+	tailBytes := available - headBytes
+	head := text[:headBytes]
+	for !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	tail := text[len(text)-tailBytes:]
+	for !utf8.ValidString(tail) {
+		tail = tail[1:]
+	}
+	return head + marker + tail
 }
 
 func codexCompactEstimatedTokens(message map[string]any) int {
