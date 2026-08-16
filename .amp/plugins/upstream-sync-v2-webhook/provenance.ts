@@ -9,6 +9,7 @@ export const githubActionsBotLogin = 'github-actions[bot]'
 
 const candidatePrefix = 'upstream-sync/'
 const workflowPath = '.github/workflows/upstream-sync-v2.yml'
+const expectedDispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
 const sourceRunMaximumAgeMs = 12 * 60 * 60 * 1000
 const maximumArtifactBytes = 4_000_000
 
@@ -432,15 +433,28 @@ export async function validateCandidate(
 
   const run = record(await client.get(`/repos/${repository}/actions/runs/${body.workflowRunID}`, signal), 'workflow run')
   const runRepository = record(run.repository, 'workflow repository')
+  const runHeadRepository = record(run.head_repository, 'workflow head repository')
   const runAttempt = integer(run.run_attempt, 'workflow run attempt')
   if (
+    run.id !== body.workflowRunID ||
     runRepository.id !== repositoryID ||
+    runRepository.full_name !== repository ||
+    runHeadRepository.id !== repositoryID ||
+    runHeadRepository.full_name !== repository ||
     run.path !== workflowPath ||
-    run.event !== 'schedule' ||
     run.head_branch !== 'main' ||
     run.head_sha !== baseSHA
   ) {
-    throw new RejectedDelivery('workflow run provenance does not match the daily v2 planner')
+    throw new RejectedDelivery('workflow run provenance does not match Upstream Sync v2')
+  }
+  if (run.event === 'workflow_dispatch') {
+    requireIdentity(run.actor, 'unstableneutron', repositoryOwnerID, 'User', 'workflow dispatch actor')
+    requireIdentity(run.triggering_actor, 'unstableneutron', repositoryOwnerID, 'User', 'workflow dispatch triggering actor')
+    if (run.display_title !== expectedDispatchTitle) {
+      throw new RejectedDelivery('workflow dispatch inputs do not match the one-shot candidate policy')
+    }
+  } else if (run.event !== 'schedule') {
+    throw new RejectedDelivery('workflow run event is not permitted')
   }
   const received = Date.parse(receivedAt)
   const runCreated = Date.parse(string(run.created_at, 'workflow creation time'))
@@ -472,6 +486,7 @@ export async function validateCandidate(
     if (created > candidateCreated) throw new RejectedDelivery(`newer upstream-sync candidate PR #${pullNumber} exists`)
     supersededPRs.push(pullNumber)
   }
+  requireSHA(await currentCommit(client, repository, 'main', signal), baseSHA, 'fork main')
 
   return {
     repository,

@@ -1,6 +1,6 @@
 # Upstream Sync v2 candidate webhook
 
-This project-local Amp plugin accepts GitHub `pull_request` webhooks for newly opened or reopened daily Upstream Sync v2 candidate PRs. After fail-closed provenance validation, it starts one fresh built-in `high` agent in a new Orb for the immutable candidate.
+This project-local Amp plugin accepts GitHub `pull_request` webhooks for newly opened or reopened Upstream Sync v2 candidate PRs. After fail-closed provenance validation, it starts one fresh built-in `high` agent in a new Orb for the immutable candidate.
 
 ## Validation contract
 
@@ -13,7 +13,9 @@ The handler requires all of the following before creating a thread:
 - open, non-draft PR against current `main`, with a same-repository candidate head;
 - exact title/body template, source commits, branch, tag, and 40-character plan fingerprint;
 - fingerprint recomputation using the repository's Git blob-hash algorithm;
-- fresh scheduled `.github/workflows/upstream-sync-v2.yml` run and exact bounded Actions artifact;
+- fresh scheduled `.github/workflows/upstream-sync-v2.yml` run, or an owner-triggered dispatch whose immutable run title proves `mode=promote`, `force_candidate=false`, and empty repair inputs;
+- exact workflow repository, path, `main` ref and head SHA, plus exact owner actor identities for a manual dispatch;
+- exact bounded Actions artifact identity, digest, ZIP structure, and planner values;
 - no-conflict or populated conflict section whose strict path list exactly matches the immutable planner artifact;
 - live Original tag, Plus tag/head, models head, and fork main matching the body;
 - expected fork tag still absent and no newer open upstream-sync candidate.

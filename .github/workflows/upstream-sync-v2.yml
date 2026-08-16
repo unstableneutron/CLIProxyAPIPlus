@@ -1,4 +1,5 @@
 name: Upstream Sync v2
+run-name: Upstream Sync v2 [event=${{ github.event_name }} mode=${{ inputs.mode }} force_candidate=${{ inputs.force_candidate }} repair_ref=${{ inputs.repair_ref }} repair_sha=${{ inputs.repair_sha }} repair_fingerprint=${{ inputs.repair_fingerprint }} repair_pr=${{ inputs.repair_pr }}]
 
 # Candidate-first upstream synchronization. One exact plan is materialized,
 # recorded, validated, and either retained for review or promoted unchanged.
@@ -552,6 +553,17 @@ jobs:
               }
             ' > "${SYNC_WORK_DIR}/run-state.json"
 
+      # Publish immutable provenance before opening the PR so the webhook can
+      # validate the artifact without racing the workflow.
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.plan.outputs.has_changes == 'true'
+        with:
+          name: upstream-sync-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SYNC_WORK_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Open or update blocked candidate PR
         if: always() && (github.event_name == 'schedule' || inputs.mode == 'promote') && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'
         env:
@@ -577,15 +589,6 @@ jobs:
               --title "Resolve upstream sync ${EXPECTED_FORK_TAG}" \
               --body-file "${SYNC_WORK_DIR}/report/candidate.md"
           fi
-
-      # actions/upload-artifact v7.0.1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always() && steps.plan.outputs.has_changes == 'true'
-        with:
-          name: upstream-sync-v2-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.SYNC_WORK_DIR }}
-          if-no-files-found: error
-          retention-days: 14
 
       - name: Reject unpromotable candidate
         if: always() && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'

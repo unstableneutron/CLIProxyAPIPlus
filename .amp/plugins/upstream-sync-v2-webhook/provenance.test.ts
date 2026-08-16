@@ -39,6 +39,7 @@ const workflowRunID = 12345
 const workflowRunAttempt = 1
 const artifactID = 54321
 const artifactURL = `https://api.github.com/repos/${repository}/actions/artifacts/${artifactID}/zip`
+const dispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
 
 const bot = { login: githubActionsBotLogin, id: githubActionsBotID, type: 'Bot' }
 const owner = { login: 'unstableneutron', id: repositoryOwnerID, type: 'User' }
@@ -181,13 +182,18 @@ function fixture() {
     ['/repos/kaitranntt/CLIProxyAPIPlus/commits/main', { sha: plusCommit }],
     ['/repos/router-for-me/models/commits/main', { sha: modelsCommit }],
     [`/repos/${repository}/actions/runs/${workflowRunID}`, {
-      repository: { id: repositoryID },
+      id: workflowRunID,
+      repository: { id: repositoryID, full_name: repository },
+      head_repository: { id: repositoryID, full_name: repository },
       path: '.github/workflows/upstream-sync-v2.yml',
       event: 'schedule',
       head_branch: 'main',
       head_sha: baseSHA,
       created_at: '2026-08-15T05:35:00Z',
       run_attempt: workflowRunAttempt,
+      actor: owner,
+      triggering_actor: owner,
+      display_title: 'Upstream Sync v2',
     }],
     [`/repos/${repository}/pulls?state=open&base=main&per_page=100`, [canonical]],
   ])
@@ -232,6 +238,17 @@ function fixture() {
   return { payload, canonical, client, values, setPlannerConflicts }
 }
 
+function workflowRun(values: Map<string, unknown>): Record<string, unknown> {
+  return values.get(`/repos/${repository}/actions/runs/${workflowRunID}`) as Record<string, unknown>
+}
+
+function setWorkflowDispatch(values: Map<string, unknown>): Record<string, unknown> {
+  const run = workflowRun(values)
+  run.event = 'workflow_dispatch'
+  run.display_title = dispatchTitle
+  return run
+}
+
 describe('GitHub signature verification', () => {
   test('accepts the exact body signature and rejects drift', () => {
     const secret = 'a'.repeat(32)
@@ -244,7 +261,10 @@ describe('GitHub signature verification', () => {
 
 describe('candidate provenance', () => {
   test('accepts an exact fresh scheduled candidate', async () => {
-    const { payload, client } = fixture()
+    const { payload, client, values } = fixture()
+    const run = workflowRun(values)
+    run.actor = bot
+    run.triggering_actor = bot
     const candidate = await validateCandidate(payload, receivedAt, client, signal)
     expect(candidate.number).toBe(77)
     expect(candidate.planFingerprint).toBe(fingerprint)
@@ -305,11 +325,70 @@ describe('candidate provenance', () => {
     await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('candidate branch does not match fingerprint')
   })
 
-  test('rejects workflow_dispatch candidates instead of treating them as daily', async () => {
+  test('accepts an exact owner-triggered promote workflow dispatch', async () => {
     const { payload, client, values } = fixture()
-    const run = values.get(`/repos/${repository}/actions/runs/${workflowRunID}`) as { event: string }
-    run.event = 'workflow_dispatch'
-    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('daily v2 planner')
+    setWorkflowDispatch(values)
+    expect((await validateCandidate(payload, receivedAt, client, signal)).workflowRunID).toBe(workflowRunID)
+  })
+
+  test('rejects a workflow dispatch whose actor identity is spoofed', async () => {
+    const { payload, client, values } = fixture()
+    const run = setWorkflowDispatch(values)
+    run.actor = { ...owner, id: repositoryOwnerID + 1 }
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow dispatch actor identity')
+  })
+
+  test('rejects a workflow dispatch whose triggering actor identity is spoofed', async () => {
+    const { payload, client, values } = fixture()
+    const run = setWorkflowDispatch(values)
+    run.triggering_actor = bot
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow dispatch triggering actor identity')
+  })
+
+  for (const [name, title] of [
+    ['shadow mode', dispatchTitle.replace('mode=promote', 'mode=shadow')],
+    ['forced candidate', dispatchTitle.replace('force_candidate=false', 'force_candidate=true')],
+    ['repair ref', dispatchTitle.replace('repair_ref=', 'repair_ref=repair/branch')],
+    ['repair SHA', dispatchTitle.replace('repair_sha=', `repair_sha=${'a'.repeat(40)}`)],
+    ['repair fingerprint', dispatchTitle.replace('repair_fingerprint=', `repair_fingerprint=${'b'.repeat(40)}`)],
+    ['repair PR', dispatchTitle.replace('repair_pr=', 'repair_pr=56')],
+  ]) {
+    test(`rejects workflow dispatch input spoofing via ${name}`, async () => {
+      const { payload, client, values } = fixture()
+      const run = setWorkflowDispatch(values)
+      run.display_title = title
+      await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow dispatch inputs')
+    })
+  }
+
+  test('rejects workflow run repository spoofing', async () => {
+    const { payload, client, values } = fixture()
+    workflowRun(values).head_repository = { id: repositoryID + 1, full_name: repository }
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run provenance')
+  })
+
+  test('rejects workflow path spoofing', async () => {
+    const { payload, client, values } = fixture()
+    workflowRun(values).path = '.github/workflows/attacker.yml'
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run provenance')
+  })
+
+  test('rejects workflow ref spoofing', async () => {
+    const { payload, client, values } = fixture()
+    workflowRun(values).head_branch = 'attacker/ref'
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run provenance')
+  })
+
+  test('rejects workflow SHA spoofing', async () => {
+    const { payload, client, values } = fixture()
+    workflowRun(values).head_sha = '9'.repeat(40)
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run provenance')
+  })
+
+  test('rejects unsupported workflow events', async () => {
+    const { payload, client, values } = fixture()
+    workflowRun(values).event = 'repository_dispatch'
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run event is not permitted')
   })
 
   test('rejects stale source heads', async () => {
@@ -383,6 +462,21 @@ describe('candidate provenance', () => {
     const { payload, client, values } = fixture()
     values.set(`/repos/${repository}/commits/main`, { sha: '8'.repeat(40) })
     await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('fork main moved')
+  })
+
+  test('rejects fork main moving during pre-claim provenance checks', async () => {
+    const { payload, client } = fixture()
+    let mainReads = 0
+    const movingClient: GitHubClient = {
+      ...client,
+      get: (path, requestSignal, allowNotFound) => {
+        if (path === `/repos/${repository}/commits/main` && ++mainReads === 2) {
+          return Promise.resolve({ sha: '8'.repeat(40) })
+        }
+        return client.get(path, requestSignal, allowNotFound)
+      },
+    }
+    await expect(validateCandidate(payload, receivedAt, movingClient, signal)).rejects.toThrow('fork main moved')
   })
 
   test('rejects a candidate whose release tag already exists', async () => {
