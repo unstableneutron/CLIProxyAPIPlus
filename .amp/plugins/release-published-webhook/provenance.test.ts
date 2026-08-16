@@ -617,6 +617,46 @@ describe("upstream release provenance", () => {
     });
   });
 
+  test("accepts GitHub's stable released action through the same provenance", async () => {
+    const fixture = releaseFixture();
+    fixture.payload.action = "released";
+    await expect(validate(fixture)).resolves.toMatchObject({
+      releaseID: 100,
+      tag: fixture.currentTag,
+      commit: fixture.currentCommit,
+    });
+  });
+
+  test.each(["created", "edited", "prereleased", "unpublished", "deleted"])(
+    "rejects premature or wrong action %s before outbound calls",
+    async (action) => {
+      const fixture = releaseFixture();
+      fixture.payload.action = action;
+      let calls = 0;
+      const failing: GitHubClient = {
+        get: async () => {
+          calls++;
+          throw new Error("network must not run");
+        },
+        bytes: async () => {
+          calls++;
+          throw new Error("network must not run");
+        },
+      };
+      await expect(
+        validateRelease(
+          fixture.payload,
+          receivedAt,
+          failing,
+          fixture.registry.client,
+          signal,
+          { now },
+        ),
+      ).rejects.toThrow("action is not a stable release publication");
+      expect(calls).toBe(0);
+    },
+  );
+
   test.each([
     ["canonical assets", (f:ReleaseFixture)=>f.canonical.assets.pop()],
     ["latest", (f:ReleaseFixture)=>f.values.get(`/repos/${REPOSITORY}/releases/latest`).id++],
@@ -706,9 +746,13 @@ describe("upstream release provenance", () => {
     await expect(validate(latest)).rejects.toThrow("latest");
   });
 
-  test("rejects draft and prerelease payload status", async () => {
+  test.each([
+    ["draft", (fixture: ReleaseFixture) => { fixture.payload.release.draft = true; }],
+    ["prerelease", (fixture: ReleaseFixture) => { fixture.payload.release.prerelease = true; }],
+  ])("rejects %s stable-action payload status", async (_name, mutate) => {
     const fixture = releaseFixture();
-    fixture.payload.release.prerelease = true;
+    fixture.payload.action = "released";
+    mutate(fixture);
     await expect(validate(fixture)).rejects.toThrow("status");
   });
 

@@ -47,6 +47,10 @@ describe("webhook admission", () => {
     const b = encode('{"action":"published"}');
     expect(admitWebhook(headers(b), b, secret).kind).toBe("release");
   });
+  test("accepts GitHub's stable released lifecycle action", () => {
+    const b = encode('{"action":"released"}');
+    expect(admitWebhook(headers(b), b, secret).kind).toBe("release");
+  });
   test("rejects arbitrary delivery IDs", () => {
     const b = encode('{"action":"published"}');
     expect(() =>
@@ -85,10 +89,20 @@ describe("webhook admission", () => {
       "request body invalid",
     );
   });
-  test("rejects non-published actions", () => {
-    const b = encode('{"action":"created"}');
-    expect(() => admitWebhook(headers(b), b, secret)).toThrow(
-      "action is not published",
+  test.each(["created", "edited", "prereleased", "unpublished", "deleted"])(
+    "rejects non-publication action %s",
+    (action) => {
+      const b = encode(JSON.stringify({ action }));
+      expect(() => admitWebhook(headers(b), b, secret)).toThrow(
+        "action is not a stable release publication",
+      );
+    },
+  );
+  test("rejects a spoofed stable action with a mismatched HMAC", () => {
+    const published = encode('{"action":"published"}');
+    const released = encode('{"action":"released"}');
+    expect(() => admitWebhook(headers(published), released, secret)).toThrow(
+      "signature invalid",
     );
   });
 });

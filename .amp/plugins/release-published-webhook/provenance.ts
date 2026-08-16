@@ -1126,8 +1126,8 @@ export async function validateRelease(
   options: ValidateReleaseOptions = {},
 ): Promise<VerifiedRelease> {
   const payload = object(payloadValue, "payload");
-  if (payload.action !== "published")
-    throw new RejectedDelivery("action is not published");
+  if (payload.action !== "published" && payload.action !== "released")
+    throw new RejectedDelivery("action is not a stable release publication");
   repository(payload.repository, "payload repository");
   identity(payload.sender, BOT_LOGIN, BOT_ID, "Bot", "sender");
 

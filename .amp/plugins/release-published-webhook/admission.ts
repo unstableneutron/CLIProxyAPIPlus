@@ -42,7 +42,7 @@ export function admitWebhook(
     throw new RejectedDelivery("request body invalid");
   }
   const payload = value as Record<string, unknown>;
-  if (payload.action !== "published")
-    throw new RejectedDelivery("action is not published");
+  if (payload.action !== "published" && payload.action !== "released")
+    throw new RejectedDelivery("action is not a stable release publication");
   return { kind: "release", deliveryID, payload };
 }
