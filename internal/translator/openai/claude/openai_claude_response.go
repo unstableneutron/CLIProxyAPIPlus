@@ -416,6 +416,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	// Process message content and tool calls
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
+		var contentBlocks [][]byte
 
 		reasoningNode := choice.Get("message.reasoning_content")
 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
@@ -424,14 +425,14 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 			}
 			block := []byte(`{"type":"thinking","thinking":""}`)
 			block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			contentBlocks = append(contentBlocks, block)
 		}
 
 		// Handle text content
 		if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
 			block := []byte(`{"type":"text","text":""}`)
 			block, _ = sjson.SetBytes(block, "text", content.String())
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			contentBlocks = append(contentBlocks, block)
 		}
 
 		// Handle tool calls
@@ -453,9 +454,13 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
 				}
 
-				out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
+				contentBlocks = append(contentBlocks, toolUseBlock)
 				return true
 			})
+		}
+
+		if len(contentBlocks) > 0 {
+			out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
 		}
 
 		// Set stop reason
@@ -634,6 +639,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	hasToolCall := false
 	stopReasonSet := false
+	var blocks [][]byte
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0]
@@ -651,7 +657,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					}
 					block := []byte(`{"type":"thinking","thinking":""}`)
 					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+					blocks = append(blocks, block)
 				}
 			}
 
@@ -666,7 +672,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						}
 						block := []byte(`{"type":"text","text":""}`)
 						block, _ = sjson.SetBytes(block, "text", textBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 						textBuilder.Reset()
 					}
 
@@ -676,7 +682,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						}
 						block := []byte(`{"type":"thinking","thinking":""}`)
 						block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 						thinkingBuilder.Reset()
 					}
 
@@ -708,7 +714,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 									}
 
-									out, _ = sjson.SetRawBytes(out, "content.-1", toolUse)
+									blocks = append(blocks, toolUse)
 									return true
 								})
 							}
@@ -730,7 +736,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					if textContent != "" {
 						block := []byte(`{"type":"text","text":""}`)
 						block, _ = sjson.SetBytes(block, "text", textContent)
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
+						blocks = append(blocks, block)
 					}
 				}
 			}
@@ -754,11 +760,15 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
 					}
 
-					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
+					blocks = append(blocks, toolUseBlock)
 					return true
 				})
 			}
 		}
+	}
+
+	if len(blocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
