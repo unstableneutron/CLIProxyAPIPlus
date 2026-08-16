@@ -13,7 +13,8 @@ The handler requires all of the following before creating a thread:
 - open, non-draft PR against current `main`, with a same-repository candidate head;
 - exact title/body template, source commits, branch, tag, and 40-character plan fingerprint;
 - fingerprint recomputation using the repository's Git blob-hash algorithm;
-- fresh scheduled `.github/workflows/upstream-sync-v2.yml` run;
+- fresh scheduled `.github/workflows/upstream-sync-v2.yml` run and exact bounded Actions artifact;
+- no-conflict or populated conflict section whose strict path list exactly matches the immutable planner artifact;
 - live Original tag, Plus tag/head, models head, and fork main matching the body;
 - expected fork tag still absent and no newer open upstream-sync candidate.
 

@@ -27,6 +27,19 @@ class GitHubAPI implements GitHubClient {
     if (!response.ok) throw new Error(`GitHub API ${path} returned ${response.status}`)
     return response.json()
   }
+
+  async bytes(url: string, signal: AbortSignal): Promise<Uint8Array> {
+    const response = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${this.token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal,
+    })
+    if (!response.ok) throw new Error(`GitHub artifact download returned ${response.status}`)
+    return new Uint8Array(await response.arrayBuffer())
+  }
 }
 
 function asDispatchState(value: unknown): DispatchState {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import {
   githubActionsBotID,
   githubActionsBotLogin,
@@ -35,6 +35,10 @@ const fingerprint = planFingerprint({
   expectedTag,
 })
 const branch = `upstream-sync/${syncID}-${fingerprint.slice(0, 12)}`
+const workflowRunID = 12345
+const workflowRunAttempt = 1
+const artifactID = 54321
+const artifactURL = `https://api.github.com/repos/${repository}/actions/artifacts/${artifactID}/zip`
 
 const bot = { login: githubActionsBotLogin, id: githubActionsBotID, type: 'Bot' }
 const owner = { login: 'unstableneutron', id: repositoryOwnerID, type: 'User' }
@@ -63,7 +67,88 @@ const body = `# Upstream sync candidate
 - Fresh: **true**
 - Stale reasons: None
 - Conflicts: **None**
+
+## Provenance guidance
 `
+
+function crc32(value: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of value) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function storedZip(files: Record<string, string>): Uint8Array {
+  const local: Buffer[] = []
+  const central: Buffer[] = []
+  let offset = 0
+  for (const [name, text] of Object.entries(files)) {
+    const nameBytes = Buffer.from(name)
+    const data = Buffer.from(text)
+    const checksum = crc32(data)
+    const localHeader = Buffer.alloc(30 + nameBytes.length)
+    localHeader.writeUInt32LE(0x04034b50)
+    localHeader.writeUInt16LE(20, 4)
+    localHeader.writeUInt32LE(checksum, 14)
+    localHeader.writeUInt32LE(data.length, 18)
+    localHeader.writeUInt32LE(data.length, 22)
+    localHeader.writeUInt16LE(nameBytes.length, 26)
+    nameBytes.copy(localHeader, 30)
+    local.push(localHeader, data)
+
+    const centralHeader = Buffer.alloc(46 + nameBytes.length)
+    centralHeader.writeUInt32LE(0x02014b50)
+    centralHeader.writeUInt16LE(20, 4)
+    centralHeader.writeUInt16LE(20, 6)
+    centralHeader.writeUInt32LE(checksum, 16)
+    centralHeader.writeUInt32LE(data.length, 20)
+    centralHeader.writeUInt32LE(data.length, 24)
+    centralHeader.writeUInt16LE(nameBytes.length, 28)
+    centralHeader.writeUInt32LE(offset, 42)
+    nameBytes.copy(centralHeader, 46)
+    central.push(centralHeader)
+    offset += localHeader.length + data.length
+  }
+  const directory = Buffer.concat(central)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50)
+  end.writeUInt16LE(central.length, 8)
+  end.writeUInt16LE(central.length, 10)
+  end.writeUInt32LE(directory.length, 12)
+  end.writeUInt32LE(offset, 16)
+  return new Uint8Array(Buffer.concat([...local, directory, end]))
+}
+
+function bodyWithConflicts(conflicts: string[]): string {
+  if (conflicts.length === 0) return body
+  return body.replace(
+    '- Conflicts: **None**',
+    ['- Conflicts:', ...conflicts.map((path) => `  - \`${path}\``)].join('\n'),
+  )
+}
+
+function plannerOutput(conflicts: string[]): string {
+  const values = [
+    `base_fork_commit=${baseSHA}`,
+    `original_tag=${originalTag}`,
+    `original_head=${originalCommit}`,
+    `plus_tag=${plusTag}`,
+    `plus_tag_head=${plusCommit}`,
+    `plus_head=${plusCommit}`,
+    'plus_head_included=false',
+    `models_commit=${modelsCommit}`,
+    `expected_fork_tag=${expectedTag}`,
+    `safe_sync_id=${syncID}`,
+    `plan_fingerprint=${fingerprint}`,
+    `candidate_branch=${branch}`,
+    `conflicts=${conflicts.length > 0}`,
+  ]
+  if (conflicts.length === 0) values.push('conflict_files=')
+  else values.push('conflict_files<<EOF_conflict_files', ...conflicts, 'EOF_conflict_files')
+  return `${values.join('\n')}\n`
+}
 
 function fixture() {
   const canonical = {
@@ -85,6 +170,7 @@ function fixture() {
     repository: repo,
     pull_request: { number: 77 },
   }
+  const archiveBytes = new Map<string, Uint8Array>()
   const values = new Map<string, unknown>([
     [`/repos/${repository}/pulls/77`, canonical],
     [`/repos/${repository}/commits/main`, { sha: baseSHA }],
@@ -94,24 +180,56 @@ function fixture() {
     ['/repos/kaitranntt/CLIProxyAPIPlus/commits/v7.2.127-4', { sha: plusCommit }],
     ['/repos/kaitranntt/CLIProxyAPIPlus/commits/main', { sha: plusCommit }],
     ['/repos/router-for-me/models/commits/main', { sha: modelsCommit }],
-    [`/repos/${repository}/actions/runs/12345`, {
+    [`/repos/${repository}/actions/runs/${workflowRunID}`, {
       repository: { id: repositoryID },
       path: '.github/workflows/upstream-sync-v2.yml',
       event: 'schedule',
       head_branch: 'main',
       head_sha: baseSHA,
       created_at: '2026-08-15T05:35:00Z',
+      run_attempt: workflowRunAttempt,
     }],
     [`/repos/${repository}/pulls?state=open&base=main&per_page=100`, [canonical]],
   ])
+  const setPlannerConflicts = (conflicts: string[]) => {
+    const archive = storedZip({
+      'work/plan.out': plannerOutput(conflicts),
+      'work/report/candidate.md': bodyWithConflicts(conflicts),
+    })
+    archiveBytes.set(artifactURL, archive)
+    values.set(`/repos/${repository}/actions/runs/${workflowRunID}/artifacts?per_page=100`, {
+      total_count: 1,
+      artifacts: [{
+        id: artifactID,
+        name: `upstream-sync-v2-${workflowRunID}-${workflowRunAttempt}`,
+        size_in_bytes: archive.length,
+        digest: `sha256:${createHash('sha256').update(archive).digest('hex')}`,
+        expired: false,
+        archive_download_url: artifactURL,
+        workflow_run: {
+          id: workflowRunID,
+          repository_id: repositoryID,
+          head_repository_id: repositoryID,
+          head_branch: 'main',
+          head_sha: baseSHA,
+        },
+      }],
+    })
+  }
+  setPlannerConflicts([])
   const client: GitHubClient = {
     get: async (path, _signal, allowNotFound) => {
       if (values.has(path)) return structuredClone(values.get(path))
       if (allowNotFound) return null
       throw new Error(`missing fixture: ${path}`)
     },
+    bytes: async (url) => {
+      const value = archiveBytes.get(url)
+      if (!value) throw new Error(`missing archive fixture: ${url}`)
+      return new Uint8Array(value)
+    },
   }
-  return { payload, canonical, client, values }
+  return { payload, canonical, client, values, setPlannerConflicts }
 }
 
 describe('GitHub signature verification', () => {
@@ -133,6 +251,53 @@ describe('candidate provenance', () => {
     expect(candidate.headRef).toBe(branch)
   })
 
+  test('accepts a populated canonical conflict list matching the planner artifact', async () => {
+    const conflicts = [
+      'internal/runtime/executor/codex_websockets_stream.go',
+      'sdk/cliproxy/auth/conductor_stream.go',
+    ]
+    const { payload, canonical, client, setPlannerConflicts } = fixture()
+    canonical.body = bodyWithConflicts(conflicts)
+    setPlannerConflicts(conflicts)
+    expect((await validateCandidate(payload, receivedAt, client, signal)).planFingerprint).toBe(fingerprint)
+  })
+
+  test('rejects a malformed populated conflict list', async () => {
+    const { payload, canonical, client } = fixture()
+    canonical.body = body.replace('- Conflicts: **None**', '- Conflicts:\n  - unquoted/path.go')
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('conflict list is malformed')
+  })
+
+  test('rejects conflict entries hidden under a no-conflict status', async () => {
+    const { payload, canonical, client } = fixture()
+    canonical.body = body.replace(
+      '- Conflicts: **None**',
+      '- Conflicts: **None**\n  - `attacker/spoofed.go`',
+    )
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('no-conflict section has entries')
+  })
+
+  test('rejects a spoofed conflict absent from the planner artifact', async () => {
+    const { payload, canonical, client } = fixture()
+    canonical.body = bodyWithConflicts(['attacker/spoofed.go'])
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('differs from planner artifact')
+  })
+
+  test('rejects a conflict list that omits a planner conflict', async () => {
+    const bodyConflicts = ['internal/runtime/executor/codex_websockets_stream.go']
+    const plannerConflicts = [...bodyConflicts, 'sdk/cliproxy/auth/conductor_stream.go']
+    const { payload, canonical, client, setPlannerConflicts } = fixture()
+    canonical.body = bodyWithConflicts(bodyConflicts)
+    setPlannerConflicts(plannerConflicts)
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('differs from planner artifact')
+  })
+
+  test('rejects duplicate conflict paths before consulting the artifact', async () => {
+    const { payload, canonical, client } = fixture()
+    canonical.body = bodyWithConflicts(['same/path.go', 'same/path.go'])
+    await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('conflict list is duplicated')
+  })
+
   test('rejects a fingerprint that does not match immutable inputs', async () => {
     const { payload, client, values } = fixture()
     const canonical = values.get(`/repos/${repository}/pulls/77`) as { body: string }
@@ -142,7 +307,7 @@ describe('candidate provenance', () => {
 
   test('rejects workflow_dispatch candidates instead of treating them as daily', async () => {
     const { payload, client, values } = fixture()
-    const run = values.get(`/repos/${repository}/actions/runs/12345`) as { event: string }
+    const run = values.get(`/repos/${repository}/actions/runs/${workflowRunID}`) as { event: string }
     run.event = 'workflow_dispatch'
     await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('daily v2 planner')
   })
@@ -228,7 +393,7 @@ describe('candidate provenance', () => {
 
   test('rejects a source workflow outside the freshness window', async () => {
     const { payload, client, values } = fixture()
-    const run = values.get(`/repos/${repository}/actions/runs/12345`) as { created_at: string }
+    const run = values.get(`/repos/${repository}/actions/runs/${workflowRunID}`) as { created_at: string }
     run.created_at = '2026-08-14T00:00:00Z'
     await expect(validateCandidate(payload, receivedAt, client, signal)).rejects.toThrow('workflow run is not fresh')
   })

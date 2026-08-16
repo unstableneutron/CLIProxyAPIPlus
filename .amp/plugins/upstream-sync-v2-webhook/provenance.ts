@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import { readZipBasenames } from './zip'
 
 export const repository = 'unstableneutron/CLIProxyAPIPlus'
 export const repositoryID = 1247056725
@@ -9,9 +10,11 @@ export const githubActionsBotLogin = 'github-actions[bot]'
 const candidatePrefix = 'upstream-sync/'
 const workflowPath = '.github/workflows/upstream-sync-v2.yml'
 const sourceRunMaximumAgeMs = 12 * 60 * 60 * 1000
+const maximumArtifactBytes = 4_000_000
 
 export interface GitHubClient {
   get(path: string, signal: AbortSignal, allowNotFound?: boolean): Promise<unknown | null>
+  bytes(url: string, signal: AbortSignal): Promise<Uint8Array>
 }
 
 export interface Candidate {
@@ -51,6 +54,7 @@ interface ParsedBody {
   plusHeadCommit: string
   plusHeadIncluded: boolean
   modelsCommit: string
+  conflictFiles: string[]
 }
 
 type JSONRecord = Record<string, unknown>
@@ -69,7 +73,9 @@ export function gitBlobHash(content: string): string {
   return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
 }
 
-export function planFingerprint(fields: Omit<ParsedBody, 'syncID' | 'candidateBranch' | 'planFingerprint' | 'workflowRunID'>): string {
+export function planFingerprint(
+  fields: Omit<ParsedBody, 'syncID' | 'candidateBranch' | 'planFingerprint' | 'workflowRunID' | 'conflictFiles'>,
+): string {
   const content = [
     `base_fork_commit=${fields.baseCommit}`,
     `original_tag=${fields.originalTag}`,
@@ -116,6 +122,49 @@ function exactMatch(body: string, expression: RegExp, field: string): RegExpMatc
   return matches[0]
 }
 
+function parseConflictFiles(body: string): string[] {
+  const noConflicts = [...body.matchAll(/^- Conflicts: \*\*None\*\*$/gm)]
+  const populated = [...body.matchAll(/^- Conflicts:$/gm)]
+  if (noConflicts.length + populated.length !== 1) {
+    throw new RejectedDelivery('candidate body must contain exactly one conflict status')
+  }
+  const match = noConflicts[0] ?? populated[0]
+  const start = (match.index ?? 0) + match[0].length
+  const remainder = body.slice(start)
+  const end = remainder.indexOf('\n\n')
+  if (end === -1 || !remainder.slice(end + 2).startsWith('## Provenance guidance')) {
+    throw new RejectedDelivery('candidate conflict section is malformed')
+  }
+  const rawSection = remainder.slice(0, end)
+  if (noConflicts.length === 1) {
+    if (rawSection) throw new RejectedDelivery('candidate no-conflict section has entries')
+    return []
+  }
+  const section = rawSection.replace(/^\n/, '')
+  if (!section) throw new RejectedDelivery('candidate conflict list is empty')
+
+  const conflicts = section.split('\n').map((line) => {
+    const item = /^  - `([^`]+)`$/.exec(line)
+    if (!item) throw new RejectedDelivery('candidate conflict list is malformed')
+    const path = item[1]
+    if (
+      Buffer.byteLength(path) > 4_096 ||
+      path.startsWith('/') ||
+      path.includes('\\') ||
+      /[\x00-\x1f\x7f]/.test(path) ||
+      path.split('/').some((segment) => !segment || segment === '.' || segment === '..')
+    ) {
+      throw new RejectedDelivery('candidate conflict path is invalid')
+    }
+    return path
+  })
+  if (new Set(conflicts).size !== conflicts.length) throw new RejectedDelivery('candidate conflict list is duplicated')
+  if (conflicts.join('\n') !== [...conflicts].sort().join('\n')) {
+    throw new RejectedDelivery('candidate conflict list is not sorted')
+  }
+  return conflicts
+}
+
 export function parseCandidateBody(body: string): ParsedBody {
   if (body.length > 100_000) throw new RejectedDelivery('candidate body is too large')
   const syncID = exactMatch(body, /^- Sync ID: `([^`]+)`$/m, 'sync ID')[1]
@@ -133,7 +182,7 @@ export function parseCandidateBody(body: string): ParsedBody {
   const plusHead = exactMatch(body, /^\| Plus head \(included: `(true|false)`\) \| `main` \| `([0-9a-f]{40})` \|$/m, 'Plus head snapshot')
   const modelsCommit = exactMatch(body, /^\| Models \| `main` \| `([0-9a-f]{40})` \|$/m, 'models snapshot')[1]
   exactMatch(body, /^- Fresh: \*\*true\*\*$/m, 'fresh status')
-  exactMatch(body, /^- Conflicts: \*\*None\*\*$/m, 'conflict status')
+  const conflictFiles = parseConflictFiles(body)
 
   return {
     syncID,
@@ -149,6 +198,7 @@ export function parseCandidateBody(body: string): ParsedBody {
     plusHeadCommit: plusHead[2],
     plusHeadIncluded: plusHead[1] === 'true',
     modelsCommit,
+    conflictFiles,
   }
 }
 
@@ -188,6 +238,119 @@ async function currentCommit(client: GitHubClient, repo: string, ref: string, si
 async function latestRelease(client: GitHubClient, repo: string, signal: AbortSignal): Promise<string> {
   const release = record(await client.get(`/repos/${repo}/releases/latest`, signal), `${repo} latest release`)
   return string(release.tag_name, `${repo} latest release tag`)
+}
+
+function outputValue(content: string, key: string): string {
+  const lines = content.split('\n')
+  const values: string[] = []
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]
+    if (line.startsWith(`${key}=`)) {
+      values.push(line.slice(key.length + 1))
+      continue
+    }
+    if (!line.startsWith(`${key}<<`)) continue
+    const delimiter = line.slice(key.length + 2)
+    if (!/^EOF_[A-Za-z0-9_]+$/.test(delimiter)) throw new RejectedDelivery('planner output delimiter is invalid')
+    const value: string[] = []
+    let end = index + 1
+    while (end < lines.length && lines[end] !== delimiter) value.push(lines[end++])
+    if (end === lines.length) throw new RejectedDelivery('planner output is unterminated')
+    values.push(value.join('\n'))
+    index = end
+  }
+  if (values.length === 0 || values.some((value) => value !== values[0])) {
+    throw new RejectedDelivery(`planner output must contain one consistent ${key}`)
+  }
+  return values[0]
+}
+
+function requirePlanValue(plan: string, key: string, expected: string): void {
+  if (outputValue(plan, key) !== expected) throw new RejectedDelivery(`planner ${key} differs`)
+}
+
+async function verifyConflictArtifact(
+  client: GitHubClient,
+  runID: number,
+  runAttempt: number,
+  runHeadSHA: string,
+  body: ParsedBody,
+  signal: AbortSignal,
+): Promise<void> {
+  const listing = record(
+    await client.get(`/repos/${repository}/actions/runs/${runID}/artifacts?per_page=100`, signal),
+    'workflow artifacts',
+  )
+  if (
+    !Array.isArray(listing.artifacts) ||
+    !Number.isSafeInteger(listing.total_count) ||
+    listing.total_count !== listing.artifacts.length ||
+    listing.artifacts.length === 100
+  ) {
+    throw new RejectedDelivery('workflow artifact listing is malformed')
+  }
+  const expectedName = `upstream-sync-v2-${runID}-${runAttempt}`
+  const matches = listing.artifacts.filter((value) => record(value, 'workflow artifact').name === expectedName)
+  if (matches.length !== 1) throw new RejectedDelivery('workflow planner artifact is missing or duplicated')
+  const artifact = record(matches[0], 'workflow artifact')
+  const artifactID = integer(artifact.id, 'artifact ID')
+  const artifactSize = integer(artifact.size_in_bytes, 'artifact size')
+  const artifactRun = record(artifact.workflow_run, 'artifact workflow run')
+  const archiveURL = `https://api.github.com/repos/${repository}/actions/artifacts/${artifactID}/zip`
+  if (
+    artifact.name !== expectedName ||
+    artifact.expired !== false ||
+    artifactSize < 1 ||
+    artifactSize > maximumArtifactBytes ||
+    artifact.archive_download_url !== archiveURL ||
+    artifactRun.id !== runID ||
+    artifactRun.repository_id !== repositoryID ||
+    artifactRun.head_repository_id !== repositoryID ||
+    artifactRun.head_branch !== 'main' ||
+    artifactRun.head_sha !== runHeadSHA
+  ) {
+    throw new RejectedDelivery('workflow planner artifact identity differs')
+  }
+  const archive = await client.bytes(archiveURL, signal)
+  if (archive.length !== artifactSize) throw new RejectedDelivery('workflow planner artifact size differs')
+  if (artifact.digest !== `sha256:${createHash('sha256').update(archive).digest('hex')}`) {
+    throw new RejectedDelivery('workflow planner artifact digest differs')
+  }
+  let files: Map<string, Uint8Array>
+  try {
+    files = readZipBasenames(archive)
+  } catch {
+    throw new RejectedDelivery('workflow planner artifact ZIP is invalid')
+  }
+  const planBytes = files.get('plan.out')
+  if (!planBytes) throw new RejectedDelivery('workflow planner artifact has no plan')
+  let plan: string
+  try {
+    plan = new TextDecoder('utf-8', { fatal: true }).decode(planBytes)
+  } catch {
+    throw new RejectedDelivery('workflow planner plan is not UTF-8')
+  }
+
+  requirePlanValue(plan, 'base_fork_commit', body.baseCommit)
+  requirePlanValue(plan, 'original_tag', body.originalTag)
+  requirePlanValue(plan, 'original_head', body.originalCommit)
+  requirePlanValue(plan, 'plus_tag', body.plusTag)
+  requirePlanValue(plan, 'plus_tag_head', body.plusTagCommit)
+  requirePlanValue(plan, 'plus_head', body.plusHeadCommit)
+  requirePlanValue(plan, 'plus_head_included', String(body.plusHeadIncluded))
+  requirePlanValue(plan, 'models_commit', body.modelsCommit)
+  requirePlanValue(plan, 'expected_fork_tag', body.expectedTag)
+  requirePlanValue(plan, 'safe_sync_id', body.syncID)
+  requirePlanValue(plan, 'plan_fingerprint', body.planFingerprint)
+  requirePlanValue(plan, 'candidate_branch', body.candidateBranch)
+  const plannerConflicts = outputValue(plan, 'conflict_files')
+  const conflictFiles = plannerConflicts ? plannerConflicts.split('\n') : []
+  if (outputValue(plan, 'conflicts') !== String(conflictFiles.length > 0)) {
+    throw new RejectedDelivery('planner conflict status differs')
+  }
+  if (conflictFiles.join('\n') !== body.conflictFiles.join('\n')) {
+    throw new RejectedDelivery('candidate conflict list differs from planner artifact')
+  }
 }
 
 export async function validateCandidate(
@@ -269,6 +432,7 @@ export async function validateCandidate(
 
   const run = record(await client.get(`/repos/${repository}/actions/runs/${body.workflowRunID}`, signal), 'workflow run')
   const runRepository = record(run.repository, 'workflow repository')
+  const runAttempt = integer(run.run_attempt, 'workflow run attempt')
   if (
     runRepository.id !== repositoryID ||
     run.path !== workflowPath ||
@@ -283,6 +447,7 @@ export async function validateCandidate(
   if (!Number.isFinite(received) || !Number.isFinite(runCreated) || received < runCreated || received - runCreated > sourceRunMaximumAgeMs) {
     throw new RejectedDelivery('workflow run is not fresh')
   }
+  await verifyConflictArtifact(client, body.workflowRunID, runAttempt, baseSHA, body, signal)
 
   const openPullsValue = await client.get(`/repos/${repository}/pulls?state=open&base=main&per_page=100`, signal)
   if (!Array.isArray(openPullsValue)) throw new RejectedDelivery('open pull request list is invalid')
