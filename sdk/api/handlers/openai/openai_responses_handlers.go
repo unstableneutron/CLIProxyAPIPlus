@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -492,6 +493,17 @@ type responsesStreamBootstrapResult struct {
 	data            <-chan []byte
 	upstreamHeaders http.Header
 	errs            <-chan *interfaces.ErrorMessage
+}
+
+func withResponsesStreamActivity(ctx context.Context) (context.Context, <-chan struct{}) {
+	activity := make(chan struct{}, 1)
+	ctx = cliproxyexecutor.WithStreamActivityCallback(ctx, func() {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+	})
+	return ctx, activity
 }
 
 type directResponsesStateEntry struct {
@@ -968,6 +980,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	replayPayload := bytes.Clone(rawJSON)
 	replayState := responsesReplayPlannerState{}
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, streamActivity := withResponsesStreamActivity(cliCtx)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -1002,6 +1015,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		flusher,
 		cliCtx,
 		cliCancel,
+		streamActivity,
 		bootstrapTimeout,
 		startResponsesStream,
 		setSSEHeaders,
@@ -1013,6 +1027,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				data,
 				headers,
 				errs,
+				streamActivity,
 				setSSEHeaders,
 				committed,
 				deadline,
@@ -1034,6 +1049,7 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 	flusher http.Flusher,
 	cliCtx context.Context,
 	cliCancel func(...interface{}),
+	streamActivity <-chan struct{},
 	bootstrapTimeout time.Duration,
 	start func(context.Context) responsesStreamBootstrapResult,
 	setSSEHeaders func(),
@@ -1051,6 +1067,13 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 		timeoutC = timeoutTimer.C
 		defer timeoutTimer.Stop()
 	}
+	disableBootstrapTimeout := func() {
+		bootstrapDeadline = time.Time{}
+		timeoutC = nil
+		if timeoutTimer != nil {
+			timeoutTimer.Stop()
+		}
+	}
 
 	bootstrapCh := make(chan responsesStreamBootstrapResult, 1)
 	go func() {
@@ -1064,23 +1087,35 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 	graceTimer := time.NewTimer(responsesStreamBootstrapGrace)
 	defer graceTimer.Stop()
 
-	select {
-	case <-c.Request.Context().Done():
-		cliCancel(c.Request.Context().Err())
-		return
-	case result := <-bootstrapCh:
-		forward(result.data, result.upstreamHeaders, result.errs, false, bootstrapDeadline)
-		return
-	case <-timeoutC:
-		setSSEHeaders()
-		_, _ = c.Writer.Write([]byte(": stream-start\n\n"))
-		msg := fmt.Errorf("upstream stream bootstrap timed out after %s", bootstrapTimeout)
-		writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
-		flusher.Flush()
-		bootstrapCancel()
-		cliCancel(msg)
-		return
-	case <-graceTimer.C:
+	graceElapsed := false
+	for !graceElapsed {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case <-streamActivity:
+			disableBootstrapTimeout()
+		case result := <-bootstrapCh:
+			forward(result.data, result.upstreamHeaders, result.errs, false, bootstrapDeadline)
+			return
+		case <-timeoutC:
+			select {
+			case <-streamActivity:
+				disableBootstrapTimeout()
+				continue
+			default:
+			}
+			setSSEHeaders()
+			_, _ = c.Writer.Write([]byte(": stream-start\n\n"))
+			msg := fmt.Errorf("upstream stream bootstrap timed out after %s", bootstrapTimeout)
+			writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
+			flusher.Flush()
+			bootstrapCancel()
+			cliCancel(msg)
+			return
+		case <-graceTimer.C:
+			graceElapsed = true
+		}
 	}
 
 	setSSEHeaders()
@@ -1094,10 +1129,18 @@ func (h *OpenAIResponsesAPIHandler) handleResponsesStreamBootstrap(
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
+		case <-streamActivity:
+			disableBootstrapTimeout()
 		case result := <-bootstrapCh:
 			forward(result.data, result.upstreamHeaders, result.errs, true, bootstrapDeadline)
 			return
 		case <-timeoutC:
+			select {
+			case <-streamActivity:
+				disableBootstrapTimeout()
+				continue
+			default:
+			}
 			msg := fmt.Errorf("upstream stream bootstrap timed out after %s", bootstrapTimeout)
 			writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
 			flusher.Flush()
@@ -1118,6 +1161,7 @@ func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
 	data <-chan []byte,
 	upstreamHeaders http.Header,
 	errs <-chan *interfaces.ErrorMessage,
+	streamActivity <-chan struct{},
 	setSSEHeaders func(),
 	committed bool,
 	bootstrapDeadline time.Time,
@@ -1139,6 +1183,12 @@ func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
 		timeoutTimer = time.NewTimer(time.Until(bootstrapDeadline))
 		timeoutC = timeoutTimer.C
 		defer timeoutTimer.Stop()
+	}
+	disableBootstrapTimeout := func() {
+		timeoutC = nil
+		if timeoutTimer != nil {
+			timeoutTimer.Stop()
+		}
 	}
 
 	var heartbeat *time.Ticker
@@ -1171,9 +1221,17 @@ func (h *OpenAIResponsesAPIHandler) forwardStreamAfterBootstrap(
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return
+		case <-streamActivity:
+			disableBootstrapTimeout()
 		case <-graceC:
 			commitStream()
 		case <-timeoutC:
+			select {
+			case <-streamActivity:
+				disableBootstrapTimeout()
+				continue
+			default:
+			}
 			commitStream()
 			msg := fmt.Errorf("upstream stream bootstrap timed out before first chunk")
 			writeResponsesStreamError(c.Writer, http.StatusGatewayTimeout, msg.Error())
@@ -1296,6 +1354,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 
 	modelName := gjson.GetBytes(chatJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx, streamActivity := withResponsesStreamActivity(cliCtx)
 	var param any
 
 	setSSEHeaders := func() {
@@ -1310,6 +1369,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 		flusher,
 		cliCtx,
 		cliCancel,
+		streamActivity,
 		handlers.StreamingBootstrapTimeout(h.Cfg),
 		func(ctx context.Context) responsesStreamBootstrapResult {
 			data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, OpenAI, modelName, chatJSON, "")
@@ -1324,6 +1384,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 				data,
 				headers,
 				errs,
+				streamActivity,
 				setSSEHeaders,
 				committed,
 				deadline,

@@ -149,10 +149,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		bootstrapEmitted := false
+		activitySignaled := false
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if bytes.HasPrefix(line, []byte("event:")) {
+				signalCodexStreamActivity(ctx, strings.TrimSpace(string(line[len("event:"):])), &activitySignaled)
+			}
 			translatedLine := bytes.Clone(line)
 			terminalSuccess := false
 
@@ -179,14 +182,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					return
 				}
-				if !bootstrapEmitted && eventType != "" && gjson.ValidBytes(data) && !codexContinueIsTerminalEvent(eventType) {
-					// Signal meaningful upstream protocol activity before translated payload is available.
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Bootstrap: true}:
-						bootstrapEmitted = true
-					case <-ctx.Done():
-						return
-					}
+				if gjson.ValidBytes(data) {
+					// Report upstream protocol activity without committing the auth
+					// attempt; metadata-only empty completions must remain retryable.
+					signalCodexStreamActivity(ctx, eventType, &activitySignaled)
 				}
 				switch eventType {
 				case "response.output_item.done":
@@ -233,4 +232,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func signalCodexStreamActivity(ctx context.Context, eventType string, signaled *bool) {
+	if signaled == nil || *signaled || eventType == "" || codexContinueIsTerminalEvent(eventType) {
+		return
+	}
+	cliproxyexecutor.NotifyStreamActivity(ctx)
+	*signaled = true
 }

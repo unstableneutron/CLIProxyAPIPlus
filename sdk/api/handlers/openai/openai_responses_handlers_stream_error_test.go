@@ -919,6 +919,7 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 			flusher,
 			context.Background(),
 			func(...interface{}) {},
+			nil,
 			handlers.StreamingBootstrapTimeout(h.Cfg),
 			func(context.Context) responsesStreamBootstrapResult {
 				return responsesStreamBootstrapResult{data: data, errs: errs}
@@ -935,6 +936,7 @@ func TestResponsesStreamBootstrapCommitsWhenReturnedStreamWaitsForFirstChunk(t *
 					data,
 					headers,
 					errs,
+					nil,
 					func() { c.Header("Content-Type", "text/event-stream") },
 					committed,
 					deadline,
@@ -999,6 +1001,51 @@ func TestHandleStreamingResponseViaChatCommitsSSEWhileBootstrapWaits(t *testing.
 		t.Fatalf("expected bootstrap heartbeat before upstream first byte, got body %q", body)
 	}
 
+}
+
+func TestResponsesStreamActivityDisablesBootstrapTimeoutWithoutCommittingAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatal("expected gin writer to implement http.Flusher")
+	}
+
+	cliCtx, streamActivity := withResponsesStreamActivity(context.Background())
+	forwarded := false
+	h.handleResponsesStreamBootstrap(
+		c,
+		flusher,
+		cliCtx,
+		func(...interface{}) {},
+		streamActivity,
+		20*time.Millisecond,
+		func(ctx context.Context) responsesStreamBootstrapResult {
+			coreexecutor.NotifyStreamActivity(ctx)
+			time.Sleep(75 * time.Millisecond)
+			return responsesStreamBootstrapResult{}
+		},
+		func() { c.Header("Content-Type", "text/event-stream") },
+		func(_ <-chan []byte, _ http.Header, _ <-chan *interfaces.ErrorMessage, committed bool, deadline time.Time) {
+			forwarded = true
+			if committed {
+				t.Error("transport activity committed the auth stream")
+			}
+			if !deadline.IsZero() {
+				t.Errorf("bootstrap deadline = %v, want disabled after activity", deadline)
+			}
+		},
+	)
+
+	if !forwarded {
+		t.Fatal("stream result was not forwarded after activity")
+	}
+	if body := recorder.Body.String(); strings.Contains(body, "bootstrap timed out") {
+		t.Fatalf("activity stream timed out: %q", body)
+	}
 }
 
 func TestHandleStreamingResponseBootstrapTimeoutWritesResponsesErrorChunk(t *testing.T) {

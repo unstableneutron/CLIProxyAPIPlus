@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -288,9 +291,11 @@ func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *tes
 	assertNotRequestScopedTestError(t, streamErr)
 }
 
-func TestCodexExecutorExecuteStreamEmitsBootstrapOnceBeforePayload(t *testing.T) {
+func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforePayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte(": keep-alive\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}` + "\n\n"))
@@ -300,7 +305,9 @@ func TestCodexExecutorExecuteStreamEmitsBootstrapOnceBeforePayload(t *testing.T)
 
 	executor := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	activityCount := 0
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount++ })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
@@ -308,28 +315,23 @@ func TestCodexExecutorExecuteStreamEmitsBootstrapOnceBeforePayload(t *testing.T)
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 
-	bootstrapCount := 0
 	payloadSeen := false
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream error: %v", chunk.Err)
 		}
 		if chunk.Bootstrap {
-			bootstrapCount++
-			if payloadSeen {
-				t.Fatal("bootstrap marker emitted after payload")
-			}
-			continue
+			t.Fatal("activity committed the auth stream with a bootstrap marker")
 		}
 		if len(chunk.Payload) > 0 {
-			if bootstrapCount == 0 {
-				t.Fatal("payload emitted before bootstrap marker")
+			if activityCount == 0 {
+				t.Fatal("payload emitted before activity callback")
 			}
 			payloadSeen = true
 		}
 	}
-	if bootstrapCount != 1 {
-		t.Fatalf("bootstrap marker count = %d, want 1", bootstrapCount)
+	if activityCount != 1 {
+		t.Fatalf("activity callback count = %d, want 1", activityCount)
 	}
 	if !payloadSeen {
 		t.Fatal("expected downstream payload")
@@ -339,13 +341,16 @@ func TestCodexExecutorExecuteStreamEmitsBootstrapOnceBeforePayload(t *testing.T)
 func TestCodexExecutorExecuteStreamImmediateTerminalErrorDoesNotBootstrap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
 		_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached."}}` + "\n\n"))
 	}))
 	defer server.Close()
 
 	executor := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	activityCount := 0
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount++ })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
@@ -365,14 +370,19 @@ func TestCodexExecutorExecuteStreamImmediateTerminalErrorDoesNotBootstrap(t *tes
 	if streamErr == nil {
 		t.Fatal("expected terminal stream error")
 	}
+	if activityCount != 0 {
+		t.Fatalf("activity callback count = %d, want 0 before immediate terminal error", activityCount)
+	}
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
 		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusTooManyRequests, streamErr)
 	}
 }
 
-func TestCodexExecutorExecuteStreamContinueFoldEmitsBootstrapOnceBeforePayload(t *testing.T) {
+func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforePayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte(": keep-alive\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}` + "\n\n"))
@@ -381,7 +391,9 @@ func TestCodexExecutorExecuteStreamContinueFoldEmitsBootstrapOnceBeforePayload(t
 
 	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	activityCount := 0
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount++ })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
@@ -389,28 +401,23 @@ func TestCodexExecutorExecuteStreamContinueFoldEmitsBootstrapOnceBeforePayload(t
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 
-	bootstrapCount := 0
 	payloadSeen := false
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream error: %v", chunk.Err)
 		}
 		if chunk.Bootstrap {
-			bootstrapCount++
-			if payloadSeen {
-				t.Fatal("bootstrap marker emitted after payload")
-			}
-			continue
+			t.Fatal("activity committed the auth stream with a bootstrap marker")
 		}
 		if len(chunk.Payload) > 0 {
-			if bootstrapCount == 0 {
-				t.Fatal("payload emitted before bootstrap marker")
+			if activityCount == 0 {
+				t.Fatal("payload emitted before activity callback")
 			}
 			payloadSeen = true
 		}
 	}
-	if bootstrapCount != 1 {
-		t.Fatalf("bootstrap marker count = %d, want 1", bootstrapCount)
+	if activityCount != 1 {
+		t.Fatalf("activity callback count = %d, want 1", activityCount)
 	}
 	if !payloadSeen {
 		t.Fatal("expected downstream payload")
@@ -420,13 +427,16 @@ func TestCodexExecutorExecuteStreamContinueFoldEmitsBootstrapOnceBeforePayload(t
 func TestCodexExecutorExecuteStreamContinueFoldImmediateGenericTerminalErrorDoesNotBootstrap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
 		_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"upstream_error","status_code":429,"message":"Try again later."}}` + "\n\n"))
 	}))
 	defer server.Close()
 
 	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+	activityCount := 0
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount++ })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
 		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
@@ -446,8 +456,232 @@ func TestCodexExecutorExecuteStreamContinueFoldImmediateGenericTerminalErrorDoes
 	if streamErr == nil {
 		t.Fatal("expected terminal stream error")
 	}
+	if activityCount != 0 {
+		t.Fatalf("activity callback count = %d, want 0 before immediate terminal error", activityCount)
+	}
 	if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
 		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusTooManyRequests, streamErr)
+	}
+}
+
+func TestCodexExecutorContinueFoldMetadataPrefixedGenericTerminalErrorFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached."}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	activityCount := 0
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount++ })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	for chunk := range result.Chunks {
+		if chunk.Bootstrap {
+			t.Fatal("metadata activity committed the auth stream")
+		}
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("expected metadata-prefixed terminal stream error")
+	}
+	if activityCount != 1 {
+		t.Fatalf("activity callback count = %d, want 1", activityCount)
+	}
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d; err=%v", got, http.StatusTooManyRequests, streamErr)
+	}
+}
+
+func TestCodexExecutorMetadataPrefixedEmptyCompletionRotatesAuth(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "normal", cfg: &config.Config{}},
+		{name: "continue fold", cfg: &config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				requestNumber := requests.Add(1)
+				_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+				_, _ = w.Write([]byte(`data: {"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+				if requestNumber == 1 {
+					_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1,"output_tokens_details":{"reasoning_tokens":0}}}}` + "\n\n"))
+					return
+				}
+				_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}` + "\n\n"))
+				_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}}` + "\n\n"))
+			}))
+			defer server.Close()
+
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewCodexExecutor(tt.cfg))
+			model := "codex-empty-activity-" + uuid.NewString()
+			for i := 0; i < 2; i++ {
+				token := "test-" + uuid.NewString()
+				auth := &cliproxyauth.Auth{
+					ID:       "codex-empty-activity-auth-" + uuid.NewString(),
+					Provider: "codex",
+					Attributes: map[string]string{
+						"auth_kind": "oauth",
+						"base_url":  server.URL,
+						"api_key":   token,
+					},
+					Metadata: map[string]any{
+						"access_token":  token,
+						"refresh_token": "refresh-" + token,
+						"request_retry": float64(0),
+					},
+				}
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("Register() error = %v", errRegister)
+				}
+			}
+
+			var activityCount atomic.Int32
+			ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount.Add(1) })
+			result, err := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"gpt-5.5","input":"hello","reasoning":{"effort":"high"}}`),
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+			var payload strings.Builder
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream error: %v", chunk.Err)
+				}
+				if chunk.Bootstrap {
+					t.Fatal("metadata activity committed the empty auth attempt")
+				}
+				payload.Write(chunk.Payload)
+			}
+			if got := requests.Load(); got != 2 {
+				t.Fatalf("upstream request count = %d, want 2 after empty-completion failover; payload=%q", got, payload.String())
+			}
+			if got := activityCount.Load(); got != 2 {
+				t.Fatalf("activity callback count = %d, want one per auth attempt", got)
+			}
+			if !strings.Contains(payload.String(), "hello") {
+				t.Fatalf("final stream payload = %q, want content from second auth", payload.String())
+			}
+		})
+	}
+}
+
+func TestCodexExecutorContinueFoldSignalsActivityOnceAcrossMultipleRounds(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}` + "\n\n"))
+		if requestNumber <= 2 {
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"final"}]}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_3","status":"completed","usage":{"input_tokens":1,"output_tokens":10,"total_tokens":11,"output_tokens_details":{"reasoning_tokens":8}}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	var activityCount atomic.Int32
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount.Add(1) })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello","reasoning":{"effort":"high"}}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	var payload strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+		if chunk.Bootstrap {
+			t.Fatal("activity committed the auth stream with a bootstrap marker")
+		}
+		payload.Write(chunk.Payload)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("continuation request count = %d, want 3", got)
+	}
+	if got := activityCount.Load(); got != 1 {
+		t.Fatalf("activity callback count = %d, want 1 across all continuation rounds", got)
+	}
+	if !strings.Contains(payload.String(), "final") {
+		t.Fatalf("folded stream payload = %q, want final content", payload.String())
+	}
+}
+
+func TestCodexExecutorContinueFoldHiddenGenericFailureFlushesRetainedDraft(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestNumber == 1 {
+			_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.failed","sequence_number":0,"response":{"id":"resp_2","status":"failed","error":{"type":"upstream_error","code":"unknown","message":"hidden continuation failed"}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	var activityCount atomic.Int32
+	ctx := cliproxyexecutor.WithStreamActivityCallback(context.Background(), func() { activityCount.Add(1) })
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello","reasoning":{"effort":"high"}}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	var payload strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("hidden continuation error leaked downstream: %v", chunk.Err)
+		}
+		payload.Write(chunk.Payload)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("continuation request count = %d, want 2", got)
+	}
+	if got := activityCount.Load(); got != 1 {
+		t.Fatalf("activity callback count = %d, want 1", got)
+	}
+	if !strings.Contains(payload.String(), "retained draft") || !strings.Contains(payload.String(), "response.completed") {
+		t.Fatalf("fallback payload = %q, want retained draft completion", payload.String())
 	}
 }
 

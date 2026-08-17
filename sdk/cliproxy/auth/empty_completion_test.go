@@ -609,6 +609,32 @@ func TestReadStreamBootstrapWithholdsSplitClaudeEmptyCompletion(t *testing.T) {
 	}
 }
 
+func TestIsEmptyCompletionHandlesBufferedResponsesChunksWithoutSeparators(t *testing.T) {
+	chunks := []cliproxyexecutor.StreamChunk{
+		{Payload: []byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","model":"gpt-5.5"}}`)},
+		{Payload: []byte(`data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress","model":"gpt-5.5"}}`)},
+		{Payload: []byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"output_tokens":0}}}`)},
+	}
+	stream := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		stream <- chunk
+	}
+	close(stream)
+	buffered, closed, bootstrapped, err := readStreamBootstrap(context.Background(), stream)
+	if err != nil {
+		t.Fatalf("readStreamBootstrap() error = %v", err)
+	}
+	if !closed || bootstrapped {
+		t.Fatalf("readStreamBootstrap() closed = %v, bootstrapped = %v; want closed uncommitted stream", closed, bootstrapped)
+	}
+	if !isEmptyCompletion(chunks) {
+		t.Fatal("separator-free buffered Responses chunks were not classified as empty")
+	}
+	if !isEmptyCompletion(buffered) {
+		t.Fatal("readStreamBootstrap buffered chunks were not classified as empty")
+	}
+}
+
 func TestExecuteEmptyCompletionRotatesAuth(t *testing.T) {
 	executor := &emptyCompletionTestExecutor{
 		executePayloads: map[string][]byte{},

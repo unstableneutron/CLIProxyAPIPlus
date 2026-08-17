@@ -806,7 +806,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		bootstrapEmitted := false
+		activitySignaled := false
 		for currentResp != nil {
 			scanner := bufio.NewScanner(currentResp.Body)
 			scanner.Buffer(nil, 52_428_800)
@@ -814,6 +814,9 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 			for scanner.Scan() {
 				line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				if bytes.HasPrefix(line, []byte("event:")) {
+					signalCodexStreamActivity(ctx, strings.TrimSpace(string(line[len("event:"):])), &activitySignaled)
+				}
 				if !bytes.HasPrefix(line, dataTag) {
 					if !codexContinueSendTranslated(ctx, out, to, responseFormat, req.Model, originalPayload, clientBody, applyCodexIdentityExposeResponsePayload(line, identityState), &param) {
 						return
@@ -822,7 +825,11 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				}
 
 				data := bytes.TrimSpace(line[5:])
-				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+				streamErr, terminalBody, terminalFailure := codexTerminalStreamErr(data)
+				if !terminalFailure && !fold.awaitingContinuation {
+					streamErr, terminalBody, terminalFailure = codexTerminalFailureErr(data)
+				}
+				if terminalFailure {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -835,14 +842,10 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					return
 				}
 				eventType := gjson.GetBytes(data, "type").String()
-				if !bootstrapEmitted && eventType != "" && gjson.ValidBytes(data) && !codexContinueIsTerminalEvent(eventType) {
-					// Signal meaningful upstream protocol activity before folded payload is available.
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Bootstrap: true}:
-						bootstrapEmitted = true
-					case <-ctx.Done():
-						return
-					}
+				if gjson.ValidBytes(data) {
+					// Report upstream protocol activity without committing the auth
+					// attempt; metadata-only empty completions must remain retryable.
+					signalCodexStreamActivity(ctx, eventType, &activitySignaled)
 				}
 
 				result := fold.HandleEvent(data)
