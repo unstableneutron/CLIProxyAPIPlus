@@ -54,8 +54,8 @@ type commandCodePayloadOptions struct {
 type commandCodeOpenAIRequest struct {
 	Messages            []commandCodeOpenAIMessage `json:"messages"`
 	Tools               []commandCodeOpenAITool    `json:"tools"`
-	MaxTokens           int                        `json:"max_tokens"`
-	MaxCompletionTokens int                        `json:"max_completion_tokens"`
+	MaxTokens           *int                       `json:"max_tokens"`
+	MaxCompletionTokens *int                       `json:"max_completion_tokens"`
 	ReasoningEffort     string                     `json:"reasoning_effort"`
 	Temperature         *float64                   `json:"temperature"`
 	TopP                *float64                   `json:"top_p"`
@@ -754,7 +754,7 @@ func buildCommandCodePayload(opts commandCodePayloadOptions) ([]byte, error) {
 	var req commandCodeOpenAIRequest
 	if len(opts.Payload) > 0 {
 		if err := json.Unmarshal(opts.Payload, &req); err != nil {
-			return nil, fmt.Errorf("commandcode executor: decode OpenAI payload: %w", err)
+			return nil, statusErr{code: http.StatusBadRequest, msg: "invalid CommandCode request: " + err.Error()}
 		}
 	}
 
@@ -773,7 +773,10 @@ func buildCommandCodePayload(opts commandCodePayloadOptions) ([]byte, error) {
 	}
 
 	system, messages := commandCodeMessagesFromOpenAI(req.Messages, req.Tools, opts.Model)
-	maxTokens := commandCodeMaxTokens(req, opts.Model)
+	maxTokens, err := commandCodeMaxTokens(req, opts.Model)
+	if err != nil {
+		return nil, err
+	}
 	threadID := strings.TrimSpace(opts.ThreadID)
 	if !isUUID(threadID) {
 		threadID = uuid.NewString()
@@ -846,14 +849,44 @@ func commandCodeOptionalRaw(raw json.RawMessage) json.RawMessage {
 	return bytes.Clone(trimmed)
 }
 
-func commandCodeMaxTokens(req commandCodeOpenAIRequest, _ string) int {
-	if req.MaxTokens > 0 {
-		return req.MaxTokens
+func commandCodeMaxTokens(req commandCodeOpenAIRequest, model string) (int, error) {
+	limit := commandCodeModelMaxTokens(model)
+	for _, field := range []struct {
+		name  string
+		value *int
+	}{
+		{name: "max_tokens", value: req.MaxTokens},
+		{name: "max_completion_tokens", value: req.MaxCompletionTokens},
+	} {
+		if field.value == nil {
+			continue
+		}
+		if *field.value <= 0 {
+			return 0, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("%s must be greater than 0", field.name)}
+		}
+		if *field.value > limit {
+			return 0, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("%s for CommandCode model %q must be less than or equal to %d", field.name, model, limit)}
+		}
 	}
-	if req.MaxCompletionTokens > 0 {
-		return req.MaxCompletionTokens
+	if req.MaxTokens != nil {
+		return *req.MaxTokens, nil
 	}
-	return commandCodeMaxTokensCap
+	if req.MaxCompletionTokens != nil {
+		return *req.MaxCompletionTokens, nil
+	}
+	return limit, nil
+}
+
+// commandCodeModelMaxTokens applies the 64k CLI-envelope ceiling used by the
+// MIT-licensed pi-commandcode-provider reference, then narrows it for models
+// whose catalog metadata advertises a smaller output limit. Explicit requests
+// above this value are rejected by commandCodeMaxTokens rather than truncated.
+func commandCodeModelMaxTokens(model string) int {
+	limit := commandCodeMaxTokensCap
+	if info := lookupCommandCodeModelInfo(model); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < limit {
+		limit = info.MaxCompletionTokens
+	}
+	return limit
 }
 
 func commandCodeMessagesFromOpenAI(messages []commandCodeOpenAIMessage, tools []commandCodeOpenAITool, model string) (string, []any) {
@@ -1469,10 +1502,11 @@ func commandCodeLineToOpenAIChunks(line []byte, state *commandCodeStreamState) (
 		if parsedUsage := commandCodeUsageFromEvent(root); parsedUsage.hasUsage() {
 			state.Usage.add(parsedUsage)
 		}
-		if state.Finish == "" || state.Finish == "pause_turn" {
-			state.Finish = "stop"
+		message := strings.TrimSpace(root.Get("message").String())
+		if message == "" {
+			message = "CommandCode generation aborted before completion"
 		}
-		return [][]byte{state.streamChunk(map[string]any{}, state.Finish, state.Usage.openAIUsage())}, state.Usage.detail(), nil
+		return nil, state.Usage.detail(), statusErr{code: http.StatusBadGateway, msg: message}
 	case "error":
 		return nil, usage.Detail{}, statusErr{code: commandCodeErrorStatus(root), msg: commandCodeErrorMessage(root)}
 	default:
