@@ -149,6 +149,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		bootstrapEmitted := false
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -177,6 +178,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					case <-ctx.Done():
 					}
 					return
+				}
+				if !bootstrapEmitted && eventType != "" && gjson.ValidBytes(data) && !codexContinueIsTerminalEvent(eventType) {
+					// Signal meaningful upstream protocol activity before translated payload is available.
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Bootstrap: true}:
+						bootstrapEmitted = true
+					case <-ctx.Done():
+						return
+					}
 				}
 				switch eventType {
 				case "response.output_item.done":
