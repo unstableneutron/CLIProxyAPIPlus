@@ -118,6 +118,17 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
 }
 
+// PublishAdditional records another upstream round performed for the same
+// client request. Unlike Publish, it is not suppressed by the reporter's
+// single-record guard.
+func (r *UsageReporter) PublishAdditional(ctx context.Context, detail usage.Detail) {
+	if r == nil {
+		return
+	}
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
+	r.publishRecord(ctx, r.buildRecord(detail, false, usage.Failure{}))
+}
+
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
 	record, ok := r.buildAdditionalModelRecord(model, detail)
 	if !ok {

@@ -63,7 +63,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, auth, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
 	}
@@ -402,7 +402,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
 				payload = completedPayload
-				cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
+				cacheCodexReasoningReplayFromCompleted(ctx, replayScope, completedPayload)
 				if !recordedTranscript && transcriptState != nil {
 					transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, completedPayload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
 					recordedTranscript = true

@@ -66,7 +66,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, auth, from, req, opts, body)
 	if errReplay != nil {
 		return resp, errReplay
 	}
@@ -321,7 +321,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
+			cacheCodexReasoningReplayFromCompleted(ctx, replayScope, payload)
 			if transcriptState != nil {
 				transcriptState.recordTranscriptTurnWithProvenance(wsReqBody, payload, codexWebsocketTranscriptProvenance(auth, baseURL, baseModel))
 			}

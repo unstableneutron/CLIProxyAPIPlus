@@ -813,6 +813,19 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 		var outputItemsFallback [][]byte
 		activitySignaled := false
 		suppressReasoningReplayCache := false
+		publishedUsageRounds := 0
+		publishRoundUsage := func(event []byte) {
+			detail, ok := helps.ParseCodexUsage(event)
+			if !ok {
+				return
+			}
+			if publishedUsageRounds == 0 {
+				reporter.Publish(ctx, detail)
+			} else {
+				reporter.PublishAdditional(ctx, detail)
+			}
+			publishedUsageRounds++
+		}
 		for currentResp != nil {
 			scanner := bufio.NewScanner(currentResp.Body)
 			scanner.Buffer(nil, 52_428_800)
@@ -864,9 +877,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				}
 
 				for _, usageEvent := range result.PublishUsage {
-					if detail, ok := helps.ParseCodexUsage(usageEvent); ok {
-						reporter.Publish(ctx, detail)
-					}
+					publishRoundUsage(usageEvent)
 					publishCodexImageToolUsage(ctx, reporter, clientBody, usageEvent)
 				}
 				if result.Continue {
@@ -1001,7 +1012,7 @@ func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexec
 			}
 			data = patchCodexCompletedOutput(data, outputItemsByIndex, *outputItemsFallback)
 			if cacheReasoningReplay {
-				cacheCodexReasoningReplayFromCompleted(replayScope, data)
+				cacheCodexReasoningReplayFromCompleted(ctx, replayScope, data)
 			}
 		}
 		line := append([]byte("data: "), data...)
@@ -1077,6 +1088,19 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		currentReqBody := bytes.Clone(wsReqBody)
+		publishedUsageRounds := 0
+		publishRoundUsage := func(event []byte) {
+			detail, ok := helps.ParseCodexUsage(event)
+			if !ok {
+				return
+			}
+			if publishedUsageRounds == 0 {
+				reporter.Publish(ctx, detail)
+			} else {
+				reporter.PublishAdditional(ctx, detail)
+			}
+			publishedUsageRounds++
+		}
 
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -1159,9 +1183,7 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 
 			result := fold.HandleEvent(payload)
 			for _, usageEvent := range result.PublishUsage {
-				if detail, ok := helps.ParseCodexUsage(usageEvent); ok {
-					reporter.Publish(ctx, detail)
-				}
+				publishRoundUsage(usageEvent)
 			}
 			if result.Continue {
 				if okSend, errSend := e.sendCodexContinueWebsocketRound(ctx, auth, fold, currentReqBody, transcriptState, false, sess, conn, wsURL, wsHeaders, authID); !okSend {

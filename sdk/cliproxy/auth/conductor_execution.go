@@ -694,6 +694,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				selection.End("attempt_bind_failed")
 				return nil, errBind
 			}
+		} else {
+			attemptParent := ctx
+			if attemptParent == nil {
+				attemptParent = context.Background()
+			}
+			var cancelAttempt context.CancelFunc
+			execCtx, cancelAttempt = context.WithCancel(attemptParent)
+			releaseAttempt = cancelAttempt
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -706,8 +714,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			aliasResult.OriginalAlias = responseAlias
 		}
 		if len(models) == 0 {
+			releaseAttempt()
 			if selection != nil {
-				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
 				}
@@ -724,16 +732,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errPrepare != nil {
 			if selection == nil {
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
+					releaseAttempt()
 					return nil, errCancel
 				}
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts}
 			if selection != nil {
 				m.reportHomeResult(execCtx, result, auth)
-				releaseAttempt()
 			} else {
 				m.MarkResult(execCtx, result)
 			}
+			releaseAttempt()
 			lastErr = errPrepare
 			if selection != nil {
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
@@ -755,16 +764,21 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried)
+		var releaseCompletedStream func()
+		if selection == nil {
+			releaseCompletedStream = releaseAttempt
+		}
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried, releaseCompletedStream)
 		if errStream != nil {
+			requestCanceled := ctx != nil && ctx.Err() != nil
+			releaseAttempt()
 			if selection != nil {
-				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
 					return nil, errEnd
 				}
 			}
-			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
-				return nil, errCtx
+			if requestCanceled {
+				return nil, ctx.Err()
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {

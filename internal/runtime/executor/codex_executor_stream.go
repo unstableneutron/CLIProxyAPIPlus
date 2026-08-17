@@ -73,7 +73,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, auth, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
 	}
@@ -195,7 +195,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {
-						cacheCodexReasoningReplayFromCompleted(replayScope, data)
+						cacheCodexReasoningReplayFromCompleted(ctx, replayScope, data)
 					}
 					translatedLine = append([]byte("data: "), data...)
 				}

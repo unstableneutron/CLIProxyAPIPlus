@@ -123,10 +123,11 @@ func TestCodexWebsocketsExecuteRestoresClaudeAgentReasoningReplay(t *testing.T) 
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
 
 	encryptedContent := validCodexReasoningEncryptedContentForTestSeed(31)
-	cacheCodexReasoningReplayFromCompleted(codexReasoningReplayScope{
+	auth := &cliproxyauth.Auth{ID: "auth-ws-replay", Provider: "codex"}
+	cacheCodexReasoningReplayFromCompletedForTest(t, codexReasoningReplayScopeForAuth(codexReasoningReplayScope{
 		modelName:  "gpt-5.4",
 		sessionKey: "claude:ws-replay-session:agent:agent-a",
-	}, []byte(`{"response":{"output":[`+
+	}, auth), []byte(`{"response":{"output":[`+
 		`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+encryptedContent+`"},`+
 		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"previous answer"}]}`+
 		`]}}`))
@@ -153,7 +154,7 @@ func TestCodexWebsocketsExecuteRestoresClaudeAgentReasoningReplay(t *testing.T) 
 	defer server.Close()
 
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
-	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	auth.Attributes = map[string]string{"api_key": "sk-test", "base_url": server.URL}
 	req := cliproxyexecutor.Request{
 		Model: "gpt-5.4",
 		Payload: []byte(`{

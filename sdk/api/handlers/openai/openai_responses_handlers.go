@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai/responsesreplay"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -510,6 +511,7 @@ type directResponsesStateEntry struct {
 	request            []byte
 	output             []byte
 	pendingToolCallIDs []string
+	authID             string
 	createdAt          time.Time
 }
 
@@ -563,7 +565,11 @@ func (c *directResponsesStateCache) put(responseID string, entry directResponses
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.entries[responseID]; !exists {
+	if existing, exists := c.entries[responseID]; exists && strings.TrimSpace(existing.authID) != strings.TrimSpace(entry.authID) {
+		delete(c.entries, responseID)
+		c.pruneLocked(time.Now())
+		return
+	} else if !exists {
 		c.order = append(c.order, responseID)
 	}
 	c.entries[responseID] = entry
@@ -821,14 +827,25 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
+	rawJSON, stateTracker := h.prepareDirectResponsesState(rawJSON, false)
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	executionOwner := &responsesReplayAuthOwner{}
+	executionOwner.observe(stateTracker.pinnedAuthID)
+	if stateTracker.pinnedAuthID != "" {
+		executionOwner.seal()
+	}
+	stateTracker.owner = executionOwner
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if stateTracker.pinnedAuthID != "" {
+		cliCtx = executionOwner.pin(cliCtx)
+	}
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.executeResponsesWithReplayRetries(responsesReplayExecution{
 		ctx:       cliCtx,
 		modelName: modelName,
 		payload:   rawJSON,
+		owner:     executionOwner,
 	})
 	stopKeepAlive()
 	if errMsg != nil {
@@ -836,6 +853,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
+	stateTracker.CompleteResponse(resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -867,12 +885,14 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 	cliCancel()
 }
 
-type directResponsesStreamStateTracker struct {
-	cache   *directResponsesStateCache
-	request []byte
+type directResponsesStateTracker struct {
+	cache        *directResponsesStateCache
+	request      []byte
+	owner        *responsesReplayAuthOwner
+	pinnedAuthID string
 }
 
-func (t directResponsesStreamStateTracker) Complete(payload []byte) {
+func (t directResponsesStateTracker) Complete(payload []byte) {
 	if t.cache == nil || len(t.request) == 0 || len(payload) == 0 || !json.Valid(payload) {
 		return
 	}
@@ -880,8 +900,24 @@ func (t directResponsesStreamStateTracker) Complete(payload []byte) {
 	if !response.Exists() || !response.IsObject() {
 		return
 	}
+	t.completeResponse(response)
+}
+
+func (t directResponsesStateTracker) CompleteResponse(payload []byte) {
+	if t.cache == nil || len(t.request) == 0 || len(payload) == 0 || !json.Valid(payload) {
+		return
+	}
+	response := gjson.ParseBytes(payload)
+	if !response.IsObject() {
+		return
+	}
+	t.completeResponse(response)
+}
+
+func (t directResponsesStateTracker) completeResponse(response gjson.Result) {
 	responseID := strings.TrimSpace(response.Get("id").String())
-	if responseID == "" {
+	authID := t.owner.id()
+	if responseID == "" || authID == "" {
 		return
 	}
 	outputRaw := response.Get("output").Raw
@@ -893,13 +929,14 @@ func (t directResponsesStreamStateTracker) Complete(payload []byte) {
 		request:            t.request,
 		output:             output,
 		pendingToolCallIDs: responsesPendingToolCallIDsFromOutput(output),
+		authID:             authID,
 		createdAt:          time.Now(),
 	})
 }
 
-func (h *OpenAIResponsesAPIHandler) prepareDirectResponsesStreamState(modelName string, rawJSON []byte) ([]byte, directResponsesStreamStateTracker) {
-	normalized := normalizeDirectResponsesStreamStateRequest(rawJSON)
-	tracker := directResponsesStreamStateTracker{cache: h.directResponsesStateCache()}
+func (h *OpenAIResponsesAPIHandler) prepareDirectResponsesState(rawJSON []byte, stream bool) ([]byte, directResponsesStateTracker) {
+	normalized := normalizeDirectResponsesStateRequest(rawJSON, stream)
+	tracker := directResponsesStateTracker{cache: h.directResponsesStateCache()}
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(normalized, "previous_response_id").String())
 	if previousResponseID == "" {
 		tracker.request = bytes.Clone(normalized)
@@ -907,11 +944,12 @@ func (h *OpenAIResponsesAPIHandler) prepareDirectResponsesStreamState(modelName 
 	}
 
 	entry, ok := tracker.cache.get(previousResponseID)
-	if !ok {
+	if !ok || strings.TrimSpace(entry.authID) == "" {
 		stripped, _ := sjson.DeleteBytes(normalized, "previous_response_id")
 		tracker.request = bytes.Clone(stripped)
 		return stripped, tracker
 	}
+	tracker.pinnedAuthID = strings.TrimSpace(entry.authID)
 
 	replay, _, errMsg := normalizeResponseSubsequentRequest(
 		normalized,
@@ -943,13 +981,17 @@ func (h *OpenAIResponsesAPIHandler) directResponsesStateCache() *directResponses
 	return h.directResponsesState
 }
 
-func normalizeDirectResponsesStreamStateRequest(rawJSON []byte) []byte {
+func normalizeDirectResponsesStateRequest(rawJSON []byte, stream bool) []byte {
 	normalized := bytes.Clone(rawJSON)
-	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if stream {
+		normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	}
 	if !gjson.GetBytes(normalized, "input").Exists() {
 		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
 	}
-	normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
+	if stream {
+		normalized = stripUnsupportedResponsesWebsocketInputItemMetadata(normalized)
+	}
 	return normalized
 }
 
@@ -976,10 +1018,20 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	rawJSON = normalizeCodexFastSpeedTierRequest(rawJSON)
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	rawJSON, stateTracker := h.prepareDirectResponsesStreamState(modelName, rawJSON)
+	rawJSON, stateTracker := h.prepareDirectResponsesState(rawJSON, true)
 	replayPayload := bytes.Clone(rawJSON)
 	replayState := responsesReplayPlannerState{}
+	executionOwner := responsesReplayAuthOwner{}
+	executionOwner.observe(stateTracker.pinnedAuthID)
+	if stateTracker.pinnedAuthID != "" {
+		executionOwner.seal()
+	}
+	stateTracker.owner = &executionOwner
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if stateTracker.pinnedAuthID != "" {
+		cliCtx = executionOwner.pin(cliCtx)
+	}
+	cliCtx = handlers.WithAdditionalSelectedAuthIDCallback(cliCtx, executionOwner.observe)
 	cliCtx, streamActivity := withResponsesStreamActivity(cliCtx)
 
 	setSSEHeaders := func() {
@@ -997,8 +1049,28 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	if isResponsesCompactionTriggerRequest(rawJSON) {
 		bootstrapTimeout = 0
 	}
+	var attemptMu sync.Mutex
+	var cancelAttempt context.CancelFunc
+	defer func() {
+		attemptMu.Lock()
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
+		attemptMu.Unlock()
+	}()
 	startResponsesStream := func(ctx context.Context) responsesStreamBootstrapResult {
-		data, headers, errs := h.ExecuteStreamWithAuthManager(ctx, h.HandlerType(), modelName, replayPayload, "")
+		attemptMu.Lock()
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+		cancelAttempt = attemptCancel
+		attemptMu.Unlock()
+		if replayState.attempt != responsesreplay.AttemptOriginal {
+			attemptCtx = executionOwner.pin(attemptCtx)
+		}
+		data, headers, errs := h.ExecuteStreamWithAuthManager(attemptCtx, h.HandlerType(), modelName, replayPayload, "")
+		executionOwner.seal()
 		return responsesStreamBootstrapResult{data: data, upstreamHeaders: headers, errs: errs}
 	}
 	retryResponsesStream := func(errMsg *interfaces.ErrorMessage) (responsesStreamBootstrapResult, bool) {
