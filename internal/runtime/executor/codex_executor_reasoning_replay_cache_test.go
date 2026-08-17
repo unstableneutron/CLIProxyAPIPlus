@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -768,6 +770,126 @@ func TestCodexExecutorContinueFoldHTTPInvalidSignatureFallbackKeepsReplayCleared
 	}
 	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", cacheKey); ok {
 		t.Fatal("hidden HTTP invalid-signature fallback left or repopulated replay item")
+	}
+}
+
+func TestCodexExecutorContinueFoldRewindInvalidSignatureReplayStreamFailureKeepsReplayCleared(t *testing.T) {
+	const cacheKey = "claude:session-invalid-rewind-continuation:agent:main"
+	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(13)
+	successfulEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(14)
+	tests := []struct {
+		name          string
+		finalResponse string
+		wantPayload   string
+		rejectPayload string
+	}{
+		{
+			name:          "streamed response.failed restores retained draft",
+			finalResponse: `data: {"type":"response.failed","response":{"id":"resp_2","status":"failed","error":{"message":"replay continuation failed","type":"upstream_error","code":"unknown"}}}` + "\n\n",
+			wantPayload:   "retained draft",
+		},
+		{
+			name:          "streamed response.incomplete restores retained draft",
+			finalResponse: `data: {"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}` + "\n\n",
+			wantPayload:   "retained draft",
+		},
+		{
+			name: "successful replay returns replacement without recaching invalidated reasoning",
+			finalResponse: `data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"reasoning","id":"rs_2"}}` + "\n\n" +
+				`data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_2","encrypted_content":"` + successfulEncryptedContent + `"}}` + "\n\n" +
+				`data: {"type":"response.output_item.added","sequence_number":2,"output_index":1,"item":{"type":"message","id":"msg_2"}}` + "\n\n" +
+				`data: {"type":"response.output_item.done","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_2","content":[{"type":"output_text","text":"replacement answer"}]}}` + "\n\n" +
+				`data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_2","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"output_tokens_details":{"reasoning_tokens":1}}}}` + "\n\n",
+			wantPayload:   "replacement answer",
+			rejectPayload: "retained draft",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			internalcache.ClearCodexReasoningReplayCache()
+			t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+			internalcache.CacheCodexReasoningReplayItem("gpt-5.4", cacheKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+
+			baseBody := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_prev","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}],"reasoning":{"effort":"high"},"stream":true}`)
+			var requests atomic.Int32
+			requestBodies := make(chan []byte, 3)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				requestBodies <- bytes.Clone(body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				switch requests.Add(1) {
+				case 1:
+					_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+					_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+					_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"` + cachedEncryptedContent + `"}}` + "\n\n"))
+					_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+					_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
+					_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+				case 2:
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"Invalid signature in thinking block","type":"invalid_request_error","code":"invalid_request_error"}}`))
+				case 3:
+					_, _ = io.WriteString(w, tt.finalResponse)
+				}
+			}))
+			defer server.Close()
+
+			httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL, bytes.NewReader(baseBody))
+			if err != nil {
+				t.Fatalf("build initial request: %v", err)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			initialResp, err := server.Client().Do(httpReq)
+			if err != nil {
+				t.Fatalf("open initial response: %v", err)
+			}
+
+			executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+			auth := &cliproxyauth.Auth{ID: "auth-replay-invalid-rewind-continuation"}
+			reporter := helps.NewExecutorUsageReporter(context.Background(), executor, "gpt-5.4", auth)
+			streamResult, handled, err := executor.executeCodexContinueFoldHTTPStream(
+				context.Background(), auth, cliproxyexecutor.Request{Model: "gpt-5.4", Payload: baseBody},
+				sdktranslator.FromString("openai-response"), sdktranslator.FromString("codex"), baseBody, baseBody, baseBody,
+				httpReq, initialResp, server.Client(), reporter,
+				codexReasoningReplayScope{modelName: "gpt-5.4", sessionKey: cacheKey}, codexIdentityConfuseState{}, "", "", "", "",
+			)
+			if err != nil {
+				t.Fatalf("execute continuation fold: %v", err)
+			}
+			if !handled {
+				t.Fatal("continuation fold was not enabled")
+			}
+			var payload strings.Builder
+			for chunk := range streamResult.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("hidden replay stream failure leaked downstream: %v", chunk.Err)
+				}
+				payload.Write(chunk.Payload)
+			}
+			if got := requests.Load(); got != 3 {
+				t.Fatalf("upstream request count = %d, want 3", got)
+			}
+			close(requestBodies)
+			var bodies [][]byte
+			for body := range requestBodies {
+				bodies = append(bodies, body)
+			}
+			if got := gjson.GetBytes(bodies[1], "previous_response_id").String(); got != "resp_prev" {
+				t.Fatalf("rewind previous_response_id = %q, want resp_prev; body=%s", got, bodies[1])
+			}
+			if gjson.GetBytes(bodies[2], "previous_response_id").Exists() {
+				t.Fatalf("replay fallback kept previous_response_id: %s", bodies[2])
+			}
+			if !strings.Contains(payload.String(), tt.wantPayload) || !strings.Contains(payload.String(), "response.completed") {
+				t.Fatalf("payload = %q, want %q completion", payload.String(), tt.wantPayload)
+			}
+			if tt.rejectPayload != "" && strings.Contains(payload.String(), tt.rejectPayload) {
+				t.Fatalf("payload = %q, must not contain %q", payload.String(), tt.rejectPayload)
+			}
+			if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", cacheKey); ok {
+				t.Fatal("rewind invalid-signature continuation repopulated replay cache")
+			}
+		})
 	}
 }
 

@@ -812,6 +812,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		activitySignaled := false
+		suppressReasoningReplayCache := false
 		for currentResp != nil {
 			scanner := bufio.NewScanner(currentResp.Body)
 			scanner.Buffer(nil, 52_428_800)
@@ -830,11 +831,12 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				eventType := gjson.GetBytes(data, "type").String()
 				streamErr, terminalBody, terminalFailure := codexTerminalFailureErr(data)
 				var result codexContinueEventResult
-				cacheReasoningReplay := true
+				cacheReasoningReplay := !suppressReasoningReplayCache
 				if terminalFailure && fold.everContinued && len(fold.retainedTerminal) > 0 {
 					// Failures from a hidden continuation request must not replace the
 					// retained completion from the client-visible round.
 					if code, _, ok := codexStatusErrorClassification(streamErr.StatusCode(), terminalBody); ok && code == "thinking_signature_invalid" {
+						suppressReasoningReplayCache = true
 						cacheReasoningReplay = false
 					}
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -878,7 +880,6 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 						_ = codexContinueSendError(ctx, out, errBuild)
 						return
 					}
-					cacheFallbackReasoningReplay := true
 					clearInvalidSignatureReplay := func(errRound error) {
 						if errRound == nil {
 							return
@@ -888,7 +889,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 						if code, _, ok := codexStatusErrorClassification(statusCode, errorBody); !ok || code != "thinking_signature_invalid" {
 							return
 						}
-						cacheFallbackReasoningReplay = false
+						suppressReasoningReplayCache = true
 						if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, errorBody); errClearReplay != nil {
 							helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						}
@@ -905,7 +906,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					}
 					if errRound != nil {
 						if codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
-							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, cacheFallbackReasoningReplay, identityState, outputItemsByIndex, &outputItemsFallback) {
+							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback) {
 								return
 							}
 							return
