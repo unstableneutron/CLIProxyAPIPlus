@@ -42,6 +42,12 @@ type CommandCodeExecutor struct {
 	cfg *config.Config
 }
 
+type commandCodeAbortError struct {
+	statusErr
+}
+
+func (commandCodeAbortError) IsRequestScoped() bool { return true }
+
 type commandCodePayloadOptions struct {
 	Model       string
 	Payload     []byte
@@ -204,6 +210,7 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			log.Errorf("commandcode executor: close response body error: %v", errClose)
 		}
 		if err != nil {
+			reporter.PublishFailureWithUsage(ctx, state.Usage.detail(), err)
 			return resp, err
 		}
 		if state.Finish != "pause_turn" || continuation >= commandCodeContinuationLimit {
@@ -279,7 +286,7 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return true
 		}
 		emitError := func(streamErr error) {
-			reporter.PublishFailure(ctx, streamErr)
+			reporter.PublishFailureWithUsage(ctx, state.Usage.detail(), streamErr)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 			case <-ctx.Done():
@@ -1105,6 +1112,9 @@ func commandCodeUserContent(raw json.RawMessage, allowImages bool) any {
 
 func lookupCommandCodeModelInfo(model string) *registry.ModelInfo {
 	model = strings.TrimSpace(model)
+	if info := registry.LookupModelInfo(model, commandCodeProviderKey); info != nil && strings.EqualFold(strings.TrimSpace(info.Type), commandCodeProviderKey) {
+		return info
+	}
 	for _, info := range registry.GetCommandCodeModels() {
 		if info != nil && strings.TrimSpace(info.ID) == model {
 			return info
@@ -1499,14 +1509,17 @@ func commandCodeLineToOpenAIChunks(line []byte, state *commandCodeStreamState) (
 	case "abort":
 		state.Aborted = true
 		state.Terminal = true
-		if parsedUsage := commandCodeUsageFromEvent(root); parsedUsage.hasUsage() {
-			state.Usage.add(parsedUsage)
+		parsedUsage := commandCodeUsageFromEvent(root)
+		if !parsedUsage.hasUsage() {
+			parsedUsage = state.pendingUsage
 		}
+		state.pendingUsage = commandCodeUsage{}
+		state.Usage.add(parsedUsage)
 		message := strings.TrimSpace(root.Get("message").String())
 		if message == "" {
 			message = "CommandCode generation aborted before completion"
 		}
-		return nil, state.Usage.detail(), statusErr{code: http.StatusBadGateway, msg: message}
+		return nil, state.Usage.detail(), commandCodeAbortError{statusErr{code: http.StatusBadGateway, msg: message}}
 	case "error":
 		return nil, usage.Detail{}, statusErr{code: commandCodeErrorStatus(root), msg: commandCodeErrorMessage(root)}
 	default:

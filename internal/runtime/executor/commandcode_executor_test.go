@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -22,6 +24,21 @@ type commandCodeFailingReader struct{}
 
 func (commandCodeFailingReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
+}
+
+type commandCodeUsageCapture struct {
+	authID  string
+	records chan usage.Record
+}
+
+func (c *commandCodeUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
+	if record.Provider != commandCodeProviderKey || record.AuthID != c.authID {
+		return
+	}
+	select {
+	case c.records <- record:
+	default:
+	}
 }
 
 func TestFetchCommandCodeModelsUsesProviderCatalog(t *testing.T) {
@@ -222,6 +239,27 @@ func TestCommandCodeBuildPayloadUsesModelDefaultTokenBudget(t *testing.T) {
 				t.Fatalf("max_tokens = %d, want %d; payload=%s", got, testCase.want, payload)
 			}
 		})
+	}
+}
+
+func TestCommandCodeBuildPayloadUsesDynamicModelTokenLimit(t *testing.T) {
+	const (
+		clientID = "commandcode-dynamic-limit-test-client"
+		modelID  = "commandcode/dynamic-limit-test-model"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, commandCodeProviderKey, []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                commandCodeProviderKey,
+		MaxCompletionTokens: 1024,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	input := []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hello"}],"max_tokens":1025}`)
+	_, err := buildCommandCodePayload(commandCodePayloadOptions{Model: modelID, Payload: input})
+	status, ok := err.(interface{ StatusCode() int })
+	if err == nil || !ok || status.StatusCode() != http.StatusBadRequest || !strings.Contains(err.Error(), "1024") {
+		t.Fatalf("buildCommandCodePayload() error = %v, want dynamic model limit 1024", err)
 	}
 }
 
@@ -1012,8 +1050,74 @@ func TestCommandCodeAbortFailsClosed(t *testing.T) {
 	if !ok || status.StatusCode() != http.StatusBadGateway || !strings.Contains(err.Error(), "upstream canceled generation") {
 		t.Fatalf("abort error = %v, want status 502 with upstream reason", err)
 	}
+	requestScoped, ok := err.(interface{ IsRequestScoped() bool })
+	if !ok || !requestScoped.IsRequestScoped() {
+		t.Fatalf("abort error = %T, want request-scoped error to prevent credential retry", err)
+	}
 	if !state.Aborted || !state.Terminal || state.Usage.TotalTokens != 4 {
 		t.Fatalf("abort state = %+v, want terminal aborted state with usage", state)
+	}
+}
+
+func TestCommandCodeAbortPublishesFailureUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `{"type":"finish-step","totalUsage":{"inputTokens":3,"outputTokens":1,"totalTokens":4}}`+"\n")
+		_, _ = io.WriteString(w, `{"type":"abort","message":"upstream canceled generation"}`+"\n")
+	}))
+	defer server.Close()
+
+	for _, stream := range []bool{false, true} {
+		mode := "nonstream"
+		if stream {
+			mode = "stream"
+		}
+		t.Run(mode, func(t *testing.T) {
+			authID := "commandcode-abort-usage-test-" + mode
+			capture := &commandCodeUsageCapture{authID: authID, records: make(chan usage.Record, 1)}
+			usage.RegisterNamedPlugin("commandcode-abort-usage-test-"+mode, capture)
+			exec := NewCommandCodeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID:       authID,
+				Provider: commandCodeProviderKey,
+				Attributes: map[string]string{
+					"api_key":  "user_test",
+					"base_url": server.URL,
+				},
+			}
+			input := []byte(`{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hello"}]}`)
+			request := cliproxyexecutor.Request{Model: "deepseek/deepseek-v4-flash", Payload: input}
+			options := cliproxyexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: input}
+			if stream {
+				result, err := exec.ExecuteStream(context.Background(), auth, request, options)
+				if err != nil {
+					t.Fatalf("ExecuteStream() setup error = %v", err)
+				}
+				var streamErr error
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+				if streamErr == nil {
+					t.Fatal("ExecuteStream() terminal error = nil, want abort error")
+				}
+			} else if _, err := exec.Execute(context.Background(), auth, request, options); err == nil {
+				t.Fatal("Execute() error = nil, want abort error")
+			}
+
+			select {
+			case record := <-capture.records:
+				if !record.Failed || record.Fail.StatusCode != http.StatusBadGateway {
+					t.Fatalf("failure record = %+v, want failed status 502", record)
+				}
+				if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 1 || record.Detail.TotalTokens != 4 {
+					t.Fatalf("failure usage = %+v, want 3 input, 1 output, 4 total", record.Detail)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for CommandCode abort usage record")
+			}
+		})
 	}
 }
 
