@@ -819,9 +819,6 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 			for scanner.Scan() {
 				line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				if bytes.HasPrefix(line, []byte("event:")) {
-					signalCodexStreamActivity(ctx, strings.TrimSpace(string(line[len("event:"):])), &activitySignaled)
-				}
 				if !bytes.HasPrefix(line, dataTag) {
 					if !codexContinueSendTranslated(ctx, out, to, responseFormat, req.Model, originalPayload, clientBody, applyCodexIdentityExposeResponsePayload(line, identityState), &param) {
 						return
@@ -833,9 +830,13 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				eventType := gjson.GetBytes(data, "type").String()
 				streamErr, terminalBody, terminalFailure := codexTerminalFailureErr(data)
 				var result codexContinueEventResult
+				cacheReasoningReplay := true
 				if terminalFailure && fold.everContinued && len(fold.retainedTerminal) > 0 {
 					// Failures from a hidden continuation request must not replace the
 					// retained completion from the client-visible round.
+					if code, _, ok := codexStatusErrorClassification(streamErr.StatusCode(), terminalBody); ok && code == "thinking_signature_invalid" {
+						cacheReasoningReplay = false
+					}
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 					}
@@ -887,7 +888,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					}
 					if errRound != nil {
 						if codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
-							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback) {
+							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, true, identityState, outputItemsByIndex, &outputItemsFallback) {
 								return
 							}
 							return
@@ -908,7 +909,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					break
 				}
 
-				if !codexContinueProcessHTTPEvents(ctx, out, fold, result.Emit, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback) {
+				if !codexContinueProcessHTTPEvents(ctx, out, fold, result.Emit, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, cacheReasoningReplay, identityState, outputItemsByIndex, &outputItemsFallback) {
 					return
 				}
 				if result.Done {
@@ -925,7 +926,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				return
 			}
 			if eofEvents := fold.HandleEOF(); len(eofEvents) > 0 {
-				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback)
+				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, true, identityState, outputItemsByIndex, &outputItemsFallback)
 			}
 			return
 		}
@@ -968,7 +969,7 @@ func (e *CodexExecutor) openCodexContinueHTTPRound(ctx context.Context, auth *cl
 	return resp, nil
 }
 
-func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, fold *codexContinueFold, events [][]byte, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, param *any, reporter *helps.UsageReporter, replayScope codexReasoningReplayScope, identityState codexIdentityConfuseState, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) bool {
+func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, fold *codexContinueFold, events [][]byte, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, param *any, reporter *helps.UsageReporter, replayScope codexReasoningReplayScope, cacheReasoningReplay bool, identityState codexIdentityConfuseState, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) bool {
 	for _, data := range events {
 		switch gjson.GetBytes(data, "type").String() {
 		case "response.output_item.done":
@@ -981,7 +982,9 @@ func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexec
 				publishCodexImageToolUsage(ctx, reporter, clientBody, data)
 			}
 			data = patchCodexCompletedOutput(data, outputItemsByIndex, *outputItemsFallback)
-			cacheCodexReasoningReplayFromCompleted(replayScope, data)
+			if cacheReasoningReplay {
+				cacheCodexReasoningReplayFromCompleted(replayScope, data)
+			}
 		}
 		line := append([]byte("data: "), data...)
 		line = applyCodexIdentityExposeResponsePayload(line, identityState)

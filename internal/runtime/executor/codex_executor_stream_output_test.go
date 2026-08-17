@@ -291,7 +291,7 @@ func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *tes
 	assertNotRequestScopedTestError(t, streamErr)
 }
 
-func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforePayload(t *testing.T) {
+func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforeDataPayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: response.created\n"))
@@ -315,7 +315,7 @@ func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforePayload(t *testing.T
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 
-	payloadSeen := false
+	dataPayloadSeen := false
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream error: %v", chunk.Err)
@@ -323,18 +323,19 @@ func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforePayload(t *testing.T
 		if chunk.Bootstrap {
 			t.Fatal("activity committed the auth stream with a bootstrap marker")
 		}
-		if len(chunk.Payload) > 0 {
+		payload := bytes.TrimSpace(chunk.Payload)
+		if bytes.HasPrefix(payload, dataTag) {
 			if activityCount == 0 {
-				t.Fatal("payload emitted before activity callback")
+				t.Fatal("data payload emitted before activity callback")
 			}
-			payloadSeen = true
+			dataPayloadSeen = true
 		}
 	}
 	if activityCount != 1 {
 		t.Fatalf("activity callback count = %d, want 1", activityCount)
 	}
-	if !payloadSeen {
-		t.Fatal("expected downstream payload")
+	if !dataPayloadSeen {
+		t.Fatal("expected downstream data payload")
 	}
 }
 
@@ -378,7 +379,7 @@ func TestCodexExecutorExecuteStreamImmediateTerminalErrorDoesNotBootstrap(t *tes
 	}
 }
 
-func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforePayload(t *testing.T) {
+func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforeDataPayload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: response.created\n"))
@@ -401,7 +402,7 @@ func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforePayload(
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 
-	payloadSeen := false
+	dataPayloadSeen := false
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream error: %v", chunk.Err)
@@ -409,18 +410,19 @@ func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforePayload(
 		if chunk.Bootstrap {
 			t.Fatal("activity committed the auth stream with a bootstrap marker")
 		}
-		if len(chunk.Payload) > 0 {
+		payload := bytes.TrimSpace(chunk.Payload)
+		if bytes.HasPrefix(payload, dataTag) {
 			if activityCount == 0 {
-				t.Fatal("payload emitted before activity callback")
+				t.Fatal("data payload emitted before activity callback")
 			}
-			payloadSeen = true
+			dataPayloadSeen = true
 		}
 	}
 	if activityCount != 1 {
 		t.Fatalf("activity callback count = %d, want 1", activityCount)
 	}
-	if !payloadSeen {
-		t.Fatal("expected downstream payload")
+	if !dataPayloadSeen {
+		t.Fatal("expected downstream data payload")
 	}
 }
 
@@ -596,7 +598,7 @@ func TestCodexExecutorMetadataPrefixedEmptyCompletionRotatesAuth(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorUntrustedEventPreambleDoesNotSignalActivity(t *testing.T) {
+func TestCodexExecutorIncompleteEventPreambleDoesNotSignalActivity(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  *config.Config
@@ -605,7 +607,7 @@ func TestCodexExecutorUntrustedEventPreambleDoesNotSignalActivity(t *testing.T) 
 		{name: "continue fold", cfg: &config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}}},
 	}
 	for _, tt := range tests {
-		for _, eventType := range []string{"error", "response.unknown", "not-a-response-event"} {
+		for _, eventType := range []string{"response.created", "error", "response.unknown", "not-a-response-event"} {
 			t.Run(tt.name+"/"+eventType, func(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "text/event-stream")
@@ -633,11 +635,11 @@ func TestCodexExecutorUntrustedEventPreambleDoesNotSignalActivity(t *testing.T) 
 				case chunk := <-result.Chunks:
 					if !strings.Contains(string(chunk.Payload), "event: "+eventType) {
 						cancel()
-						t.Fatalf("first chunk = %q, want untrusted event preamble", chunk.Payload)
+						t.Fatalf("first chunk = %q, want incomplete event preamble", chunk.Payload)
 					}
 				case <-time.After(time.Second):
 					cancel()
-					t.Fatal("untrusted event preamble was not emitted")
+					t.Fatal("incomplete event preamble was not emitted")
 				}
 				select {
 				case <-time.After(25 * time.Millisecond):
@@ -646,7 +648,7 @@ func TestCodexExecutorUntrustedEventPreambleDoesNotSignalActivity(t *testing.T) 
 				}
 				if got := activityCount.Load(); got != 0 {
 					cancel()
-					t.Fatalf("untrusted event preamble activity count = %d, want 0", got)
+					t.Fatalf("incomplete event preamble activity count = %d, want 0", got)
 				}
 				cancel()
 				for range result.Chunks {

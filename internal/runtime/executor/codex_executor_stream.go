@@ -153,9 +153,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if bytes.HasPrefix(line, []byte("event:")) {
-				signalCodexStreamActivity(ctx, strings.TrimSpace(string(line[len("event:"):])), &activitySignaled)
-			}
 			translatedLine := bytes.Clone(line)
 			terminalSuccess := false
 
