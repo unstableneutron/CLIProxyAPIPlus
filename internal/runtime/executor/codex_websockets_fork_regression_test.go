@@ -424,6 +424,65 @@ func TestCodexWebsocketsExecuteStreamStopsOnResponseFailed(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketContinueStreamPreservesStatuslessNestedErrorLifecycle(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		events := [][]byte{
+			[]byte(`{"type":"error","error":{"type":"server_error","message":"statusless nested notice"}}`),
+			[]byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_1","status":"in_progress"}}`),
+			[]byte(`{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","status":"completed","content":[{"type":"output_text","text":"ok"}]}}`),
+			[]byte(`{"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}}`),
+		}
+		for _, event := range events {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	auth := &cliproxyauth.Auth{ID: "auth-statusless-error", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+	}
+
+	result, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var sawError, sawCompleted bool
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("statusless nested error changed websocket lifecycle: %v", chunk.Err)
+		}
+		eventType := gjson.GetBytes(chunk.Payload, "type").String()
+		sawError = sawError || eventType == "error"
+		sawCompleted = sawCompleted || eventType == "response.completed"
+	}
+	if !sawError || !sawCompleted {
+		t.Fatalf("websocket events: error=%t completed=%t, want both", sawError, sawCompleted)
+	}
+}
+
 func TestCodexWebsocketHeartbeatInvalidatesSilentUpstream(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverDone := make(chan struct{})

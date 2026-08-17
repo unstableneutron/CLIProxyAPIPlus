@@ -648,7 +648,7 @@ func codexContinueAgentUsage(first codexContinueUsage, total codexContinueUsage,
 
 func codexContinueIsTerminalEvent(eventType string) bool {
 	switch eventType {
-	case "error", "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled":
+	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled":
 		return true
 	default:
 		return false
@@ -825,11 +825,17 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				}
 
 				data := bytes.TrimSpace(line[5:])
-				streamErr, terminalBody, terminalFailure := codexTerminalStreamErr(data)
-				if !terminalFailure && !fold.awaitingContinuation {
-					streamErr, terminalBody, terminalFailure = codexTerminalFailureErr(data)
-				}
-				if terminalFailure {
+				eventType := gjson.GetBytes(data, "type").String()
+				streamErr, terminalBody, terminalFailure := codexTerminalFailureErr(data)
+				var result codexContinueEventResult
+				if terminalFailure && fold.awaitingContinuation {
+					// Failures from a hidden continuation request must not replace the
+					// retained completion from the client-visible round.
+					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+					}
+					result = fold.handleTerminal(data, eventType)
+				} else if terminalFailure {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -840,15 +846,15 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					reporter.PublishFailure(ctx, streamErr)
 					_ = codexContinueSendError(ctx, out, streamErr)
 					return
-				}
-				eventType := gjson.GetBytes(data, "type").String()
-				if gjson.ValidBytes(data) {
-					// Report upstream protocol activity without committing the auth
-					// attempt; metadata-only empty completions must remain retryable.
-					signalCodexStreamActivity(ctx, eventType, &activitySignaled)
+				} else {
+					if gjson.ValidBytes(data) {
+						// Report upstream protocol activity without committing the auth
+						// attempt; metadata-only empty completions must remain retryable.
+						signalCodexStreamActivity(ctx, eventType, &activitySignaled)
+					}
+					result = fold.HandleEvent(data)
 				}
 
-				result := fold.HandleEvent(data)
 				for _, usageEvent := range result.PublishUsage {
 					if detail, ok := helps.ParseCodexUsage(usageEvent); ok {
 						reporter.Publish(ctx, detail)

@@ -236,11 +236,64 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func signalCodexStreamActivity(ctx context.Context, eventType string, signaled *bool) {
-	if signaled == nil || *signaled || eventType == "" || codexContinueIsTerminalEvent(eventType) {
+	if signaled == nil || *signaled || !isCodexStreamActivityEvent(eventType) {
 		return
 	}
 	cliproxyexecutor.NotifyStreamActivity(ctx)
 	*signaled = true
+}
+
+func isCodexStreamActivityEvent(eventType string) bool {
+	switch eventType {
+	case "response.queued",
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.output_item.done",
+		"response.content_part.added",
+		"response.content_part.done",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.output_text.annotation.added",
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.file_search_call.in_progress",
+		"response.file_search_call.searching",
+		"response.file_search_call.completed",
+		"response.web_search_call.in_progress",
+		"response.web_search_call.searching",
+		"response.web_search_call.completed",
+		"response.image_generation_call.in_progress",
+		"response.image_generation_call.generating",
+		"response.image_generation_call.partial_image",
+		"response.image_generation_call.completed",
+		"response.code_interpreter_call.in_progress",
+		"response.code_interpreter_call.interpreting",
+		"response.code_interpreter_call.completed",
+		"response.mcp_call_arguments.delta",
+		"response.mcp_call_arguments.done",
+		"response.mcp_call.in_progress",
+		"response.mcp_call.completed",
+		"response.mcp_call.failed",
+		"response.mcp_list_tools.in_progress",
+		"response.mcp_list_tools.completed",
+		"response.mcp_list_tools.failed",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.audio.delta",
+		"response.audio.done":
+		return true
+	default:
+		return false
+	}
 }
 
 func restoreCodexResponsesSSELineBoundaries(responseFormat sdktranslator.Format, chunks [][]byte) {
