@@ -196,24 +196,46 @@ verify_release_and_link() {
     || die "release ${tag} has no archives"
   [ "$(jq '[.assets[] | select(.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json")] | length' "${release_file}")" -eq 1 ] \
     || die "release ${tag} has a wrong or duplicate receipt"
-  jq -e 'all(.assets[]; (.id | type) == "number" and (.id > 0) and
-      (.size | type) == "number" and (.size > 0) and
-      (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$")))' \
+  jq -e \
+    --arg repo "${GITHUB_REPOSITORY}" \
+    --arg login "${BOT_LOGIN}" \
+    --argjson bot_id "${BOT_ID}" '
+      all(.assets[];
+        (.id | type) == "number" and .id > 0 and
+        (.size | type) == "number" and .size > 0 and .size <= 2000000000 and
+        .state == "uploaded" and
+        .url == ("https://api.github.com/repos/" + $repo + "/releases/assets/" + (.id | tostring)) and
+        .uploader.login == $login and .uploader.id == $bot_id and .uploader.type == "Bot" and
+        (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$")))
+    ' \
     "${release_file}" >/dev/null \
     || die "release ${tag} has an invalid asset identity"
 
+  local receipt_size
   receipt_id=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .id' "${release_file}")
   receipt_digest=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .digest' "${release_file}")
+  receipt_size=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .size' "${release_file}")
+  [ "${receipt_size}" -le 1000000 ] \
+    || die "receipt asset for ${tag} exceeds the metadata limit"
   gh api -H 'Accept: application/octet-stream' \
     "repos/${GITHUB_REPOSITORY}/releases/assets/${receipt_id}" > "${node_dir}/${receipt_name}"
   [ "sha256:$(sha256sum "${node_dir}/${receipt_name}" | awk '{ print $1 }')" = "${receipt_digest}" ] \
     || die "receipt bytes for ${tag} do not match the release asset digest"
   jq -e . "${node_dir}/${receipt_name}" >/dev/null \
     || die "release ${tag} receipt is malformed"
+  if [ "${kind}" = hotfix ]; then
+    local recorded_parent_tag
+    recorded_parent_tag=$(jq -r '.previous_release.tag // empty' "${node_dir}/${receipt_name}")
+    [ "${tag_message}" = "Hotfix release ${tag} after ${recorded_parent_tag}" ] \
+      || die "chain tag ${tag} has an unexpected message"
+  fi
 
-  local checksum_id checksum_digest checksum_file="${node_dir}/checksums.txt"
+  local checksum_id checksum_digest checksum_size checksum_file="${node_dir}/checksums.txt"
   checksum_id=$(jq -r '.assets[] | select(.name == "checksums.txt") | .id' "${release_file}")
   checksum_digest=$(jq -r '.assets[] | select(.name == "checksums.txt") | .digest' "${release_file}")
+  checksum_size=$(jq -r '.assets[] | select(.name == "checksums.txt") | .size' "${release_file}")
+  [ "${checksum_size}" -le 1000000 ] \
+    || die "checksums asset for ${tag} exceeds the metadata limit"
   gh api -H 'Accept: application/octet-stream' \
     "repos/${GITHUB_REPOSITORY}/releases/assets/${checksum_id}" > "${checksum_file}"
   [ "sha256:$(sha256sum "${checksum_file}" | awk '{ print $1 }')" = "${checksum_digest}" ] \
@@ -319,8 +341,9 @@ verify_release_and_link() {
     --arg head "${run_head}" '
       [.artifacts[] | select(.name == $name)] | .[0] |
       .expired == false and (.id | type) == "number" and .id > 0 and
-      (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and
+      (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and .size_in_bytes <= 4000000 and
       (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$")) and
+      .archive_download_url == ("https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/actions/artifacts/" + (.id | tostring) + "/zip") and
       .workflow_run.id == $run_id and .workflow_run.repository_id == $repo_id and
       .workflow_run.head_repository_id == $repo_id and .workflow_run.head_sha == $head
     ' "${artifacts_file}" >/dev/null \

@@ -31,7 +31,15 @@ asset_json() {
     --arg url "https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/assets/${id}" \
     --argjson size "$(stat -c %s "${file}")" \
     --arg digest "$(sha256_digest "${file}")" \
-    '{id: $id, name: $name, url: $url, size: $size, digest: $digest}'
+    '{
+      id: $id,
+      name: $name,
+      url: $url,
+      size: $size,
+      state: "uploaded",
+      digest: $digest,
+      uploader: {login: "github-actions[bot]", id: 41898282, type: "Bot"}
+    }'
 }
 
 write_release() {
@@ -100,6 +108,7 @@ PY
         digest: $digest,
         size_in_bytes: $size,
         expired: false,
+        archive_download_url: ("https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/actions/artifacts/" + ($id | tostring) + "/zip"),
         workflow_run: {
           id: $run_id,
           repository_id: 1247056725,
@@ -455,6 +464,20 @@ test_workflow_legacy_preflight_and_chained_parent() {
 
 test_rejects_historical_receipt_and_planner_drift() {
   local root receipt temporary
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/release.json"
+  jq '(.assets[] | select(.name == "checksums.txt") | .uploader.id) += 1' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "invalid asset identity"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/artifacts.json"
+  jq '.artifacts[0].archive_download_url += "/wrong"' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "artifact for ${FIRST_TAG} has an unexpected identity"
+  rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"
   receipt="${root}/fixtures/${FIRST_TAG}/hotfix-release-receipt.json"
