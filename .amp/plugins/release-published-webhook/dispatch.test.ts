@@ -80,6 +80,10 @@ describe("dispatch primitives", () => {
       "CPAMP loopback and public routed /health", "five meaningful minutes",
       "service only", "restore the compose backup", "failure diagnostics",
       "Never ship, patch, tag, release, or modify source", "do not repair tagged source",
+      "mount only that credential store read-write", "exactly one short-lived canary replica",
+      "independent bounded TTL cleanup", "success, failure, or interruption",
+      "no canary container, network, or mount holder remains", "not a substitute for future cross-process locking",
+      "REST, SSE, native WebSocket, compact, and V2-compaction smoke matrix",
     ]) expect(p).toContain(required);
     expect(p).not.toContain("SENTINEL");
     expect(p).not.toContain("orb");
