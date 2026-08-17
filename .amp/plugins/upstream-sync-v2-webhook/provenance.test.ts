@@ -271,10 +271,10 @@ describe('candidate provenance', () => {
     expect(candidate.headRef).toBe(branch)
   })
 
-  test('accepts a populated canonical conflict list matching the planner artifact', async () => {
+  test('accepts a populated canonical conflict list in planner order', async () => {
     const conflicts = [
-      'internal/runtime/executor/codex_websockets_stream.go',
       'sdk/cliproxy/auth/conductor_stream.go',
+      'internal/runtime/executor/codex_websockets_stream.go',
     ]
     const { payload, canonical, client, setPlannerConflicts } = fixture()
     canonical.body = bodyWithConflicts(conflicts)

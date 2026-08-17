@@ -160,9 +160,6 @@ function parseConflictFiles(body: string): string[] {
     return path
   })
   if (new Set(conflicts).size !== conflicts.length) throw new RejectedDelivery('candidate conflict list is duplicated')
-  if (conflicts.join('\n') !== [...conflicts].sort().join('\n')) {
-    throw new RejectedDelivery('candidate conflict list is not sorted')
-  }
   return conflicts
 }
 
