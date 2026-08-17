@@ -206,6 +206,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			restoreCodexResponsesSSELineBoundaries(responseFormat, chunks)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -240,4 +241,15 @@ func signalCodexStreamActivity(ctx context.Context, eventType string, signaled *
 	}
 	cliproxyexecutor.NotifyStreamActivity(ctx)
 	*signaled = true
+}
+
+func restoreCodexResponsesSSELineBoundaries(responseFormat sdktranslator.Format, chunks [][]byte) {
+	if responseFormat != sdktranslator.FormatOpenAIResponse {
+		return
+	}
+	for i := range chunks {
+		if !bytes.HasSuffix(chunks[i], []byte("\n")) {
+			chunks[i] = append(chunks[i], '\n')
+		}
+	}
 }

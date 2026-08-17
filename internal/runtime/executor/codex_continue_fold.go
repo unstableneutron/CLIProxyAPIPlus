@@ -648,7 +648,7 @@ func codexContinueAgentUsage(first codexContinueUsage, total codexContinueUsage,
 
 func codexContinueIsTerminalEvent(eventType string) bool {
 	switch eventType {
-	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled":
+	case "error", "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled":
 		return true
 	default:
 		return false
@@ -983,6 +983,7 @@ func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexec
 
 func codexContinueSendTranslated(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, line []byte, param *any) bool {
 	chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, model, originalPayload, clientBody, line, param)
+	restoreCodexResponsesSSELineBoundaries(responseFormat, chunks)
 	for i := range chunks {
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:

@@ -635,6 +635,34 @@ func TestIsEmptyCompletionHandlesBufferedResponsesChunksWithoutSeparators(t *tes
 	}
 }
 
+func TestIsEmptyCompletionHandlesCanonicalSeparateSSEFields(t *testing.T) {
+	chunks := []cliproxyexecutor.StreamChunk{
+		{Payload: []byte("event: response.created\n")},
+		{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.5\"}}\n")},
+		{Payload: []byte("\n")},
+		{Payload: []byte("event: response.in_progress\n")},
+		{Payload: []byte("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.5\"}}\n")},
+		{Payload: []byte("\n")},
+		{Payload: []byte("event: response.completed\n")},
+		{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":0},\"input_tokens_details\":{\"cached_tokens\":0}}}}\n")},
+	}
+	stream := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		stream <- chunk
+	}
+	close(stream)
+	buffered, closed, bootstrapped, err := readStreamBootstrap(context.Background(), stream)
+	if err != nil {
+		t.Fatalf("readStreamBootstrap() error = %v", err)
+	}
+	if !closed || bootstrapped {
+		t.Fatalf("readStreamBootstrap() closed = %v, bootstrapped = %v; want closed uncommitted stream", closed, bootstrapped)
+	}
+	if !isEmptyCompletion(chunks) || !isEmptyCompletion(buffered) {
+		t.Fatal("canonical separate SSE fields were not classified as empty")
+	}
+}
+
 func TestExecuteEmptyCompletionRotatesAuth(t *testing.T) {
 	executor := &emptyCompletionTestExecutor{
 		executePayloads: map[string][]byte{},

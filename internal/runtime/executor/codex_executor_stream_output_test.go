@@ -341,7 +341,7 @@ func TestCodexExecutorExecuteStreamSignalsActivityOnceBeforePayload(t *testing.T
 func TestCodexExecutorExecuteStreamImmediateTerminalErrorDoesNotBootstrap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("event: error\n"))
 		_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached."}}` + "\n\n"))
 	}))
 	defer server.Close()
@@ -427,7 +427,7 @@ func TestCodexExecutorExecuteStreamContinueFoldSignalsActivityOnceBeforePayload(
 func TestCodexExecutorExecuteStreamContinueFoldImmediateGenericTerminalErrorDoesNotBootstrap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("event: error\n"))
 		_, _ = w.Write([]byte(`data: {"type":"error","error":{"type":"upstream_error","status_code":429,"message":"Try again later."}}` + "\n\n"))
 	}))
 	defer server.Close()
@@ -517,15 +517,19 @@ func TestCodexExecutorMetadataPrefixedEmptyCompletionRotatesAuth(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
+				writeEvent := func(eventType, payload string) {
+					_, _ = io.WriteString(w, "event: "+eventType+"\n")
+					_, _ = io.WriteString(w, "data: "+payload+"\n\n")
+				}
 				requestNumber := requests.Add(1)
-				_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
-				_, _ = w.Write([]byte(`data: {"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}` + "\n\n"))
+				writeEvent("response.created", `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`)
+				writeEvent("response.in_progress", `{"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}`)
 				if requestNumber == 1 {
-					_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1,"output_tokens_details":{"reasoning_tokens":0}}}}` + "\n\n"))
+					writeEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1,"output_tokens_details":{"reasoning_tokens":0}}}}`)
 					return
 				}
-				_, _ = w.Write([]byte(`data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}` + "\n\n"))
-				_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}}` + "\n\n"))
+				writeEvent("response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}`)
+				writeEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}}`)
 			}))
 			defer server.Close()
 
@@ -583,6 +587,67 @@ func TestCodexExecutorMetadataPrefixedEmptyCompletionRotatesAuth(t *testing.T) {
 			}
 			if !strings.Contains(payload.String(), "hello") {
 				t.Fatalf("final stream payload = %q, want content from second auth", payload.String())
+			}
+			if !strings.Contains(payload.String(), "event: response.created\ndata:") || strings.Contains(payload.String(), "response.createddata:") {
+				t.Fatalf("final stream payload lost canonical SSE field boundary: %q", payload.String())
+			}
+		})
+	}
+}
+
+func TestCodexExecutorTerminalErrorPreambleDoesNotSignalActivity(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "normal", cfg: &config.Config{}},
+		{name: "continue fold", cfg: &config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: error\n")
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+
+			executor := NewCodexExecutor(tt.cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+			ctx, cancel := context.WithCancel(context.Background())
+			var activityCount atomic.Int32
+			ctx = cliproxyexecutor.WithStreamActivityCallback(ctx, func() { activityCount.Add(1) })
+			result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.5",
+				Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+			if err != nil {
+				cancel()
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+
+			select {
+			case chunk := <-result.Chunks:
+				if !strings.Contains(string(chunk.Payload), "event: error") {
+					cancel()
+					t.Fatalf("first chunk = %q, want terminal event preamble", chunk.Payload)
+				}
+			case <-time.After(time.Second):
+				cancel()
+				t.Fatal("terminal event preamble was not emitted")
+			}
+			select {
+			case <-time.After(25 * time.Millisecond):
+			case <-ctx.Done():
+				t.Fatal("stream context ended before cancellation")
+			}
+			if got := activityCount.Load(); got != 0 {
+				cancel()
+				t.Fatalf("terminal event preamble activity count = %d, want 0", got)
+			}
+			cancel()
+			for range result.Chunks {
 			}
 		})
 	}
