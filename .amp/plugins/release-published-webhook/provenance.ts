@@ -84,6 +84,15 @@ type JSONObject = Record<string, unknown>;
 
 export class RejectedDelivery extends Error {}
 export class RetryableNotReady extends Error {}
+export class GitHubHTTPError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GitHubHTTPError";
+  }
+}
 
 export interface GitHubClient {
   get(path: string, signal: AbortSignal): Promise<unknown>;
@@ -1150,7 +1159,25 @@ async function validatePreviousUpstreamRelease(
   );
 }
 
+async function historicalEvidence<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (
+      error instanceof GitHubHTTPError &&
+      (error.status === 404 || error.status === 410)
+    ) {
+      throw new RejectedDelivery("historical release evidence is unavailable");
+    }
+    throw error;
+  }
+}
+
 async function validateHistoricalHotfix(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
+  return historicalEvidence(() => validateHistoricalHotfixEvidence(client, registry, expected, root, stateBytes, state, signal, seen, depth));
+}
+
+async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
   if (depth >= 32 || seen.has(expected.tag) || seen.has(expected.commit)) throw new RejectedDelivery("hotfix chain cycle or bound exceeded");
   seen.add(expected.tag); seen.add(expected.commit);
   const byTag = object(await client.get(`/repos/${REPOSITORY}/releases/tags/${encodeURIComponent(expected.tag)}`, signal), "historical release");
@@ -1162,6 +1189,7 @@ async function validateHistoricalHotfix(client: GitHubClient, registry: Registry
   const assets = classifyAssets(release, false); await validateChecksums(client, assets, signal);
   if (assets.receipts[0].name !== "hotfix-release-receipt.json" || assets.receipts[0].id !== expected.receipt.id || assets.receipts[0].digest !== expected.receipt.digest) throw new RejectedDelivery("recorded parent receipt identity differs");
   const receiptBytes = await downloadAsset(client, assets.receipts[0], signal, MAXIMUM_METADATA_BYTES), receipt = object(parseJSON(receiptBytes, "historical receipt"), "historical receipt");
+  if (receipt.receipt_type !== "hotfix-release") throw new RejectedDelivery("historical hotfix receipt type differs");
   const version = integer(receipt.hotfix_schema_version, "historical hotfix schema version"); exactKeys(receipt, version === 2 ? HOTFIX_RECEIPT_V2_KEYS : HOTFIX_RECEIPT_KEYS, "historical receipt");
   const core = validateReceiptCore(receipt, release, expected.commit, historicalState.state, assets.nonReceipt.map(a => a.name).sort());
   validateTagger(tag, "hotfix", expected.tag, string(object(receipt.previous_release, "previous release").tag, "previous release tag"));
@@ -1180,7 +1208,8 @@ async function validateHistoricalHotfix(client: GitHubClient, registry: Registry
     if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
     await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root);
   } else if (version === 2) {
-    const previous = releaseLink(previousRaw, expected.tag.endsWith(".1") ? "upstream" : "hotfix", "previous release"), recordedRoot = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+    if (expected.tag.endsWith(".1")) throw new RejectedDelivery("schema-v2 hotfix requires suffix .2 or later");
+    const previous = releaseLink(previousRaw, "hotfix", "previous release"), recordedRoot = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
     if (JSON.stringify(recordedRoot) !== JSON.stringify(root) || nextHotfixTag(previous.tag) !== expected.tag) throw new RejectedDelivery("hotfix parent or root identity differs");
     const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${previous.commit}...${expected.commit}`, signal), "historical comparison"); if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
     if (previous.tag === root.tag) await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root); else await validateHistoricalHotfix(client, registry, previous, root, stateBytes, state, signal, seen, depth + 1);
@@ -1338,7 +1367,8 @@ export async function validateRelease(
       if (!tag.endsWith(".1")) throw new RejectedDelivery("schema-v1 hotfix is only valid at suffix .1");
     } else {
       const suffix = Number(tag.slice(tag.lastIndexOf(".") + 1));
-      parentLink = releaseLink(previous, suffix === 1 ? "upstream" : "hotfix", "previous release"); rootLink = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+      if (suffix < 2) throw new RejectedDelivery("schema-v2 hotfix requires suffix .2 or later");
+      parentLink = releaseLink(previous, "hotfix", "previous release"); rootLink = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
       baseTag = parentLink.tag; baseCommit = parentLink.commit;
       if (rootLink.tag !== currentState.state.EXPECTED_FORK_TAG || !rootLink.tag.endsWith(".0") || !tag.startsWith(rootLink.tag.slice(0, -1))) throw new RejectedDelivery("accepted upstream root identity differs");
     }
@@ -1429,8 +1459,8 @@ export async function validateRelease(
         "hotfix commit is not strictly ahead of its base",
       );
     }
-    if (receipt.hotfix_schema_version === 1) await validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal);
-    else if (parentLink!.tag === rootLink!.tag) await validatePreviousUpstreamRelease(client, registry, rootLink!.tag, rootLink!.commit, currentState.bytes, currentState.state, signal, rootLink);
+    if (receipt.hotfix_schema_version === 1) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal));
+    else if (parentLink!.tag === rootLink!.tag) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, rootLink!.tag, rootLink!.commit, currentState.bytes, currentState.state, signal, rootLink));
     else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
     const workflowRun = await validateWorkflowRun(
       client,

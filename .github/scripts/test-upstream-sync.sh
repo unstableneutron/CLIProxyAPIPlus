@@ -863,6 +863,7 @@ test_publication_workflows_are_reusable_and_checked() {
 
   assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
   assert_contains "${VALIDATOR}" "test-hotfix-release.sh"
+  assert_contains "${VALIDATOR}" "test-verify-hotfix-chain.sh"
   assert_contains "${VALIDATOR}" "test-verify-hotfix-release.sh"
   assert_contains "${VALIDATOR}" "UPSTREAM_SYNC_TOOLING_MODE=auto"
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { admitWebhook } from "./admission";
 import { dispatch, notifyIssue, parseState, type Thread } from "./dispatch";
 import {
+  GitHubHTTPError,
   REPOSITORY,
   RejectedDelivery,
   RetryableNotReady,
@@ -37,7 +38,8 @@ class GitHub implements GitHubClient {
       },
       signal,
     });
-    if (!r.ok) throw new Error(`GitHub API returned ${r.status}`);
+    if (!r.ok)
+      throw new GitHubHTTPError(r.status, `GitHub API returned ${r.status}`);
     return r.json();
   }
   async bytes(url: string, signal: AbortSignal) {
@@ -49,7 +51,8 @@ class GitHub implements GitHubClient {
       },
       signal,
     });
-    if (!r.ok) throw new Error(`GitHub asset returned ${r.status}`);
+    if (!r.ok)
+      throw new GitHubHTTPError(r.status, `GitHub asset returned ${r.status}`);
     return new Uint8Array(await r.arrayBuffer());
   }
 }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   BOT_ID,
   BOT_LOGIN,
+  GitHubHTTPError,
   IMAGE,
   OWNER_ID,
   OWNER_LOGIN,
@@ -1429,6 +1430,120 @@ describe("hotfix release provenance", () => {
     replay.refreshReceipt();
     await expect(validate(replay)).rejects.toThrow("schema-v1 hotfix");
   });
+
+  test("rejects schema-v2 receipts at suffix .1", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.receipt.hotfix_schema_version = 2;
+    fixture.receipt.previous_release = fixtureReleaseLink(
+      fixture,
+      "upstream",
+      fixture.baseTag!,
+      fixture.baseCommit!,
+      fixture.baseReceiptAsset!,
+      800,
+    );
+    fixture.receipt.accepted_upstream_root = structuredClone(
+      fixture.receipt.previous_release,
+    );
+    fixture.refreshReceipt();
+    await expect(validate(fixture)).rejects.toThrow(
+      "schema-v2 hotfix requires suffix .2 or later",
+    );
+  });
+
+  test.each([
+    [
+      "release",
+      (fixture: ReleaseFixture) =>
+        `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`,
+      false,
+    ],
+    [
+      "state",
+      (fixture: ReleaseFixture) =>
+        `/repos/${REPOSITORY}/contents/.ccs-fork-upstream.env?ref=${fixture.receipt.previous_release.commit}`,
+      false,
+    ],
+    ["workflow run", () => `/repos/${REPOSITORY}/actions/runs/900`, false],
+    [
+      "artifact listing",
+      () => `/repos/${REPOSITORY}/actions/runs/900/artifacts?per_page=100`,
+      false,
+    ],
+    [
+      "asset download",
+      (fixture: ReleaseFixture) => fixture.receipt.previous_release.receipt.digest,
+      true,
+    ],
+  ])(
+    "permanently rejects historical %s evidence lost with 404 or 410",
+    async (_name, target, download) => {
+      for (const status of [404, 410]) {
+        const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+        const targetValue = target(fixture);
+        const original = fixture.github;
+        const github: GitHubClient = {
+          get: async (path, requestSignal) => {
+            if (!download && path === targetValue) {
+              throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+            }
+            return original.get(path, requestSignal);
+          },
+          bytes: async (url, requestSignal) => {
+            const parentReceipt = fixture.values
+              .get(`/repos/${REPOSITORY}/releases/101`)
+              .assets.find(
+                (asset: any) => asset.name === "hotfix-release-receipt.json",
+              );
+            if (download && url === parentReceipt.url) {
+              throw new GitHubHTTPError(status, `GitHub asset returned ${status}`);
+            }
+            return original.bytes(url, requestSignal);
+          },
+        };
+        await expect(
+          validateRelease(
+            fixture.payload,
+            receivedAt,
+            github,
+            fixture.registry.client,
+            signal,
+            { now },
+          ),
+        ).rejects.toBeInstanceOf(RejectedDelivery);
+      }
+    },
+  );
+
+  test.each([[429], [500]])(
+    "keeps historical transient HTTP %s failures retryable",
+    async (status) => {
+      const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+      const original = fixture.github;
+      const github: GitHubClient = {
+        get: async (path, requestSignal) => {
+          if (
+            path ===
+            `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`
+          ) {
+            throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+          }
+          return original.get(path, requestSignal);
+        },
+        bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+      };
+      await expect(
+        validateRelease(
+          fixture.payload,
+          receivedAt,
+          github,
+          fixture.registry.client,
+          signal,
+          { now },
+        ),
+      ).rejects.toBeInstanceOf(GitHubHTTPError);
+    },
+  );
 
   test.each([
     ["original_tag", "v7.2.131"],

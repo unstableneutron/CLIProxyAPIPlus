@@ -162,7 +162,7 @@ if [ "${MODE}" = full ]; then
 
   if [ "${TOOLING_REQUIRED}" = true ]; then
     run_gate helper-tests \
-      "${UPSTREAM_SYNC_HELPER_TEST_CMD:-UPSTREAM_SYNC_TOOLING_MODE=auto \"${SCRIPT_DIR}/test-upstream-sync.sh\" && UPSTREAM_SYNC_TOOLING_MODE=auto \"${SCRIPT_DIR}/test-verify-upstream-release.sh\" && \"${SCRIPT_DIR}/test-hotfix-release.sh\" && \"${SCRIPT_DIR}/test-verify-hotfix-release.sh\"}" \
+      "${UPSTREAM_SYNC_HELPER_TEST_CMD:-UPSTREAM_SYNC_TOOLING_MODE=auto \"${SCRIPT_DIR}/test-upstream-sync.sh\" && UPSTREAM_SYNC_TOOLING_MODE=auto \"${SCRIPT_DIR}/test-verify-upstream-release.sh\" && \"${SCRIPT_DIR}/test-hotfix-release.sh\" && \"${SCRIPT_DIR}/test-verify-hotfix-chain.sh\" && \"${SCRIPT_DIR}/test-verify-hotfix-release.sh\"}" \
       HELPER_TESTS_STATUS
     run_gate shellcheck \
       "${UPSTREAM_SYNC_SHELLCHECK_CMD:-shellcheck .github/scripts/*.sh}" \

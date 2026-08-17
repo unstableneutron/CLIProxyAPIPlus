@@ -56,8 +56,8 @@ release_parts "${PARENT_TAG}" || die "--parent-tag must be a fork release tag"
   || die "candidate and parent release lines differ"
 [ "${CANDIDATE_SUFFIX}" -eq $((RELEASE_SUFFIX + 1)) ] \
   || die "parent ${PARENT_TAG} is not the immediate predecessor of ${TAG}"
-[ "${CANDIDATE_SUFFIX}" -ge 2 ] \
-  || die "chained hotfix verification requires suffix .2 or later"
+[ "${CANDIDATE_SUFFIX}" -ge 1 ] \
+  || die "hotfix verification requires suffix .1 or later"
 [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "--expected-commit must be a 40-character lowercase commit"
 [[ "${EXPECTED_PARENT_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
@@ -343,6 +343,72 @@ verify_release_and_link() {
       || die "hotfix artifact receipt bytes for ${tag} differ"
     cmp -s <(unzip -p "${artifact_zip}" independently-verified-receipt.json) "${receipt_file}" \
       || die "independent artifact receipt bytes for ${tag} differ"
+
+    local final_member final_plan="${node_dir}/final-plan.out"
+    final_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ '$NF == "final-plan.out" { print }')
+    [ "$(wc -l <<< "${final_member}" | tr -d ' ')" -eq 1 ] \
+      || die "historical final plan for ${tag} is missing or duplicated"
+    unzip -p "${artifact_zip}" "${final_member}" > "${final_plan}"
+    if [ ! -s "${final_plan}" ] || \
+       [ "$(tail -c 1 "${final_plan}" | od -An -t x1 | tr -d ' \n')" != 0a ]; then
+      die "historical final plan for ${tag} is malformed"
+    fi
+    local plan_keys="${node_dir}/plan-keys" expected_plan_keys="${node_dir}/expected-plan-keys"
+    if ! awk -F= '
+      !/^[a-z][a-z0-9_]*=/ { exit 1 }
+      seen[$1]++ { exit 1 }
+      { print $1 }
+    ' "${final_plan}" | sort > "${plan_keys}"; then
+      die "historical final plan for ${tag} is malformed"
+    fi
+    printf '%s\n' \
+      original_tag plus_tag pre_sync_head base_fork_commit original_repository \
+      plus_repository models_repository original_head plus_tag_head plus_head \
+      models_commit plus_head_included plus_head_already_represented \
+      plus_head_delta_paths unsafe_plus_head_delta_paths blocked block_reason \
+      fork_tag_prefix latest_fork_tag latest_fork_models_commit latest_fork_suffix \
+      next_fork_tag expected_fork_tag safe_sync_id plan_fingerprint candidate_branch \
+      snapshot_namespace original_snapshot_ref plus_tag_snapshot_ref \
+      plus_head_snapshot_ref models_snapshot_ref target_drift target_drift_summary \
+      has_changes | sort > "${expected_plan_keys}"
+    cmp -s "${plan_keys}" "${expected_plan_keys}" \
+      || die "historical final plan fields for ${tag} differ"
+    plan_value() {
+      local key=$1
+      awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${final_plan}"
+    }
+    local plan_sha plan_boolean
+    for plan_sha in pre_sync_head base_fork_commit original_head plus_tag_head plus_head models_commit plan_fingerprint; do
+      [[ "$(plan_value "${plan_sha}")" =~ ^[0-9a-f]{40}$ ]] \
+        || die "historical final plan hash ${plan_sha} for ${tag} is malformed"
+    done
+    for plan_boolean in plus_head_included plus_head_already_represented blocked target_drift has_changes; do
+      case "$(plan_value "${plan_boolean}")" in
+        true|false) ;;
+        *) die "historical final plan boolean ${plan_boolean} for ${tag} is malformed" ;;
+      esac
+    done
+    if [ "$(plan_value original_tag)" != "$(state_value ORIGINAL_TAG)" ] || \
+       [ "$(plan_value plus_tag)" != "$(state_value PLUS_TAG)" ] || \
+       [ "$(plan_value pre_sync_head)" != "${commit}" ] || \
+       [ "$(plan_value base_fork_commit)" != "${commit}" ] || \
+       [ "$(plan_value original_repository)" != "$(state_value ORIGINAL_REPOSITORY)" ] || \
+       [ "$(plan_value plus_repository)" != "$(state_value PLUS_REPOSITORY)" ] || \
+       [ "$(plan_value models_repository)" != "$(state_value MODELS_REPOSITORY)" ] || \
+       [ "$(plan_value original_head)" != "$(state_value ORIGINAL_COMMIT)" ] || \
+       [ "$(plan_value plus_tag_head)" != "$(state_value PLUS_TAG_COMMIT)" ] || \
+       [ "$(plan_value plus_head)" != "$(state_value PLUS_HEAD_COMMIT)" ] || \
+       [ "$(plan_value models_commit)" != "$(state_value MODELS_COMMIT)" ] || \
+       [ "$(plan_value plus_head_included)" != "$(state_value PLUS_HEAD_INCLUDED)" ] || \
+       [ "$(plan_value latest_fork_tag)" != "${tag}" ] || \
+       [ "$(plan_value expected_fork_tag)" != "${tag}" ] || \
+       [ "$(plan_value latest_fork_models_commit)" != "$(state_value MODELS_COMMIT)" ] || \
+       [ "$(plan_value safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
+       [ "$(plan_value has_changes)" != false ] || \
+       [ "$(plan_value target_drift)" != false ] || \
+       [ "$(plan_value blocked)" != false ]; then
+      die "historical final plan identity for ${tag} differs"
+    fi
   fi
   local receipt_member
   receipt_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ -v name="${receipt_name}" '$NF == name { print }')
@@ -433,6 +499,27 @@ validate_chain() {
     return
   fi
 
+  jq -e \
+    --arg sync_id "${EXPECTED_SYNC_ID}" \
+    --arg fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
+    --arg state_digest "$(sha256sum "${STATE_FILE}" | awk '{ print $1 }')" '
+      .receipt_type == "hotfix-release" and
+      (.upstream_state | keys) == ["plan_fingerprint", "sha256", "sync_id"] and
+      .upstream_state.sync_id == $sync_id and
+      .upstream_state.plan_fingerprint == $fingerprint and
+      .upstream_state.sha256 == $state_digest
+    ' "${receipt_file}" >/dev/null \
+    || die "hotfix receipt ${tag} has invalid upstream-state provenance"
+  local expected_asset_digests
+  expected_asset_digests=$(jq -c '
+    [.assets[] |
+      select(.name != "upstream-sync-receipt.json" and .name != "hotfix-release-receipt.json") |
+      {key: .name, value: .digest}] | from_entries
+  ' "${ROOT}/node-${tag}/release.json")
+  jq -e --argjson expected "${expected_asset_digests}" \
+    '.release_asset_digests == $expected' "${receipt_file}" >/dev/null \
+    || die "hotfix receipt ${tag} release-asset digests differ"
+
   local schema
   schema=$(jq -r '.hotfix_schema_version // empty' "${receipt_file}")
   case "${schema}" in
@@ -452,6 +539,8 @@ validate_chain() {
       validate_chain "${parent_tag}" "${parent_commit}" "${tag}" "${commit}" $((depth + 1)) "${root_actual}"
       ;;
     2)
+      [ "${suffix}" -ge 2 ] \
+        || die "chained hotfix receipt schema requires suffix .2 or later"
       json_exact_keys "${receipt_file}" \
         'keys == (["accepted_upstream_root","architecture_images","hotfix_schema_version","image","image_digest","main_commit","plan_fingerprint","platforms","previous_release","receipt_type","release_asset_digests","release_assets","release_url","release_workflow","schema_version","sync_id","tag","tag_commit","upstream_state","workflow_run_id"] | sort)' \
         "chained hotfix receipt"

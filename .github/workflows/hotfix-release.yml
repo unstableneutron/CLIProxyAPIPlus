@@ -192,6 +192,7 @@ jobs:
           .github/scripts/test-upstream-sync.sh
           .github/scripts/test-verify-upstream-release.sh
           .github/scripts/test-hotfix-release.sh
+          .github/scripts/test-verify-hotfix-chain.sh
           .github/scripts/test-verify-hotfix-release.sh
           .github/scripts/upstream-sync.sh check-invariants
           .github/scripts/upstream-sync.sh check-symbol-survival "${BASE_COMMIT}"

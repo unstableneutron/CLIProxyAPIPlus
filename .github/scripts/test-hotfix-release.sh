@@ -206,6 +206,7 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "validate-hotfix-release.sh"
   assert_contains "${WORKFLOW}" "Verify complete previous release chain"
   assert_contains "${WORKFLOW}" "verify-hotfix-chain.sh"
+  assert_contains "${WORKFLOW}" "test-verify-hotfix-chain.sh"
   assert_contains "${WORKFLOW}" "Reject reused or partially published identity"
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${WORKFLOW}" 'git push origin "refs/tags/${TAG}"'
