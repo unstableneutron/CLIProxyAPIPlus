@@ -735,6 +735,22 @@ func TestCodexExecutorContinueFoldHiddenTerminalFailuresFlushRetainedDraft(t *te
 			},
 			event: `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"context length exceeded"}}`,
 		},
+		{
+			name: "incomplete after message item",
+			beforeFailure: []string{
+				`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"in_progress"}}`,
+				`{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"completed","content":[{"type":"output_text","text":"discarded hidden draft"}]}}`,
+			},
+			event: `{"type":"response.incomplete","sequence_number":2,"response":{"id":"resp_2","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		},
+		{
+			name: "cancelled after message item",
+			beforeFailure: []string{
+				`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"in_progress"}}`,
+				`{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"completed","content":[{"type":"output_text","text":"discarded hidden draft"}]}}`,
+			},
+			event: `{"type":"response.cancelled","sequence_number":2,"response":{"id":"resp_2","status":"cancelled","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

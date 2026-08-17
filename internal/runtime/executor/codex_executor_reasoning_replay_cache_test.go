@@ -710,6 +710,67 @@ func TestCodexExecutorContinueFoldInvalidSignatureFallbackKeepsReplayCleared(t *
 	}
 }
 
+func TestCodexExecutorContinueFoldHTTPInvalidSignatureFallbackKeepsReplayCleared(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	const cacheKey = "claude:session-invalid-http-continuation:agent:main"
+	cachedEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(12)
+	internalcache.CacheCodexReasoningReplayItem("gpt-5.4", cacheKey, []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":"`+cachedEncryptedContent+`"}`))
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests.Add(1) == 1 {
+			_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"` + cachedEncryptedContent + `"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Invalid signature in thinking block","type":"invalid_request_error","code":"invalid_request_error"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	streamResult, err := executor.ExecuteStream(context.Background(), &cliproxyauth.Auth{
+		ID: "auth-replay-invalid-http-continuation",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"session-invalid-http-continuation\"}"},"messages":[{"role":"user","content":[{"type":"text","text":"next"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream setup error: %v", err)
+	}
+	var payload strings.Builder
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("hidden HTTP invalid-signature error leaked downstream: %v", chunk.Err)
+		}
+		payload.Write(chunk.Payload)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("upstream request count = %d, want 2", got)
+	}
+	if !strings.Contains(payload.String(), "retained draft") {
+		t.Fatalf("fallback payload = %q, want retained draft", payload.String())
+	}
+	if _, ok := internalcache.GetCodexReasoningReplayItem("gpt-5.4", cacheKey); ok {
+		t.Fatal("hidden HTTP invalid-signature fallback left or repopulated replay item")
+	}
+}
+
 func TestCodexExecutorReasoningReplayCacheReplaysFunctionCallForClaudeToolResult(t *testing.T) {
 	internalcache.ClearCodexReasoningReplayCache()
 	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)

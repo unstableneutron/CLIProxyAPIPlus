@@ -287,7 +287,7 @@ func (f *codexContinueFold) HandleEvent(eventData []byte) codexContinueEventResu
 }
 
 func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) codexContinueEventResult {
-	if !codexContinueIsSuccessTerminalEvent(eventType) && f.awaitingContinuation && !f.currentRoundHasItem && len(f.retainedTerminal) > 0 {
+	if !codexContinueIsSuccessTerminalEvent(eventType) && f.everContinued && len(f.retainedTerminal) > 0 {
 		return f.handleRetainedContinuationFailure(eventData)
 	}
 	usage := f.recordTerminalUsage(eventData)
@@ -878,17 +878,34 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 						_ = codexContinueSendError(ctx, out, errBuild)
 						return
 					}
+					cacheFallbackReasoningReplay := true
+					clearInvalidSignatureReplay := func(errRound error) {
+						if errRound == nil {
+							return
+						}
+						statusCode := codexContinueStatusCode(errRound)
+						errorBody := []byte(errRound.Error())
+						if code, _, ok := codexStatusErrorClassification(statusCode, errorBody); !ok || code != "thinking_signature_invalid" {
+							return
+						}
+						cacheFallbackReasoningReplay = false
+						if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, errorBody); errClearReplay != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+						}
+					}
 					nextResp, errRound := e.openCodexContinueHTTPRound(ctx, auth, httpReq, httpClient, nextBody, authID, authLabel, authType, authValue)
+					clearInvalidSignatureReplay(errRound)
 					if errRound != nil && strategy == codexContinueDefaultMethod && codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
 						// A′ rewind rejected: retry the same round as a full replay.
 						if replayBody, replayStrategy, errReplay := fold.BuildContinuation(baseBody, nil, false, true); errReplay == nil {
 							strategy = replayStrategy
 							nextResp, errRound = e.openCodexContinueHTTPRound(ctx, auth, httpReq, httpClient, replayBody, authID, authLabel, authType, authValue)
+							clearInvalidSignatureReplay(errRound)
 						}
 					}
 					if errRound != nil {
 						if codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
-							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, true, identityState, outputItemsByIndex, &outputItemsFallback) {
+							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, cacheFallbackReasoningReplay, identityState, outputItemsByIndex, &outputItemsFallback) {
 								return
 							}
 							return
