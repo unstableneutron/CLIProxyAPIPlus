@@ -1095,6 +1095,39 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteRe
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ReasoningOnlyLengthEmitsIncomplete(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash","max_output_tokens":64}`)
+	chunks := []string{
+		`data: {"id":"resp_reasoning_length","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}`,
+		`data: {"id":"resp_reasoning_length","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":64,"completion_tokens_details":{"reasoning_tokens":64},"total_tokens":74}}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	incompleteSeen := false
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatalf("reasoning-only truncated stream was finalized as response.completed: %s", chunk)
+			}
+			if event != "response.incomplete" {
+				continue
+			}
+			incompleteSeen = true
+			if got := data.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+				t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+			}
+			if got := data.Get("response.output.0.type").String(); got != "reasoning" {
+				t.Fatalf("response output type = %q, want reasoning: %s", got, chunk)
+			}
+		}
+	}
+	if !incompleteSeen {
+		t.Fatal("expected response.incomplete for reasoning-only finish_reason=length")
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IncompleteToolStreamDoesNotFinalizeAsCompleted(t *testing.T) {
 	request := []byte(`{"model":"gpt-5.6-terra"}`)
 

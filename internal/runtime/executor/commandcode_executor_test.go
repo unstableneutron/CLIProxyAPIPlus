@@ -413,6 +413,47 @@ func TestCommandCodeExecuteStreamEmitsResponsesCompleted(t *testing.T) {
 	}
 }
 
+func TestCommandCodeExecuteStreamEmitsReasoningOnlyIncomplete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"reasoning-delta\",\"text\":\"still thinking\"}\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"reasoning-end\"}\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"finish\",\"finishReason\":\"length\",\"totalUsage\":{\"inputTokens\":3,\"outputTokens\":64,\"outputTokenDetails\":{\"reasoningTokens\":64},\"totalTokens\":67}}\n"))
+	}))
+	defer server.Close()
+
+	exec := NewCommandCodeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "user_test", "base_url": server.URL}}
+	input := []byte(`{"model":"deepseek/deepseek-v4-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"max_output_tokens":64,"stream":true}`)
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash",
+		Payload: input,
+	}, cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: input,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var terminal []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		if gjson.GetBytes(chunk.Payload, "type").String() == "response.incomplete" {
+			terminal = chunk.Payload
+		}
+	}
+	if got := gjson.GetBytes(terminal, "response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens; terminal=%s", got, terminal)
+	}
+	if got := gjson.GetBytes(terminal, "response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("terminal output type = %q, want reasoning; terminal=%s", got, terminal)
+	}
+}
+
 func TestCommandCodeExecuteAggregatesNonStreamingResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

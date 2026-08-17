@@ -217,8 +217,8 @@ func websocketPayloadPreview(payload []byte) string {
 	return previewText
 }
 
-func isResponsesWebsocketCompletionEvent(eventType string) bool {
-	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
+func isResponsesWebsocketTerminalEvent(eventType string) bool {
+	return responsesSSETerminalEvent(eventType)
 }
 
 type responsesWebsocketPayloadError struct {

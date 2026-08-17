@@ -24,7 +24,7 @@ const (
 	outcomeFailed              = "failed"
 	outcomeExternalAuthBlocked = "external-auth-blocked"
 	maxResponseBytes           = 4 << 20
-	defaultMaxOutputTokens     = 64
+	defaultMaxOutputTokens     = 256
 )
 
 var bearerValuePattern = regexp.MustCompile(`(?i)(bearer[[:space:]]+)[A-Za-z0-9._~+/=-]+`)
@@ -278,6 +278,55 @@ func responsesMessageInput(text string) []map[string]any {
 	}}
 }
 
+type responsesMarkerContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type responsesMarkerOutput struct {
+	Type    string                   `json:"type"`
+	Content []responsesMarkerContent `json:"content"`
+}
+
+func responsesPayloadContainsOutputMarker(payload []byte, marker string) bool {
+	var envelope struct {
+		Type     string                  `json:"type"`
+		Delta    string                  `json:"delta"`
+		Text     string                  `json:"text"`
+		Item     responsesMarkerOutput   `json:"item"`
+		Output   []responsesMarkerOutput `json:"output"`
+		Response struct {
+			Output []responsesMarkerOutput `json:"output"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(payload, &envelope) != nil {
+		return false
+	}
+	switch envelope.Type {
+	case "response.output_text.delta":
+		return strings.Contains(envelope.Delta, marker)
+	case "response.output_text.done":
+		return strings.Contains(envelope.Text, marker)
+	}
+	return responsesOutputContainsMarker([]responsesMarkerOutput{envelope.Item}, marker) ||
+		responsesOutputContainsMarker(envelope.Output, marker) ||
+		responsesOutputContainsMarker(envelope.Response.Output, marker)
+}
+
+func responsesOutputContainsMarker(output []responsesMarkerOutput, marker string) bool {
+	for i := range output {
+		if output[i].Type != "message" {
+			continue
+		}
+		for j := range output[i].Content {
+			if output[i].Content[j].Type == "output_text" && strings.Contains(output[i].Content[j].Text, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func newAuthorizedRequest(ctx context.Context, method, target, apiKey string, body []byte) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
@@ -324,7 +373,7 @@ func runResponsesREST(ctx context.Context, cfg responsesConfig, result *smokeRes
 		result.TerminalEvent = "response." + envelope.Status
 		return fmt.Errorf("Responses REST ended with status %s", envelope.Status)
 	}
-	result.MarkerMatched = bytes.Contains(body, []byte(cfg.Marker))
+	result.MarkerMatched = responsesPayloadContainsOutputMarker(body, cfg.Marker)
 	if !result.MarkerMatched {
 		return fmt.Errorf("Responses REST output did not contain the expected marker")
 	}
@@ -362,7 +411,7 @@ func runResponsesSSE(ctx context.Context, cfg responsesConfig, result *smokeResu
 	processEvent := func() (bool, error) {
 		data := strings.Join(dataLines, "\n")
 		dataLines = dataLines[:0]
-		if strings.Contains(data, cfg.Marker) {
+		if responsesPayloadContainsOutputMarker([]byte(data), cfg.Marker) {
 			result.MarkerMatched = true
 		}
 		if strings.TrimSpace(data) == "[DONE]" {
@@ -391,7 +440,7 @@ func runResponsesSSE(ctx context.Context, cfg responsesConfig, result *smokeResu
 			}
 			result.Outcome = outcomePassed
 			return true, nil
-		case "response.failed", "error":
+		case "response.incomplete", "response.failed", "response.error", "error":
 			result.TerminalEvent = resolvedType
 			return true, fmt.Errorf("Responses SSE ended with %s: %s", resolvedType, strings.TrimSpace(data))
 		default:
@@ -466,7 +515,7 @@ func runResponsesWebsocket(ctx context.Context, cfg responsesConfig, result *smo
 		if errRead != nil {
 			return fmt.Errorf("Responses websocket closed before a terminal event: %w", errRead)
 		}
-		if bytes.Contains(message, []byte(cfg.Marker)) {
+		if responsesPayloadContainsOutputMarker(message, cfg.Marker) {
 			result.MarkerMatched = true
 		}
 		var envelope struct {
@@ -483,7 +532,7 @@ func runResponsesWebsocket(ctx context.Context, cfg responsesConfig, result *smo
 			}
 			result.Outcome = outcomePassed
 			return nil
-		case "response.failed", "error":
+		case "response.incomplete", "response.failed", "response.error", "error":
 			result.TerminalEvent = envelope.Type
 			return fmt.Errorf("Responses websocket ended with %s: %s", envelope.Type, strings.TrimSpace(string(message)))
 		}

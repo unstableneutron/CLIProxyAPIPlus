@@ -14,6 +14,7 @@ commandcode	contains	sdk/cliproxy/usage/accounting.go	tokenAccountingSemanticsCo
 commandcode	contains	sdk/cliproxy/usage/accounting_test.go	TestEnsureTokenBreakdownForCommandCodeUsesIndependentCacheBuckets	Command Code token accounting regression remains
 commandcode	contains	sdk/cliproxy/service.go	case "commandcode":	CommandCode executor registration remains present
 commandcode	contains	internal/watcher/synthesizer/config.go	synthesizeCommandCodeKeys	CommandCode config synthesizer remains present
+commandcode	contains	internal/runtime/executor/commandcode_executor_test.go	TestCommandCodeExecuteStreamEmitsReasoningOnlyIncomplete	CommandCode reasoning-only truncation remains an explicit Responses terminal
 kiro	contains	internal/watcher/synthesizer/config.go	synthesizeKiroKeys	Kiro config synthesizer remains present
 amp	contains	internal/api/server.go	mgmt.GET("/ampcode"	Amp route registration remains present
 management-api	contains	internal/api/server.go	mgmt.GET("/codex-api-key"	Codex management route registration remains present
@@ -44,6 +45,8 @@ responses-websocket-reconciliation	contains	sdk/api/handlers/openai/openai_respo
 responses-websocket-reconciliation	contains	sdk/api/handlers/openai/openai_responses_websocket.go	if data == nil && errs == nil	responses websocket waits for both result channels before synthesizing a timeout
 responses-websocket-reconciliation	contains	sdk/api/handlers/openai/openai_responses_websocket_forward_error_test.go	TestForwardResponsesWebsocketWaitsForErrorAfterDataCloses	responses websocket preserves a sibling upstream error after data closes
 responses-websocket-reconciliation	contains	sdk/api/handlers/openai/openai_responses_websocket_forward_error_test.go	TestForwardResponsesWebsocketSynthesizes408AfterBothChannelsClose	responses websocket synthesizes timeout only after both result channels close
+responses-websocket-terminal	contains	sdk/api/handlers/openai/openai_responses_websocket_timeline.go	responsesSSETerminalEvent(eventType)	responses websocket shares the complete Responses terminal-event set with SSE
+responses-websocket-terminal	contains	sdk/api/handlers/openai/openai_responses_websocket_incomplete_test.go	TestForwardResponsesWebsocketTreatsResponseIncompleteAsTerminal	responses websocket incomplete terminal regression remains
 responses-websocket-reconciliation	contains	internal/runtime/executor/xai_websockets_executor.go	MarkXAIMissingPreviousResponseRequestScoped	xAI stale previous-response errors remain request scoped before auth accounting
 responses-websocket-reconciliation	contains	internal/runtime/executor/helps/responses_state_error.go	IsXAIMissingPreviousResponseError	payload-aware xAI stale previous-response matcher remains shared across runtime and replay planning
 responses-websocket-reconciliation	contains	internal/runtime/executor/xai_websockets_executor_test.go	TestXAIMissingPreviousResponseErrorIsRequestScoped	xAI stale previous-response runtime classification regression remains
