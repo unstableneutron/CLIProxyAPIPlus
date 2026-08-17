@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -22,6 +24,21 @@ type commandCodeFailingReader struct{}
 
 func (commandCodeFailingReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
+}
+
+type commandCodeUsageCapture struct {
+	authID  string
+	records chan usage.Record
+}
+
+func (c *commandCodeUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
+	if record.Provider != commandCodeProviderKey || record.AuthID != c.authID {
+		return
+	}
+	select {
+	case c.records <- record:
+	default:
+	}
 }
 
 func TestFetchCommandCodeModelsUsesProviderCatalog(t *testing.T) {
@@ -83,7 +100,7 @@ func TestCommandCodeBuildPayloadConvertsOpenAIChat(t *testing.T) {
 			{"role":"tool","tool_call_id":"call_1","name":"lookup","content":"result text"}
 		],
 		"tools":[{"type":"function","function":{"name":"lookup","description":"Lookup docs","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}],
-		"max_tokens":500000
+		"max_tokens":64000
 	}`)
 
 	payload, err := buildCommandCodePayload(commandCodePayloadOptions{
@@ -113,8 +130,8 @@ func TestCommandCodeBuildPayloadConvertsOpenAIChat(t *testing.T) {
 	if got := root.Get("params.system").String(); got != "You are concise." {
 		t.Fatalf("system = %q", got)
 	}
-	if got := root.Get("params.max_tokens").Int(); got != 500000 {
-		t.Fatalf("max_tokens = %d, want explicit 500000", got)
+	if got := root.Get("params.max_tokens").Int(); got != commandCodeMaxTokensCap {
+		t.Fatalf("max_tokens = %d, want explicit model cap %d", got, commandCodeMaxTokensCap)
 	}
 	if !root.Get("params.stream").Bool() {
 		t.Fatal("expected params.stream=true")
@@ -169,6 +186,110 @@ func TestCommandCodeBuildPayloadForwardsOptionalParams(t *testing.T) {
 	}
 	if got := root.Get("params.stop.0").String(); got != "END" {
 		t.Fatalf("stop[0] = %q, want END; payload=%s", got, payload)
+	}
+}
+
+func TestCommandCodeBuildPayloadRejectsInvalidExplicitTokenBudgets(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		model     string
+		budget    string
+		wantField string
+		wantLimit string
+	}{
+		{name: "chat max tokens above model cap", model: "deepseek/deepseek-v4-flash", budget: `"max_tokens":500000`, wantField: "max_tokens", wantLimit: "64000"},
+		{name: "chat max completion tokens above model cap", model: "deepseek/deepseek-v4-flash", budget: `"max_completion_tokens":64001`, wantField: "max_completion_tokens", wantLimit: "64000"},
+		{name: "model-specific output cap", model: "poolside/laguna-s-2.1-free", budget: `"max_tokens":32769`, wantField: "max_tokens", wantLimit: "32768"},
+		{name: "zero", model: "deepseek/deepseek-v4-flash", budget: `"max_tokens":0`, wantField: "max_tokens", wantLimit: "greater than 0"},
+		{name: "negative", model: "deepseek/deepseek-v4-flash", budget: `"max_tokens":-1`, wantField: "max_tokens", wantLimit: "greater than 0"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := []byte(`{"model":"` + testCase.model + `","messages":[{"role":"user","content":"hello"}],` + testCase.budget + `}`)
+			_, err := buildCommandCodePayload(commandCodePayloadOptions{Model: testCase.model, Payload: input})
+			if err == nil {
+				t.Fatal("buildCommandCodePayload() error = nil, want invalid request")
+			}
+			status, ok := err.(interface{ StatusCode() int })
+			if !ok || status.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("error = %v, want status 400", err)
+			}
+			if !strings.Contains(err.Error(), testCase.wantField) || !strings.Contains(err.Error(), testCase.wantLimit) {
+				t.Fatalf("error = %q, want field %q and limit %q", err, testCase.wantField, testCase.wantLimit)
+			}
+		})
+	}
+}
+
+func TestCommandCodeBuildPayloadUsesModelDefaultTokenBudget(t *testing.T) {
+	for _, testCase := range []struct {
+		model string
+		want  int64
+	}{
+		{model: "deepseek/deepseek-v4-flash", want: commandCodeMaxTokensCap},
+		{model: "poolside/laguna-s-2.1-free", want: 32768},
+		{model: "catalog-model-without-static-metadata", want: commandCodeMaxTokensCap},
+	} {
+		t.Run(testCase.model, func(t *testing.T) {
+			input := []byte(`{"model":"` + testCase.model + `","messages":[{"role":"user","content":"hello"}]}`)
+			payload, err := buildCommandCodePayload(commandCodePayloadOptions{Model: testCase.model, Payload: input})
+			if err != nil {
+				t.Fatalf("buildCommandCodePayload() error = %v", err)
+			}
+			if got := gjson.GetBytes(payload, "params.max_tokens").Int(); got != testCase.want {
+				t.Fatalf("max_tokens = %d, want %d; payload=%s", got, testCase.want, payload)
+			}
+		})
+	}
+}
+
+func TestCommandCodeBuildPayloadUsesDynamicModelTokenLimit(t *testing.T) {
+	const (
+		clientID = "commandcode-dynamic-limit-test-client"
+		modelID  = "commandcode/dynamic-limit-test-model"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, commandCodeProviderKey, []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                commandCodeProviderKey,
+		MaxCompletionTokens: 1024,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	input := []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hello"}],"max_tokens":1025}`)
+	_, err := buildCommandCodePayload(commandCodePayloadOptions{Model: modelID, Payload: input})
+	status, ok := err.(interface{ StatusCode() int })
+	if err == nil || !ok || status.StatusCode() != http.StatusBadRequest || !strings.Contains(err.Error(), "1024") {
+		t.Fatalf("buildCommandCodePayload() error = %v, want dynamic model limit 1024", err)
+	}
+}
+
+func TestCommandCodePrepareResponsesRejectsOversizedMaxOutputTokens(t *testing.T) {
+	input := []byte(`{"model":"deepseek/deepseek-v4-flash","input":"hello","max_output_tokens":500000}`)
+	exec := NewCommandCodeExecutor(&config.Config{})
+	_, err := exec.prepareRequest(context.Background(), &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test"}}, cliproxyexecutor.Request{
+		Model:   "deepseek/deepseek-v4-flash",
+		Payload: input,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: input,
+	}, false)
+	if err == nil {
+		t.Fatal("prepareRequest() error = nil, want invalid request")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadRequest || !strings.Contains(err.Error(), "max_tokens") || !strings.Contains(err.Error(), "64000") {
+		t.Fatalf("error = %v, want translated max_tokens status 400 with model limit", err)
+	}
+}
+
+func TestCommandCodeBuildPayloadRejectsMalformedTokenBudget(t *testing.T) {
+	for _, budget := range []string{`"64000"`, `1.5`, `9223372036854775808`} {
+		input := []byte(`{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"max_tokens":` + budget + `}`)
+		_, err := buildCommandCodePayload(commandCodePayloadOptions{Model: "deepseek/deepseek-v4-flash", Payload: input})
+		status, ok := err.(interface{ StatusCode() int })
+		if err == nil || !ok || status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("budget %s error = %v, want status 400", budget, err)
+		}
 	}
 }
 
@@ -836,13 +957,13 @@ func TestCommandCodeCapabilityGatesImagesAndReasoning(t *testing.T) {
 		t.Fatalf("vision reasoning_effort = %q, want xhigh", got)
 	}
 
-	lagunaInput := []byte(`{"model":"poolside/laguna-s-2.1-free","max_tokens":64000,"messages":[{"role":"user","content":"hello"}]}`)
+	lagunaInput := []byte(`{"model":"poolside/laguna-s-2.1-free","max_tokens":32768,"messages":[{"role":"user","content":"hello"}]}`)
 	payload, err = buildCommandCodePayload(commandCodePayloadOptions{Model: "poolside/laguna-s-2.1-free", Payload: lagunaInput})
 	if err != nil {
 		t.Fatalf("Laguna payload error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "params.max_tokens").Int(); got != 64000 {
-		t.Fatalf("Laguna explicit max_tokens = %d, want 64000", got)
+	if got := gjson.GetBytes(payload, "params.max_tokens").Int(); got != 32768 {
+		t.Fatalf("Laguna explicit max_tokens = %d, want 32768", got)
 	}
 }
 
@@ -915,18 +1036,88 @@ func TestCommandCodeIgnoresEventsAfterTerminal(t *testing.T) {
 	}
 }
 
-func TestCommandCodeAbortEmitsTerminalFinish(t *testing.T) {
+func TestCommandCodeAbortFailsClosed(t *testing.T) {
 	state := newCommandCodeStreamState("gpt-5.5")
 	chunks, _, err := commandCodeLineToOpenAIChunks([]byte(`{"type":"text-delta","text":"partial"}`), state)
 	if err != nil || len(chunks) != 1 {
 		t.Fatalf("text delta = %d, err=%v", len(chunks), err)
 	}
-	chunks, _, err = commandCodeLineToOpenAIChunks([]byte(`{"type":"abort"}`), state)
-	if err != nil || len(chunks) != 1 {
-		t.Fatalf("abort chunks = %d, err=%v", len(chunks), err)
+	chunks, _, err = commandCodeLineToOpenAIChunks([]byte(`{"type":"abort","message":"upstream canceled generation","totalUsage":{"inputTokens":3,"outputTokens":1,"totalTokens":4}}`), state)
+	if len(chunks) != 0 || err == nil {
+		t.Fatalf("abort chunks = %d, err=%v; want a terminal error", len(chunks), err)
 	}
-	if got := gjson.GetBytes(chunks[0], "choices.0.finish_reason").String(); got != "stop" {
-		t.Fatalf("abort finish_reason = %q", got)
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadGateway || !strings.Contains(err.Error(), "upstream canceled generation") {
+		t.Fatalf("abort error = %v, want status 502 with upstream reason", err)
+	}
+	requestScoped, ok := err.(interface{ IsRequestScoped() bool })
+	if !ok || !requestScoped.IsRequestScoped() {
+		t.Fatalf("abort error = %T, want request-scoped error to prevent credential retry", err)
+	}
+	if !state.Aborted || !state.Terminal || state.Usage.TotalTokens != 4 {
+		t.Fatalf("abort state = %+v, want terminal aborted state with usage", state)
+	}
+}
+
+func TestCommandCodeAbortPublishesFailureUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `{"type":"finish-step","totalUsage":{"inputTokens":3,"outputTokens":1,"totalTokens":4}}`+"\n")
+		_, _ = io.WriteString(w, `{"type":"abort","message":"upstream canceled generation"}`+"\n")
+	}))
+	defer server.Close()
+
+	for _, stream := range []bool{false, true} {
+		mode := "nonstream"
+		if stream {
+			mode = "stream"
+		}
+		t.Run(mode, func(t *testing.T) {
+			authID := "commandcode-abort-usage-test-" + mode
+			capture := &commandCodeUsageCapture{authID: authID, records: make(chan usage.Record, 1)}
+			usage.RegisterNamedPlugin("commandcode-abort-usage-test-"+mode, capture)
+			exec := NewCommandCodeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				ID:       authID,
+				Provider: commandCodeProviderKey,
+				Attributes: map[string]string{
+					"api_key":  "user_test",
+					"base_url": server.URL,
+				},
+			}
+			input := []byte(`{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hello"}]}`)
+			request := cliproxyexecutor.Request{Model: "deepseek/deepseek-v4-flash", Payload: input}
+			options := cliproxyexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: input}
+			if stream {
+				result, err := exec.ExecuteStream(context.Background(), auth, request, options)
+				if err != nil {
+					t.Fatalf("ExecuteStream() setup error = %v", err)
+				}
+				var streamErr error
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+				}
+				if streamErr == nil {
+					t.Fatal("ExecuteStream() terminal error = nil, want abort error")
+				}
+			} else if _, err := exec.Execute(context.Background(), auth, request, options); err == nil {
+				t.Fatal("Execute() error = nil, want abort error")
+			}
+
+			select {
+			case record := <-capture.records:
+				if !record.Failed || record.Fail.StatusCode != http.StatusBadGateway {
+					t.Fatalf("failure record = %+v, want failed status 502", record)
+				}
+				if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 1 || record.Detail.TotalTokens != 4 {
+					t.Fatalf("failure usage = %+v, want 3 input, 1 output, 4 total", record.Detail)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for CommandCode abort usage record")
+			}
+		})
 	}
 }
 
