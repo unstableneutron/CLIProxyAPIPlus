@@ -808,6 +808,155 @@ func TestCodexExecutorContinueFoldHiddenTerminalFailuresFlushRetainedDraft(t *te
 	}
 }
 
+func TestCodexExecutorContinueFoldHiddenTransportFailuresFlushRetainedDraft(t *testing.T) {
+	firstRound := func(w http.ResponseWriter) {
+		_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+	}
+	hijackClose := func(w http.ResponseWriter) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			panic("response writer does not support hijacking")
+		}
+		conn, _, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			panic(errHijack)
+		}
+		_ = conn.Close()
+	}
+	tests := []struct {
+		name        string
+		hiddenRound func(w http.ResponseWriter)
+	}{
+		{
+			name: "capacity 503 at round open",
+			hiddenRound: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"type":"server_error","message":"Selected model is at capacity."}}`))
+			},
+		},
+		{
+			name:        "transport failure at round open",
+			hiddenRound: hijackClose,
+		},
+		{
+			name: "clean EOF without terminal",
+			hiddenRound: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_2","status":"in_progress"}}` + "\n\n"))
+			},
+		},
+		{
+			name: "clean EOF after hidden output items",
+			hiddenRound: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"in_progress"}}` + "\n\n"))
+				_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"completed","content":[{"type":"output_text","text":"discarded hidden draft"}]}}` + "\n\n"))
+			},
+		},
+		{
+			name: "abrupt close mid-stream",
+			hiddenRound: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_2","status":"in_progress"}}` + "\n\n"))
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				hijackClose(w)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) == 1 {
+					w.Header().Set("Content-Type", "text/event-stream")
+					firstRound(w)
+					return
+				}
+				tt.hiddenRound(w)
+			}))
+			defer server.Close()
+
+			executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+			result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.5",
+				Payload: []byte(`{"model":"gpt-5.5","input":"hello","reasoning":{"effort":"high"}}`),
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+			var payload strings.Builder
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("hidden continuation error leaked downstream: %v", chunk.Err)
+				}
+				payload.Write(chunk.Payload)
+			}
+			if got := requests.Load(); got != 2 {
+				t.Fatalf("continuation request count = %d, want 2", got)
+			}
+			if !strings.Contains(payload.String(), "retained draft") || !strings.Contains(payload.String(), "response.completed") {
+				t.Fatalf("fallback payload = %q, want retained draft completion", payload.String())
+			}
+			if strings.Contains(payload.String(), "discarded hidden draft") {
+				t.Fatalf("fallback payload exposed hidden continuation output: %q", payload.String())
+			}
+		})
+	}
+}
+
+func TestCodexExecutorContinueFoldCallerCancellationDuringHiddenRoundPropagates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hiddenRoundStarted := make(chan struct{})
+	callerCanceled := make(chan struct{})
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","status":"in_progress"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1"}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
+			_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
+			return
+		}
+		close(hiddenRoundStarted)
+		<-callerCanceled
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello","reasoning":{"effort":"high"}}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	go func() {
+		<-hiddenRoundStarted
+		cancel()
+		close(callerCanceled)
+	}()
+	var payload strings.Builder
+	for chunk := range result.Chunks {
+		payload.Write(chunk.Payload)
+	}
+	if strings.Contains(payload.String(), "response.completed") {
+		t.Fatalf("caller cancellation returned retained draft completion: %q", payload.String())
+	}
+}
+
 func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDelivery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)

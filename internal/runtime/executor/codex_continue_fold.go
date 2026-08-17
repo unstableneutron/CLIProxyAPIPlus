@@ -453,6 +453,12 @@ func (f *codexContinueFold) HandleEOF() [][]byte {
 	if f == nil || f.done {
 		return nil
 	}
+	if f.HasRetainedContinuationDraft() {
+		// A hidden continuation round ended without a terminal event. The
+		// retained client-visible draft owns the result; do not synthesize an
+		// incomplete terminal from partial hidden-round state.
+		return f.FinalizeAfterContinuationFailure()
+	}
 	terminal := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","output":[]}}`)
 	if len(f.baseResponse) > 0 {
 		terminal, _ = sjson.SetRawBytes(terminal, "response", f.baseResponse)
@@ -476,6 +482,13 @@ func (f *codexContinueFold) IsFoldedTerminal(eventData []byte) bool {
 
 func (f *codexContinueFold) HasContinuationInFlight() bool {
 	return f != nil && f.everContinued && !f.done
+}
+
+// HasRetainedContinuationDraft reports whether a hidden continuation round is
+// still outstanding while the last truncated client-visible round is retained
+// for fallback.
+func (f *codexContinueFold) HasRetainedContinuationDraft() bool {
+	return f != nil && !f.done && f.everContinued && len(f.retainedTerminal) > 0
 }
 
 func (f *codexContinueFold) appendReplayTail() {
@@ -916,15 +929,18 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 						}
 					}
 					if errRound != nil {
-						if codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
-							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback) {
-								return
-							}
+						if ctx.Err() != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errRound)
+							reporter.PublishFailure(ctx, errRound)
+							_ = codexContinueSendError(ctx, out, errRound)
 							return
 						}
+						// Any hidden continuation failure (4xx, capacity/5xx, or
+						// transport) must keep the retained client-visible draft
+						// instead of surfacing an error the client cannot
+						// attribute to anything it sent.
 						helps.RecordAPIResponseError(ctx, e.cfg, errRound)
-						reporter.PublishFailure(ctx, errRound)
-						_ = codexContinueSendError(ctx, out, errRound)
+						_ = codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
 						return
 					}
 					fold.NoteContinuationSent(strategy)
@@ -950,12 +966,18 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				if ctx.Err() == nil && fold.HasRetainedContinuationDraft() {
+					// The hidden continuation stream died mid-round; the retained
+					// client-visible draft owns the result.
+					_ = codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
+					return
+				}
 				reporter.PublishFailure(ctx, errScan)
 				_ = codexContinueSendError(ctx, out, errScan)
 				return
 			}
 			if eofEvents := fold.HandleEOF(); len(eofEvents) > 0 {
-				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, true, identityState, outputItemsByIndex, &outputItemsFallback)
+				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
 			}
 			return
 		}
