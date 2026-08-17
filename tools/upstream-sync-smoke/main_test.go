@@ -114,6 +114,58 @@ func TestWebSocketSmokeFailsAtResponseFailed(t *testing.T) {
 	}
 }
 
+func TestWebSocketSmokeReportsIncompleteWithoutMatchingReasoning(t *testing.T) {
+	const marker = "REASONING_ONLY_MARKER"
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{
+			"type":  "response.reasoning_summary_text.delta",
+			"delta": "The requested marker is " + marker,
+		})
+		_ = conn.WriteJSON(map[string]any{
+			"type": "response.incomplete",
+			"response": map[string]any{
+				"status":             "incomplete",
+				"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	result, err := runResponses(context.Background(), responsesConfig{
+		BaseURL:   server.URL,
+		Model:     "test-model",
+		Marker:    marker,
+		APIKey:    "test-key",
+		Transport: "websocket",
+	})
+	if err == nil {
+		t.Fatal("websocket smoke passed an incomplete reasoning-only response")
+	}
+	if result.TerminalEvent != "response.incomplete" || result.MarkerMatched {
+		t.Fatalf("unexpected incomplete result: %+v", result)
+	}
+}
+
+func TestResponsesPayloadMarkerMatchesOutputItemText(t *testing.T) {
+	const marker = "OUTPUT_ITEM_MARKER"
+	payload := []byte(`{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"` + marker + `"}]}}`)
+	if !responsesPayloadContainsOutputMarker(payload, marker) {
+		t.Fatal("assistant output item marker was not matched")
+	}
+	reasoning := []byte(`{"type":"response.reasoning_summary_text.done","text":"` + marker + `"}`)
+	if responsesPayloadContainsOutputMarker(reasoning, marker) {
+		t.Fatal("reasoning marker was accepted as assistant output")
+	}
+}
+
 func TestSSESmokeStopsAtDone(t *testing.T) {
 	const marker = "SSE_MARKER_456"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -192,8 +244,8 @@ func TestResponsesPayloadDefaultsOutputBudget(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(payload, &request); errUnmarshal != nil {
 		t.Fatalf("decode Responses payload: %v", errUnmarshal)
 	}
-	if got := int(request["max_output_tokens"].(float64)); got != defaultMaxOutputTokens {
-		t.Fatalf("max_output_tokens = %d, want %d", got, defaultMaxOutputTokens)
+	if got := int(request["max_output_tokens"].(float64)); got != 256 {
+		t.Fatalf("max_output_tokens = %d, want 256", got)
 	}
 }
 

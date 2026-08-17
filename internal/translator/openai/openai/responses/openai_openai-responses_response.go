@@ -637,7 +637,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		if hasActiveUnfinishedTool {
 			return out
 		}
-		if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 {
+		if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 && st.FinishReason == "" {
 			return out
 		}
 		st.CompletedEmitted = true

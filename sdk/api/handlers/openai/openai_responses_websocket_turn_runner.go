@@ -379,7 +379,7 @@ func (r responsesWebsocketTurnRunner) run(
 					dataOpen, errsOpen = false, false
 					break
 				}
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketTerminalEvent(eventType) {
 					completed = true
 					dataOpen, errsOpen = false, false
 					break
