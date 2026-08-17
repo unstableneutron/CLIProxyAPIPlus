@@ -158,6 +158,7 @@ type openAIResponseChunk struct {
 // event types we recognize. Unknown/partial sub-shapes are left unrecognized so
 // the stream is forwarded rather than judged empty.
 var openAIResponseEventTypes = map[string]bool{
+	"response.queued":                        true,
 	"response.created":                       true,
 	"response.in_progress":                   true,
 	"response.completed":                     true,

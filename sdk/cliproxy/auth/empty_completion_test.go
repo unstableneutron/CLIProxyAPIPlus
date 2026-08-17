@@ -637,6 +637,9 @@ func TestIsEmptyCompletionHandlesBufferedResponsesChunksWithoutSeparators(t *tes
 
 func TestIsEmptyCompletionHandlesCanonicalSeparateSSEFields(t *testing.T) {
 	chunks := []cliproxyexecutor.StreamChunk{
+		{Payload: []byte("event: response.queued\n")},
+		{Payload: []byte("data: {\"type\":\"response.queued\",\"response\":{\"id\":\"resp_1\",\"status\":\"queued\",\"model\":\"gpt-5.5\"}}\n")},
+		{Payload: []byte("\n")},
 		{Payload: []byte("event: response.created\n")},
 		{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.5\"}}\n")},
 		{Payload: []byte("\n")},

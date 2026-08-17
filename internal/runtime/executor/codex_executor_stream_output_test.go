@@ -522,12 +522,13 @@ func TestCodexExecutorMetadataPrefixedEmptyCompletionRotatesAuth(t *testing.T) {
 					_, _ = io.WriteString(w, "data: "+payload+"\n\n")
 				}
 				requestNumber := requests.Add(1)
-				writeEvent("response.created", `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`)
-				writeEvent("response.in_progress", `{"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}`)
+				writeEvent("response.queued", `{"type":"response.queued","response":{"id":"resp_1","status":"queued","model":"gpt-5.5"}}`)
 				if requestNumber == 1 {
 					writeEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1,"output_tokens_details":{"reasoning_tokens":0}}}}`)
 					return
 				}
+				writeEvent("response.created", `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}`)
+				writeEvent("response.in_progress", `{"type":"response.in_progress","response":{"id":"resp_1","model":"gpt-5.5"}}`)
 				writeEvent("response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"hello"}`)
 				writeEvent("response.completed", `{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"output_tokens_details":{"reasoning_tokens":0}}}}`)
 			}))
@@ -707,14 +708,31 @@ func TestCodexExecutorContinueFoldSignalsActivityOnceAcrossMultipleRounds(t *tes
 
 func TestCodexExecutorContinueFoldHiddenTerminalFailuresFlushRetainedDraft(t *testing.T) {
 	tests := []struct {
-		name  string
-		event string
+		name          string
+		beforeFailure []string
+		event         string
 	}{
 		{name: "generic", event: `{"type":"response.failed","sequence_number":0,"response":{"id":"resp_2","status":"failed","error":{"type":"upstream_error","code":"unknown","message":"hidden continuation failed"}}}`},
 		{name: "context length", event: `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"context length exceeded"}}`},
 		{name: "usage limit", event: `{"type":"error","error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}`},
 		{name: "model capacity", event: `{"type":"response.failed","response":{"id":"resp_2","status":"failed","error":{"type":"server_error","message":"Selected model is at capacity. Please try a different model."}}}`},
 		{name: "invalid signature", event: `{"type":"response.failed","response":{"id":"resp_2","status":"failed","error":{"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid signature in thinking block"}}}`},
+		{
+			name: "generic after message item",
+			beforeFailure: []string{
+				`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"in_progress"}}`,
+				`{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_hidden","status":"completed","content":[{"type":"output_text","text":"discarded hidden draft"}]}}`,
+			},
+			event: `{"type":"response.failed","sequence_number":2,"response":{"id":"resp_2","status":"failed","error":{"type":"upstream_error","code":"unknown","message":"hidden continuation failed"}}}`,
+		},
+		{
+			name: "classified after reasoning item",
+			beforeFailure: []string{
+				`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"reasoning","id":"rs_hidden","status":"in_progress"}}`,
+				`{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"reasoning","id":"rs_hidden","status":"completed","encrypted_content":"hidden"}}`,
+			},
+			event: `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"context length exceeded"}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -730,6 +748,9 @@ func TestCodexExecutorContinueFoldHiddenTerminalFailuresFlushRetainedDraft(t *te
 					_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"retained draft"}]}}` + "\n\n"))
 					_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":516,"total_tokens":517,"output_tokens_details":{"reasoning_tokens":516}}}}` + "\n\n"))
 					return
+				}
+				for _, event := range tt.beforeFailure {
+					_, _ = io.WriteString(w, "data: "+event+"\n\n")
 				}
 				_, _ = io.WriteString(w, "data: "+tt.event+"\n\n")
 			}))
@@ -761,6 +782,9 @@ func TestCodexExecutorContinueFoldHiddenTerminalFailuresFlushRetainedDraft(t *te
 			}
 			if !strings.Contains(payload.String(), "retained draft") || !strings.Contains(payload.String(), "response.completed") {
 				t.Fatalf("fallback payload = %q, want retained draft completion", payload.String())
+			}
+			if strings.Contains(payload.String(), "discarded hidden draft") {
+				t.Fatalf("fallback payload exposed hidden continuation output: %q", payload.String())
 			}
 		})
 	}

@@ -200,8 +200,6 @@ func (f *codexContinueFold) HandleEvent(eventData []byte) codexContinueEventResu
 	if f.awaitingContinuation && eventType == "response.output_item.added" {
 		f.awaitingContinuation = false
 		f.currentRoundHasItem = true
-		f.retainedDraft = nil
-		f.retainedTerminal = nil
 	}
 
 	if eventType == "response.created" {
@@ -289,21 +287,12 @@ func (f *codexContinueFold) HandleEvent(eventData []byte) codexContinueEventResu
 }
 
 func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) codexContinueEventResult {
-	usage := codexContinueParseUsage(eventData)
-	f.addUsage(usage)
-	if !f.firstUsage.Seen {
-		f.firstUsage = usage
+	if !codexContinueIsSuccessTerminalEvent(eventType) && f.awaitingContinuation && !f.currentRoundHasItem && len(f.retainedTerminal) > 0 {
+		return f.handleRetainedContinuationFailure(eventData)
 	}
-	f.finalRoundUsage = usage
+	usage := f.recordTerminalUsage(eventData)
 
 	if !codexContinueIsSuccessTerminalEvent(eventType) {
-		// A hidden continuation round failed before producing output: flush the
-		// retained draft from the last truncated round instead of surfacing a
-		// failure the client cannot attribute to anything it sent.
-		if f.awaitingContinuation && !f.currentRoundHasItem && len(f.retainedTerminal) > 0 {
-			emit := f.FinalizeAfterContinuationFailure()
-			return codexContinueEventResult{Emit: emit, PublishUsage: [][]byte{eventData}, Handled: true, Done: true}
-		}
 		f.done = true
 		if f.everContinued || f.round > 1 {
 			eventData = f.rewriteSequence(eventData)
@@ -347,6 +336,22 @@ func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) c
 	f.done = true
 	emit = append(emit, terminal)
 	return codexContinueEventResult{Emit: emit, PublishUsage: publishUsage, Handled: true, Done: true}
+}
+
+func (f *codexContinueFold) recordTerminalUsage(eventData []byte) codexContinueUsage {
+	usage := codexContinueParseUsage(eventData)
+	f.addUsage(usage)
+	if !f.firstUsage.Seen {
+		f.firstUsage = usage
+	}
+	f.finalRoundUsage = usage
+	return usage
+}
+
+func (f *codexContinueFold) handleRetainedContinuationFailure(eventData []byte) codexContinueEventResult {
+	f.recordTerminalUsage(eventData)
+	emit := f.FinalizeAfterContinuationFailure()
+	return codexContinueEventResult{Emit: emit, PublishUsage: [][]byte{eventData}, Handled: true, Done: true}
 }
 
 func (f *codexContinueFold) shouldContinue(eventData []byte) (bool, string) {
@@ -828,13 +833,13 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				eventType := gjson.GetBytes(data, "type").String()
 				streamErr, terminalBody, terminalFailure := codexTerminalFailureErr(data)
 				var result codexContinueEventResult
-				if terminalFailure && fold.awaitingContinuation {
+				if terminalFailure && fold.everContinued && len(fold.retainedTerminal) > 0 {
 					// Failures from a hidden continuation request must not replace the
 					// retained completion from the client-visible round.
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 					}
-					result = fold.handleTerminal(data, eventType)
+					result = fold.handleRetainedContinuationFailure(data)
 				} else if terminalFailure {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
