@@ -200,8 +200,6 @@ func (f *codexContinueFold) HandleEvent(eventData []byte) codexContinueEventResu
 	if f.awaitingContinuation && eventType == "response.output_item.added" {
 		f.awaitingContinuation = false
 		f.currentRoundHasItem = true
-		f.retainedDraft = nil
-		f.retainedTerminal = nil
 	}
 
 	if eventType == "response.created" {
@@ -289,21 +287,12 @@ func (f *codexContinueFold) HandleEvent(eventData []byte) codexContinueEventResu
 }
 
 func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) codexContinueEventResult {
-	usage := codexContinueParseUsage(eventData)
-	f.addUsage(usage)
-	if !f.firstUsage.Seen {
-		f.firstUsage = usage
+	if !codexContinueIsSuccessTerminalEvent(eventType) && f.everContinued && len(f.retainedTerminal) > 0 {
+		return f.handleRetainedContinuationFailure(eventData)
 	}
-	f.finalRoundUsage = usage
+	usage := f.recordTerminalUsage(eventData)
 
 	if !codexContinueIsSuccessTerminalEvent(eventType) {
-		// A hidden continuation round failed before producing output: flush the
-		// retained draft from the last truncated round instead of surfacing a
-		// failure the client cannot attribute to anything it sent.
-		if f.awaitingContinuation && !f.currentRoundHasItem && len(f.retainedTerminal) > 0 {
-			emit := f.FinalizeAfterContinuationFailure()
-			return codexContinueEventResult{Emit: emit, PublishUsage: [][]byte{eventData}, Handled: true, Done: true}
-		}
 		f.done = true
 		if f.everContinued || f.round > 1 {
 			eventData = f.rewriteSequence(eventData)
@@ -347,6 +336,22 @@ func (f *codexContinueFold) handleTerminal(eventData []byte, eventType string) c
 	f.done = true
 	emit = append(emit, terminal)
 	return codexContinueEventResult{Emit: emit, PublishUsage: publishUsage, Handled: true, Done: true}
+}
+
+func (f *codexContinueFold) recordTerminalUsage(eventData []byte) codexContinueUsage {
+	usage := codexContinueParseUsage(eventData)
+	f.addUsage(usage)
+	if !f.firstUsage.Seen {
+		f.firstUsage = usage
+	}
+	f.finalRoundUsage = usage
+	return usage
+}
+
+func (f *codexContinueFold) handleRetainedContinuationFailure(eventData []byte) codexContinueEventResult {
+	f.recordTerminalUsage(eventData)
+	emit := f.FinalizeAfterContinuationFailure()
+	return codexContinueEventResult{Emit: emit, PublishUsage: [][]byte{eventData}, Handled: true, Done: true}
 }
 
 func (f *codexContinueFold) shouldContinue(eventData []byte) (bool, string) {
@@ -448,6 +453,12 @@ func (f *codexContinueFold) HandleEOF() [][]byte {
 	if f == nil || f.done {
 		return nil
 	}
+	if f.HasRetainedContinuationDraft() {
+		// A hidden continuation round ended without a terminal event. The
+		// retained client-visible draft owns the result; do not synthesize an
+		// incomplete terminal from partial hidden-round state.
+		return f.FinalizeAfterContinuationFailure()
+	}
 	terminal := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","output":[]}}`)
 	if len(f.baseResponse) > 0 {
 		terminal, _ = sjson.SetRawBytes(terminal, "response", f.baseResponse)
@@ -471,6 +482,13 @@ func (f *codexContinueFold) IsFoldedTerminal(eventData []byte) bool {
 
 func (f *codexContinueFold) HasContinuationInFlight() bool {
 	return f != nil && f.everContinued && !f.done
+}
+
+// HasRetainedContinuationDraft reports whether a hidden continuation round is
+// still outstanding while the last truncated client-visible round is retained
+// for fallback.
+func (f *codexContinueFold) HasRetainedContinuationDraft() bool {
+	return f != nil && !f.done && f.everContinued && len(f.retainedTerminal) > 0
 }
 
 func (f *codexContinueFold) appendReplayTail() {
@@ -806,7 +824,21 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		bootstrapEmitted := false
+		activitySignaled := false
+		suppressReasoningReplayCache := false
+		publishedUsageRounds := 0
+		publishRoundUsage := func(event []byte) {
+			detail, ok := helps.ParseCodexUsage(event)
+			if !ok {
+				return
+			}
+			if publishedUsageRounds == 0 {
+				reporter.Publish(ctx, detail)
+			} else {
+				reporter.PublishAdditional(ctx, detail)
+			}
+			publishedUsageRounds++
+		}
 		for currentResp != nil {
 			scanner := bufio.NewScanner(currentResp.Body)
 			scanner.Buffer(nil, 52_428_800)
@@ -822,7 +854,22 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 				}
 
 				data := bytes.TrimSpace(line[5:])
-				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
+				eventType := gjson.GetBytes(data, "type").String()
+				streamErr, terminalBody, terminalFailure := codexTerminalFailureErr(data)
+				var result codexContinueEventResult
+				cacheReasoningReplay := !suppressReasoningReplayCache
+				if terminalFailure && fold.everContinued && len(fold.retainedTerminal) > 0 {
+					// Failures from a hidden continuation request must not replace the
+					// retained completion from the client-visible round.
+					if code, _, ok := codexStatusErrorClassification(streamErr.StatusCode(), terminalBody); ok && code == "thinking_signature_invalid" {
+						suppressReasoningReplayCache = true
+						cacheReasoningReplay = false
+					}
+					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+					}
+					result = fold.handleRetainedContinuationFailure(data)
+				} else if terminalFailure {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -833,23 +880,17 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					reporter.PublishFailure(ctx, streamErr)
 					_ = codexContinueSendError(ctx, out, streamErr)
 					return
-				}
-				eventType := gjson.GetBytes(data, "type").String()
-				if !bootstrapEmitted && eventType != "" && gjson.ValidBytes(data) && !codexContinueIsTerminalEvent(eventType) {
-					// Signal meaningful upstream protocol activity before folded payload is available.
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Bootstrap: true}:
-						bootstrapEmitted = true
-					case <-ctx.Done():
-						return
+				} else {
+					if gjson.ValidBytes(data) {
+						// Report upstream protocol activity without committing the auth
+						// attempt; metadata-only empty completions must remain retryable.
+						signalCodexStreamActivity(ctx, eventType, &activitySignaled)
 					}
+					result = fold.HandleEvent(data)
 				}
 
-				result := fold.HandleEvent(data)
 				for _, usageEvent := range result.PublishUsage {
-					if detail, ok := helps.ParseCodexUsage(usageEvent); ok {
-						reporter.Publish(ctx, detail)
-					}
+					publishRoundUsage(usageEvent)
 					publishCodexImageToolUsage(ctx, reporter, clientBody, usageEvent)
 				}
 				if result.Continue {
@@ -863,24 +904,43 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 						_ = codexContinueSendError(ctx, out, errBuild)
 						return
 					}
+					clearInvalidSignatureReplay := func(errRound error) {
+						if errRound == nil {
+							return
+						}
+						statusCode := codexContinueStatusCode(errRound)
+						errorBody := []byte(errRound.Error())
+						if code, _, ok := codexStatusErrorClassification(statusCode, errorBody); !ok || code != "thinking_signature_invalid" {
+							return
+						}
+						suppressReasoningReplayCache = true
+						if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, errorBody); errClearReplay != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+						}
+					}
 					nextResp, errRound := e.openCodexContinueHTTPRound(ctx, auth, httpReq, httpClient, nextBody, authID, authLabel, authType, authValue)
+					clearInvalidSignatureReplay(errRound)
 					if errRound != nil && strategy == codexContinueDefaultMethod && codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
 						// A′ rewind rejected: retry the same round as a full replay.
 						if replayBody, replayStrategy, errReplay := fold.BuildContinuation(baseBody, nil, false, true); errReplay == nil {
 							strategy = replayStrategy
 							nextResp, errRound = e.openCodexContinueHTTPRound(ctx, auth, httpReq, httpClient, replayBody, authID, authLabel, authType, authValue)
+							clearInvalidSignatureReplay(errRound)
 						}
 					}
 					if errRound != nil {
-						if codexContinueStatusCode(errRound) >= 400 && codexContinueStatusCode(errRound) < 500 {
-							if !codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback) {
-								return
-							}
+						if ctx.Err() != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errRound)
+							reporter.PublishFailure(ctx, errRound)
+							_ = codexContinueSendError(ctx, out, errRound)
 							return
 						}
+						// Any hidden continuation failure (4xx, capacity/5xx, or
+						// transport) must keep the retained client-visible draft
+						// instead of surfacing an error the client cannot
+						// attribute to anything it sent.
 						helps.RecordAPIResponseError(ctx, e.cfg, errRound)
-						reporter.PublishFailure(ctx, errRound)
-						_ = codexContinueSendError(ctx, out, errRound)
+						_ = codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
 						return
 					}
 					fold.NoteContinuationSent(strategy)
@@ -894,7 +954,7 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 					break
 				}
 
-				if !codexContinueProcessHTTPEvents(ctx, out, fold, result.Emit, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback) {
+				if !codexContinueProcessHTTPEvents(ctx, out, fold, result.Emit, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, cacheReasoningReplay, identityState, outputItemsByIndex, &outputItemsFallback) {
 					return
 				}
 				if result.Done {
@@ -906,12 +966,18 @@ func (e *CodexExecutor) executeCodexContinueFoldHTTPStream(ctx context.Context, 
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				if ctx.Err() == nil && fold.HasRetainedContinuationDraft() {
+					// The hidden continuation stream died mid-round; the retained
+					// client-visible draft owns the result.
+					_ = codexContinueProcessHTTPEvents(ctx, out, fold, fold.FinalizeAfterContinuationFailure(), to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
+					return
+				}
 				reporter.PublishFailure(ctx, errScan)
 				_ = codexContinueSendError(ctx, out, errScan)
 				return
 			}
 			if eofEvents := fold.HandleEOF(); len(eofEvents) > 0 {
-				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, identityState, outputItemsByIndex, &outputItemsFallback)
+				_ = codexContinueProcessHTTPEvents(ctx, out, fold, eofEvents, to, responseFormat, req.Model, originalPayload, clientBody, &param, reporter, replayScope, !suppressReasoningReplayCache, identityState, outputItemsByIndex, &outputItemsFallback)
 			}
 			return
 		}
@@ -954,7 +1020,7 @@ func (e *CodexExecutor) openCodexContinueHTTPRound(ctx context.Context, auth *cl
 	return resp, nil
 }
 
-func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, fold *codexContinueFold, events [][]byte, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, param *any, reporter *helps.UsageReporter, replayScope codexReasoningReplayScope, identityState codexIdentityConfuseState, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) bool {
+func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, fold *codexContinueFold, events [][]byte, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, param *any, reporter *helps.UsageReporter, replayScope codexReasoningReplayScope, cacheReasoningReplay bool, identityState codexIdentityConfuseState, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) bool {
 	for _, data := range events {
 		switch gjson.GetBytes(data, "type").String() {
 		case "response.output_item.done":
@@ -967,7 +1033,9 @@ func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexec
 				publishCodexImageToolUsage(ctx, reporter, clientBody, data)
 			}
 			data = patchCodexCompletedOutput(data, outputItemsByIndex, *outputItemsFallback)
-			cacheCodexReasoningReplayFromCompleted(replayScope, data)
+			if cacheReasoningReplay {
+				cacheCodexReasoningReplayFromCompleted(ctx, replayScope, data)
+			}
 		}
 		line := append([]byte("data: "), data...)
 		line = applyCodexIdentityExposeResponsePayload(line, identityState)
@@ -980,6 +1048,7 @@ func codexContinueProcessHTTPEvents(ctx context.Context, out chan<- cliproxyexec
 
 func codexContinueSendTranslated(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, to sdktranslator.Format, responseFormat sdktranslator.Format, model string, originalPayload []byte, clientBody []byte, line []byte, param *any) bool {
 	chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, model, originalPayload, clientBody, line, param)
+	restoreCodexResponsesSSELineBoundaries(responseFormat, chunks)
 	for i := range chunks {
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -1041,6 +1110,19 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		currentReqBody := bytes.Clone(wsReqBody)
+		publishedUsageRounds := 0
+		publishRoundUsage := func(event []byte) {
+			detail, ok := helps.ParseCodexUsage(event)
+			if !ok {
+				return
+			}
+			if publishedUsageRounds == 0 {
+				reporter.Publish(ctx, detail)
+			} else {
+				reporter.PublishAdditional(ctx, detail)
+			}
+			publishedUsageRounds++
+		}
 
 		for {
 			if ctx != nil && ctx.Err() != nil {
@@ -1123,9 +1205,7 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 
 			result := fold.HandleEvent(payload)
 			for _, usageEvent := range result.PublishUsage {
-				if detail, ok := helps.ParseCodexUsage(usageEvent); ok {
-					reporter.Publish(ctx, detail)
-				}
+				publishRoundUsage(usageEvent)
 			}
 			if result.Continue {
 				if okSend, errSend := e.sendCodexContinueWebsocketRound(ctx, auth, fold, currentReqBody, transcriptState, false, sess, conn, wsURL, wsHeaders, authID); !okSend {

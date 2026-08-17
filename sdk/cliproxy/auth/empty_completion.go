@@ -158,6 +158,7 @@ type openAIResponseChunk struct {
 // event types we recognize. Unknown/partial sub-shapes are left unrecognized so
 // the stream is forwarded rather than judged empty.
 var openAIResponseEventTypes = map[string]bool{
+	"response.queued":                        true,
 	"response.created":                       true,
 	"response.in_progress":                   true,
 	"response.completed":                     true,
@@ -613,11 +614,13 @@ func (a *emptyCompletionAccum) empty() bool {
 // isEmptyCompletion reports whether the buffered SSE stream chunks aggregate to
 // an empty completion.
 func isEmptyCompletion(chunks []cliproxyexecutor.StreamChunk) bool {
-	var buf bytes.Buffer
+	var bootstrap streamBootstrapState
 	for _, c := range chunks {
-		buf.Write(c.Payload)
+		if bootstrap.observe(c.Payload) {
+			return false
+		}
 	}
-	return isEmptyCompletionPayload(buf.Bytes())
+	return bootstrap.acc.empty()
 }
 
 func isEmptyCompletionError(err error) bool {

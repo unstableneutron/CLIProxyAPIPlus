@@ -73,7 +73,7 @@ func (e *CodexExecutor) executeResponses(ctx context.Context, auth *cliproxyauth
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, auth, from, req, opts, body)
 	if errReplay != nil {
 		return resp, errReplay
 	}
@@ -192,7 +192,7 @@ func (e *CodexExecutor) executeResponses(ctx context.Context, auth *cliproxyauth
 			completedData = patchCodexCompactCompletedOutput(completedData, compactOutputItems)
 		}
 		if eventType == "response.completed" {
-			cacheCodexReasoningReplayFromCompleted(replayScope, completedData)
+			cacheCodexReasoningReplayFromCompleted(ctx, replayScope, completedData)
 		}
 
 		var param any

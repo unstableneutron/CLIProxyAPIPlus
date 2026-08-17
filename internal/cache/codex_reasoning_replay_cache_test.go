@@ -137,6 +137,13 @@ func mustCodexReasoningReplayJSON(t *testing.T, items [][]byte) []byte {
 	return raw
 }
 
+func codexReasoningReplayTurnForTest(id string, seed byte) [][]byte {
+	return [][]byte{
+		[]byte(fmt.Sprintf(`{"type":"%s","id":%q}`, CodexReasoningReplayTurnType, id)),
+		validCodexReasoningReplayItemForTest(seed),
+	}
+}
+
 func TestCodexReasoningReplayCacheRejectsInvalidItems(t *testing.T) {
 	ClearCodexReasoningReplayCache()
 	t.Cleanup(ClearCodexReasoningReplayCache)
@@ -281,6 +288,168 @@ func TestCodexReasoningReplayAppendHomeCASPreservesConcurrentTurns(t *testing.T)
 	}
 	if len(items) != turnCount*2 {
 		t.Fatalf("concurrent cumulative item count = %d, want %d", len(items), turnCount*2)
+	}
+}
+
+func TestCodexReasoningReplayInvalidationRejectsStaleCompletion(t *testing.T) {
+	for _, homeMode := range []bool{false, true} {
+		name := "local"
+		if homeMode {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			ClearCodexReasoningReplayCache()
+			t.Cleanup(ClearCodexReasoningReplayCache)
+			useFakeCodexReasoningReplayKVClient(t, newFakeCodexReasoningReplayKVClient(), homeMode, nil)
+
+			_, found, generation, errGet := GetCodexReasoningReplayItemsAtGenerationRequired(context.Background(), "gpt-5.4", "session-stale")
+			if errGet != nil || found || generation == "" {
+				t.Fatalf("initial snapshot = found %v generation %q err %v", found, generation, errGet)
+			}
+
+			releaseAppend := make(chan struct{})
+			appendResult := make(chan bool, 1)
+			go func() {
+				<-releaseAppend
+				appendResult <- AppendCodexReasoningReplayItemsAtGenerationBestEffort(
+					context.Background(), "gpt-5.4", "session-stale", generation,
+					codexReasoningReplayTurnForTest("stale-turn", 71),
+				)
+			}()
+
+			if errInvalidate := InvalidateCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-stale"); errInvalidate != nil {
+				t.Fatalf("invalidate replay: %v", errInvalidate)
+			}
+			close(releaseAppend)
+			if appended := <-appendResult; appended {
+				t.Fatal("stale completion appended after invalidation")
+			}
+
+			items, found, nextGeneration, errGet := GetCodexReasoningReplayItemsAtGenerationRequired(context.Background(), "gpt-5.4", "session-stale")
+			if errGet != nil || found || len(items) != 0 {
+				t.Fatalf("invalidated state = items %q found %v err %v", items, found, errGet)
+			}
+			if nextGeneration == "" || nextGeneration == generation {
+				t.Fatalf("generation = %q, want non-empty value distinct from %q", nextGeneration, generation)
+			}
+		})
+	}
+}
+
+func TestCodexReasoningReplayCanceledOwnerCannotAppendCompletion(t *testing.T) {
+	for _, homeMode := range []bool{false, true} {
+		name := "local"
+		if homeMode {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			ClearCodexReasoningReplayCache()
+			t.Cleanup(ClearCodexReasoningReplayCache)
+			useFakeCodexReasoningReplayKVClient(t, newFakeCodexReasoningReplayKVClient(), homeMode, nil)
+
+			_, _, generation, errGet := GetCodexReasoningReplayItemsAtGenerationRequired(context.Background(), "gpt-5.4", "session-canceled")
+			if errGet != nil || generation == "" {
+				t.Fatalf("initial generation = %q err %v", generation, errGet)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if AppendCodexReasoningReplayItemsAtGenerationBestEffort(
+				ctx, "gpt-5.4", "session-canceled", generation,
+				codexReasoningReplayTurnForTest("canceled-turn", 75),
+			) {
+				t.Fatal("canceled attempt appended replay completion")
+			}
+
+			if items, found := GetCodexReasoningReplayItems("gpt-5.4", "session-canceled"); found || len(items) != 0 {
+				t.Fatalf("canceled state = items %q found %v, want empty", items, found)
+			}
+		})
+	}
+}
+
+func TestCodexReasoningReplayConcurrentSiblingCompletionsHaveSingleWinner(t *testing.T) {
+	for _, homeMode := range []bool{false, true} {
+		name := "local"
+		if homeMode {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			ClearCodexReasoningReplayCache()
+			t.Cleanup(ClearCodexReasoningReplayCache)
+			useFakeCodexReasoningReplayKVClient(t, newFakeCodexReasoningReplayKVClient(), homeMode, nil)
+
+			_, _, generation, errGet := GetCodexReasoningReplayItemsAtGenerationRequired(context.Background(), "gpt-5.4", "session-siblings")
+			if errGet != nil || generation == "" {
+				t.Fatalf("initial snapshot generation = %q err %v", generation, errGet)
+			}
+
+			start := make(chan struct{})
+			results := make(chan bool, 2)
+			for index := 0; index < 2; index++ {
+				go func(index int) {
+					<-start
+					results <- AppendCodexReasoningReplayItemsAtGenerationBestEffort(
+						context.Background(), "gpt-5.4", "session-siblings", generation,
+						codexReasoningReplayTurnForTest(fmt.Sprintf("sibling-%d", index), byte(80+index)),
+					)
+				}(index)
+			}
+			close(start)
+			wins := 0
+			for range 2 {
+				if <-results {
+					wins++
+				}
+			}
+			if wins != 1 {
+				t.Fatalf("successful sibling appends = %d, want exactly 1", wins)
+			}
+
+			items, found, errGet := GetCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-siblings")
+			if errGet != nil || !found || len(items) != 2 {
+				t.Fatalf("winning state = items %q found %v err %v", items, found, errGet)
+			}
+		})
+	}
+}
+
+func TestCodexReasoningReplayInvalidationRejectsStaleCompletionAfterEviction(t *testing.T) {
+	for _, homeMode := range []bool{false, true} {
+		name := "local"
+		if homeMode {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			ClearCodexReasoningReplayCache()
+			t.Cleanup(ClearCodexReasoningReplayCache)
+			client := newFakeCodexReasoningReplayKVClient()
+			useFakeCodexReasoningReplayKVClient(t, client, homeMode, nil)
+
+			_, _, generation, errGet := GetCodexReasoningReplayItemsAtGenerationRequired(context.Background(), "gpt-5.4", "session-evicted-tombstone")
+			if errGet != nil || generation == "" {
+				t.Fatalf("initial generation = %q err %v", generation, errGet)
+			}
+			if errInvalidate := InvalidateCodexReasoningReplayItemsRequired(context.Background(), "gpt-5.4", "session-evicted-tombstone"); errInvalidate != nil {
+				t.Fatalf("invalidate replay: %v", errInvalidate)
+			}
+
+			if homeMode {
+				client.mu.Lock()
+				delete(client.values, codexReasoningReplayKVKey("gpt-5.4", "session-evicted-tombstone"))
+				client.mu.Unlock()
+			} else {
+				codexReasoningReplayMu.Lock()
+				delete(codexReasoningReplayEntries, codexReasoningReplayCacheKey("gpt-5.4", "session-evicted-tombstone"))
+				codexReasoningReplayMu.Unlock()
+			}
+
+			if AppendCodexReasoningReplayItemsAtGenerationBestEffort(
+				context.Background(), "gpt-5.4", "session-evicted-tombstone", generation,
+				codexReasoningReplayTurnForTest("stale-after-eviction", 91),
+			) {
+				t.Fatal("stale completion recreated invalidated replay after tombstone eviction")
+			}
+		})
 	}
 }
 

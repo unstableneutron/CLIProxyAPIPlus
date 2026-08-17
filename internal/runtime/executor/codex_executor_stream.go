@@ -73,7 +73,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, auth, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
 	}
@@ -149,7 +149,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		bootstrapEmitted := false
+		activitySignaled := false
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -179,14 +179,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					return
 				}
-				if !bootstrapEmitted && eventType != "" && gjson.ValidBytes(data) && !codexContinueIsTerminalEvent(eventType) {
-					// Signal meaningful upstream protocol activity before translated payload is available.
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Bootstrap: true}:
-						bootstrapEmitted = true
-					case <-ctx.Done():
-						return
-					}
+				if gjson.ValidBytes(data) {
+					// Report upstream protocol activity without committing the auth
+					// attempt; metadata-only empty completions must remain retryable.
+					signalCodexStreamActivity(ctx, eventType, &activitySignaled)
 				}
 				switch eventType {
 				case "response.output_item.done":
@@ -199,7 +195,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {
-						cacheCodexReasoningReplayFromCompleted(replayScope, data)
+						cacheCodexReasoningReplayFromCompleted(ctx, replayScope, data)
 					}
 					translatedLine = append([]byte("data: "), data...)
 				}
@@ -207,6 +203,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param, claudeInputTokens)
+			restoreCodexResponsesSSELineBoundaries(responseFormat, chunks)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -233,4 +230,76 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func signalCodexStreamActivity(ctx context.Context, eventType string, signaled *bool) {
+	if signaled == nil || *signaled || !isCodexStreamActivityEvent(eventType) {
+		return
+	}
+	cliproxyexecutor.NotifyStreamActivity(ctx)
+	*signaled = true
+}
+
+func isCodexStreamActivityEvent(eventType string) bool {
+	switch eventType {
+	case "response.queued",
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.output_item.done",
+		"response.content_part.added",
+		"response.content_part.done",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.output_text.annotation.added",
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.file_search_call.in_progress",
+		"response.file_search_call.searching",
+		"response.file_search_call.completed",
+		"response.web_search_call.in_progress",
+		"response.web_search_call.searching",
+		"response.web_search_call.completed",
+		"response.image_generation_call.in_progress",
+		"response.image_generation_call.generating",
+		"response.image_generation_call.partial_image",
+		"response.image_generation_call.completed",
+		"response.code_interpreter_call.in_progress",
+		"response.code_interpreter_call.interpreting",
+		"response.code_interpreter_call.completed",
+		"response.mcp_call_arguments.delta",
+		"response.mcp_call_arguments.done",
+		"response.mcp_call.in_progress",
+		"response.mcp_call.completed",
+		"response.mcp_call.failed",
+		"response.mcp_list_tools.in_progress",
+		"response.mcp_list_tools.completed",
+		"response.mcp_list_tools.failed",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.audio.delta",
+		"response.audio.done":
+		return true
+	default:
+		return false
+	}
+}
+
+func restoreCodexResponsesSSELineBoundaries(responseFormat sdktranslator.Format, chunks [][]byte) {
+	if responseFormat != sdktranslator.FormatOpenAIResponse {
+		return
+	}
+	for i := range chunks {
+		if !bytes.HasSuffix(chunks[i], []byte("\n")) {
+			chunks[i] = append(chunks[i], '\n')
+		}
+	}
 }

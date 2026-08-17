@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -124,6 +127,22 @@ func executeDirectResponsesStateModeRequest(t *testing.T, h *OpenAIResponsesAPIH
 	}
 }
 
+type directResponsesNonStreamCaptureExecutor struct {
+	compactCaptureExecutor
+	mu       sync.Mutex
+	authIDs  []string
+	payloads [][]byte
+}
+
+func (e *directResponsesNonStreamCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.mu.Lock()
+	e.authIDs = append(e.authIDs, auth.ID)
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	count := len(e.payloads)
+	e.mu.Unlock()
+	return coreexecutor.Response{Payload: []byte(fmt.Sprintf(`{"id":"resp-%d","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"state-output-%d"}]}]}`, count, count))}, nil
+}
+
 func TestDirectResponsesStreamingReplaysCachedPreviousResponseState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, executor := newDirectResponsesStateModeTestHandler(t, nil, "test-model")
@@ -151,6 +170,75 @@ func TestDirectResponsesStreamingReplaysCachedPreviousResponseState(t *testing.T
 	}
 	if got := input[2].Get("content.0.text").String(); got != "second" {
 		t.Fatalf("second input text = %q, want second; payload=%s", got, second)
+	}
+}
+
+func TestDirectResponsesStreamingPinsCachedStateToCreatingAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &websocketDirectCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, authID := range []string{"auth-direct-state-a", "auth-direct-state-b"} {
+		auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", authID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "direct-state-auth-model"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"direct-state-auth-model","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"direct-state-auth-model","stream":true,"previous_response_id":"resp-1","input":[{"role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+
+	authIDs := executor.AuthIDs()
+	if len(authIDs) != 2 {
+		t.Fatalf("auth attempt count = %d, want 2", len(authIDs))
+	}
+	if authIDs[0] == "" || authIDs[1] != authIDs[0] {
+		t.Fatalf("cached response state migrated across auths: %v", authIDs)
+	}
+	payloads := executor.Payloads()
+	if len(payloads) != 2 || !strings.Contains(string(payloads[1]), "state-output-1") {
+		t.Fatalf("cached creating-auth state was not replayed: %q", payloads)
+	}
+}
+
+func TestDirectResponsesNonStreamingPinsCachedStateToCreatingAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &directResponsesNonStreamCaptureExecutor{}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, authID := range []string{"auth-direct-nonstream-state-a", "auth-direct-nonstream-state-b"} {
+		auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", authID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "direct-nonstream-state-auth-model"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"direct-nonstream-state-auth-model","input":[{"role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
+	executeDirectResponsesStateModeRequest(t, h, `{"model":"direct-nonstream-state-auth-model","previous_response_id":"resp-1","input":[{"role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.authIDs) != 2 || executor.authIDs[0] != executor.authIDs[1] {
+		t.Fatalf("cached non-stream response state migrated across auths: %v", executor.authIDs)
+	}
+	if len(executor.payloads) != 2 || !strings.Contains(string(executor.payloads[1]), "state-output-1") {
+		t.Fatalf("cached non-stream creating-auth state was not replayed: %q", executor.payloads)
+	}
+}
+
+func TestDirectResponsesStateCacheRejectsCrossAuthResponseIDCollision(t *testing.T) {
+	cache := newDirectResponsesStateCache()
+	cache.put("resp-collision", directResponsesStateEntry{request: []byte(`{"input":[]}`), authID: "auth-a"})
+	cache.put("resp-collision", directResponsesStateEntry{request: []byte(`{"input":[]}`), authID: "auth-b"})
+
+	if entry, ok := cache.get("resp-collision"); ok {
+		t.Fatalf("cross-auth response ID collision retained ambiguous state: %#v", entry)
 	}
 }
 
