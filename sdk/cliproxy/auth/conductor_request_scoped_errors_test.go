@@ -965,7 +965,8 @@ func TestRequestScopedErrors_StreamSubsequentChunkError(t *testing.T) {
 	streamExecutor := &customStreamMockExecutor{
 		identifier: "claude",
 		streamFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-			ch := make(chan cliproxyexecutor.StreamChunk, 2)
+			ch := make(chan cliproxyexecutor.StreamChunk, 3)
+			ch <- cliproxyexecutor.StreamChunk{Bootstrap: true}
 			ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"message_start"}\n\n`)}
 			ch <- cliproxyexecutor.StreamChunk{Err: customStatusError{code: 400, msg: "mid_stream_context_length"}}
 			close(ch)
