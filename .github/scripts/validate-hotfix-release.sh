@@ -47,6 +47,9 @@ done
   || die "--base-tag must be a fork release tag"
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "run inside the repository"
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  die "hotfix release requires a clean checkout"
+fi
 git rev-parse --verify 'refs/remotes/origin/main^{commit}' >/dev/null 2>&1 \
   || die "origin/main is not fetched"
 MAIN_COMMIT=$(git rev-parse 'refs/remotes/origin/main^{commit}')
@@ -120,9 +123,17 @@ if [ -z "${SYNC_ID}" ]; then
 fi
 [[ "${PLAN_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "upstream-sync state has an invalid PLAN_FINGERPRINT"
-if [ "${RECORDED_TAG}" != "${BASE_TAG}" ]; then
-  die "upstream-sync state records ${RECORDED_TAG}, expected base tag ${BASE_TAG}"
+if [[ "${RECORDED_TAG}" =~ ^(.+unstableneutron\.)0$ ]]; then
+  ROOT_PREFIX=${BASH_REMATCH[1]}
+else
+  die "upstream-sync state root ${RECORDED_TAG} is not a suffix .0 release"
 fi
+if [ "${ROOT_PREFIX}" != "${BASE_TAG%.*}." ]; then
+  die "upstream-sync state root ${RECORDED_TAG} does not match release line ${BASE_TAG%.*}"
+fi
+git rev-parse --verify "refs/tags/${RECORDED_TAG}^{commit}" >/dev/null 2>&1 \
+  || die "accepted upstream root tag ${RECORDED_TAG} is not fetched"
+ROOT_COMMIT=$(git rev-parse "refs/tags/${RECORDED_TAG}^{}")
 STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -131,6 +142,8 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "expected_commit=${EXPECTED_COMMIT}"
     echo "base_tag=${BASE_TAG}"
     echo "base_commit=${BASE_COMMIT}"
+    echo "root_tag=${RECORDED_TAG}"
+    echo "root_commit=${ROOT_COMMIT}"
     echo "sync_id=${SYNC_ID}"
     echo "plan_fingerprint=${PLAN_FINGERPRINT}"
     echo "upstream_state_sha256=${STATE_SHA256}"

@@ -2,7 +2,7 @@ name: Hotfix Release
 
 # Dedicated publication path for a reviewed fix after an accepted upstream-sync
 # release. It never changes upstream representation and accepts only one exact
-# current-main SHA, previous accepted release, and next immutable tag.
+# current-main SHA, recursively verified previous release, and next immutable tag.
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       base_tag:
-        description: Previous accepted release tag containing the same upstream state
+        description: Immediately previous accepted release tag in the hotfix chain
         required: true
         type: string
       expected_base_commit:
@@ -138,33 +138,25 @@ jobs:
             exit 1
           fi
 
-      - name: Verify previous accepted release receipt
+      - name: Verify complete previous release chain
         env:
           BASE_COMMIT: ${{ steps.policy.outputs.base_commit }}
           BASE_TAG: ${{ steps.policy.outputs.base_tag }}
+          EXPECTED_COMMIT: ${{ steps.policy.outputs.expected_commit }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLAN_FINGERPRINT: ${{ steps.policy.outputs.plan_fingerprint }}
           SYNC_ID: ${{ steps.policy.outputs.sync_id }}
+          TAG: ${{ steps.policy.outputs.tag }}
         run: |
-          RECEIPT_DIR="${HOTFIX_WORK_DIR}/base-release"
-          mkdir -p "${RECEIPT_DIR}"
-          gh release download "${BASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern upstream-sync-receipt.json \
-            --dir "${RECEIPT_DIR}"
-          .github/scripts/verify-upstream-release.sh \
-            --tag "${BASE_TAG}" \
-            --expected-commit "${BASE_COMMIT}" \
+          .github/scripts/verify-hotfix-chain.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --parent-tag "${BASE_TAG}" \
+            --expected-parent-commit "${BASE_COMMIT}" \
             --expected-sync-id "${SYNC_ID}" \
             --expected-plan-fingerprint "${PLAN_FINGERPRINT}" \
             --image "${IMAGE}" \
-            --main-policy descendant \
-            --require-architecture-tags true \
-            --require-latest-parity true \
-            --receipt "${RECEIPT_DIR}/verified.json"
-          diff -u \
-            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/upstream-sync-receipt.json") \
-            <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/verified.json")
+            --output "${HOTFIX_WORK_DIR}/verified-chain.json"
 
       - name: Reject reused or partially published identity
         env:
@@ -259,6 +251,15 @@ jobs:
             --expected-commit "${EXPECTED_COMMIT}" \
             --base-tag "${BASE_TAG}" \
             --expected-base-commit "${BASE_COMMIT}"
+          .github/scripts/verify-hotfix-chain.sh \
+            --tag "${TAG}" \
+            --expected-commit "${EXPECTED_COMMIT}" \
+            --parent-tag "${BASE_TAG}" \
+            --expected-parent-commit "${BASE_COMMIT}" \
+            --expected-sync-id "${EXPECTED_SYNC_ID}" \
+            --expected-plan-fingerprint "${EXPECTED_FINGERPRINT}" \
+            --image "${IMAGE}" \
+            --output /tmp/revalidated-hotfix-chain.json
           FINAL_PREFLIGHT=$(mktemp)
           trap 'rm -f "${FINAL_PREFLIGHT}"' EXIT
           GITHUB_OUTPUT="${FINAL_PREFLIGHT}" .github/scripts/upstream-sync.sh plan

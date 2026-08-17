@@ -67,6 +67,8 @@ const HOTFIX_RECEIPT_KEYS = [
   "release_asset_digests",
   "release_workflow",
 ] as const;
+const HOTFIX_RECEIPT_V2_KEYS = [...HOTFIX_RECEIPT_KEYS, "accepted_upstream_root"] as const;
+const RELEASE_LINK_KEYS = ["tag", "commit", "receipt", "workflow", "artifact"] as const;
 
 const INDEX_MEDIA_TYPES = new Set([
   "application/vnd.oci.image.index.v1+json",
@@ -540,6 +542,7 @@ async function workflowArtifact(
   signal: AbortSignal,
   current: boolean,
   expectedHeadSHA: string,
+  expected?: { id: number; digest: string; name: string },
 ): Promise<Map<string, Uint8Array>> {
   const response = object(await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`, signal), "workflow artifacts");
   if (!Array.isArray(response.artifacts) || !Number.isSafeInteger(response.total_count) || response.total_count !== response.artifacts.length)
@@ -553,6 +556,7 @@ async function workflowArtifact(
   if (matches.length !== 1) throw new RejectedDelivery("workflow artifact is duplicated");
   const artifact = object(matches[0], "workflow artifact");
   const id = integer(artifact.id, "artifact ID"), size = integer(artifact.size_in_bytes, "artifact size");
+  const artifactDigest = digest(artifact.digest, "artifact digest");
   const run = object(artifact.workflow_run, "artifact workflow run");
   if (artifact.name !== expectedName || artifact.expired !== false || size < 1 || size > 4_000_000 ||
       artifact.archive_download_url !== `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${id}/zip` ||
@@ -560,8 +564,11 @@ async function workflowArtifact(
     if (artifact.expired === true && current) throw new RejectedDelivery("workflow artifact is expired");
     throw new RejectedDelivery("workflow artifact identity differs");
   }
+  if (expected && (expected.id !== id || expected.name !== expectedName || expected.digest !== artifactDigest))
+    throw new RejectedDelivery("workflow artifact receipt identity differs");
   const zip = await client.bytes(string(artifact.archive_download_url, "artifact archive URL"), signal);
   if (zip.length !== size) throw new RejectedDelivery("workflow artifact size differs");
+  if (digestBytes(zip) !== artifactDigest) throw new RejectedDelivery("workflow artifact digest differs");
   let files: Map<string, Uint8Array>;
   try { files = readZipBasenames(zip); } catch { throw new RejectedDelivery("workflow artifact ZIP is invalid"); }
   const receiptName = kind === "upstream" ? "upstream-sync-receipt.json" : "hotfix-release-receipt.json";
@@ -1002,6 +1009,27 @@ function nextHotfixTag(baseTag: string): string {
   return `${match[1]}${Number(match[2]) + 1}`;
 }
 
+interface ReleaseLink {
+  tag: string; commit: string;
+  receipt: { name: string; id: number; digest: string };
+  workflow: { path: string; runID: number; attempt: number; headSHA: string };
+  artifact: { id: number; name: string; digest: string };
+}
+
+function releaseLink(value: unknown, kind: "upstream" | "hotfix", field: string): ReleaseLink {
+  const link = object(value, field); exactKeys(link, RELEASE_LINK_KEYS, field);
+  const receipt = object(link.receipt, `${field} receipt`), workflow = object(link.workflow, `${field} workflow`), artifact = object(link.artifact, `${field} artifact`);
+  exactKeys(receipt, ["name", "asset_id", "digest"], `${field} receipt`);
+  exactKeys(workflow, ["path", "run_id", "run_attempt", "head_sha"], `${field} workflow`);
+  exactKeys(artifact, ["id", "name", "digest"], `${field} artifact`);
+  const runID = decimalInteger(workflow.run_id, `${field} workflow run ID`), attempt = decimalInteger(workflow.run_attempt, `${field} workflow attempt`);
+  const expectedKind = kind === "upstream" ? "upstream-sync" : "hotfix-release";
+  const result = { tag: string(link.tag, `${field} tag`), commit: sha(link.commit, `${field} commit`), receipt: { name: string(receipt.name, `${field} receipt name`), id: decimalInteger(receipt.asset_id, `${field} receipt asset ID`), digest: digest(receipt.digest, `${field} receipt digest`) }, workflow: { path: string(workflow.path, `${field} workflow path`), runID, attempt, headSHA: sha(workflow.head_sha, `${field} workflow head SHA`) }, artifact: { id: decimalInteger(artifact.id, `${field} artifact ID`), name: string(artifact.name, `${field} artifact name`), digest: digest(artifact.digest, `${field} artifact digest`) } };
+  if (result.receipt.name !== `${expectedKind}-receipt.json` || result.workflow.path !== (kind === "upstream" ? UPSTREAM_WORKFLOW : HOTFIX_WORKFLOW) || result.artifact.name !== `${expectedKind}-receipt-${runID}-${attempt}`)
+    throw new RejectedDelivery(`${field} identity differs`);
+  return result;
+}
+
 async function validatePreviousUpstreamRelease(
   client: GitHubClient,
   registry: RegistryClient,
@@ -1010,6 +1038,7 @@ async function validatePreviousUpstreamRelease(
   currentStateBytes: Uint8Array,
   currentState: UpstreamState,
   signal: AbortSignal,
+  expected?: ReleaseLink,
 ): Promise<void> {
   const byTag = object(
     await client.get(
@@ -1077,6 +1106,8 @@ async function validatePreviousUpstreamRelease(
         signal,
         MAXIMUM_METADATA_BYTES,
       );
+  if (expected && (expected.tag !== baseTag || expected.commit !== baseCommit || expected.receipt.id !== assets.receipts[0].id || expected.receipt.name !== assets.receipts[0].name || expected.receipt.digest !== assets.receipts[0].digest))
+    throw new RejectedDelivery("recorded upstream root identity differs");
   const receipt = object(
     parseJSON(previousReceiptBytes, "previous receipt"),
     "previous receipt",
@@ -1101,7 +1132,9 @@ async function validatePreviousUpstreamRelease(
       allowNotReady: false,
     },
   );
-  const previousArtifact = await workflowArtifact(client, core.workflowRunID, previousRun.attempt, "upstream", previousReceiptBytes, signal, false, previousRun.headSHA);
+  if (expected && (expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== previousRun.attempt || expected.workflow.headSHA !== previousRun.headSHA))
+    throw new RejectedDelivery("recorded upstream root workflow differs");
+  const previousArtifact = await workflowArtifact(client, core.workflowRunID, previousRun.attempt, "upstream", previousReceiptBytes, signal, false, previousRun.headSHA, expected?.artifact);
   const runState = previousArtifact.get("run-state.json");
   if (!runState) throw new RejectedDelivery("historical run state is unavailable");
   validateRunState(runState, previousState.state, receipt, baseCommit, baseTag);
@@ -1115,6 +1148,43 @@ async function validatePreviousUpstreamRelease(
       requireLatestParity: false,
     },
   );
+}
+
+async function validateHistoricalHotfix(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
+  if (depth >= 32 || seen.has(expected.tag) || seen.has(expected.commit)) throw new RejectedDelivery("hotfix chain cycle or bound exceeded");
+  seen.add(expected.tag); seen.add(expected.commit);
+  const byTag = object(await client.get(`/repos/${REPOSITORY}/releases/tags/${encodeURIComponent(expected.tag)}`, signal), "historical release");
+  const id = integer(byTag.id, "historical release ID"), release = object(await client.get(`/repos/${REPOSITORY}/releases/${id}`, signal), "canonical historical release");
+  if (release.id !== id || release.tag_name !== expected.tag || byTag.tag_name !== expected.tag || release.html_url !== `https://github.com/${REPOSITORY}/releases/tag/${expected.tag}` || byTag.html_url !== release.html_url || release.assets_url !== `https://api.github.com/repos/${REPOSITORY}/releases/${id}/assets` || byTag.assets_url !== release.assets_url || release.published_at !== byTag.published_at || release.draft !== false || byTag.draft !== false || release.prerelease !== false || byTag.prerelease !== false || release.target_commitish !== "main" || byTag.target_commitish !== "main") throw new RejectedDelivery("historical release identity differs");
+  identity(release.author, BOT_LOGIN, BOT_ID, "Bot", "historical release author"); identity(byTag.author, BOT_LOGIN, BOT_ID, "Bot", "historical tag release author");
+  const tag = await fetchAnnotatedTag(client, expected.tag, signal); if (tag.commit !== expected.commit) throw new RejectedDelivery("historical tag commit differs");
+  const historicalState = await readStateAt(client, expected.commit, signal); if (!equalBytes(historicalState.bytes, stateBytes) || historicalState.state.SYNC_ID !== state.SYNC_ID || historicalState.state.PLAN_FINGERPRINT !== state.PLAN_FINGERPRINT) throw new RejectedDelivery("hotfix changed upstream state");
+  const assets = classifyAssets(release, false); await validateChecksums(client, assets, signal);
+  if (assets.receipts[0].name !== "hotfix-release-receipt.json" || assets.receipts[0].id !== expected.receipt.id || assets.receipts[0].digest !== expected.receipt.digest) throw new RejectedDelivery("recorded parent receipt identity differs");
+  const receiptBytes = await downloadAsset(client, assets.receipts[0], signal, MAXIMUM_METADATA_BYTES), receipt = object(parseJSON(receiptBytes, "historical receipt"), "historical receipt");
+  const version = integer(receipt.hotfix_schema_version, "historical hotfix schema version"); exactKeys(receipt, version === 2 ? HOTFIX_RECEIPT_V2_KEYS : HOTFIX_RECEIPT_KEYS, "historical receipt");
+  const core = validateReceiptCore(receipt, release, expected.commit, historicalState.state, assets.nonReceipt.map(a => a.name).sort());
+  validateTagger(tag, "hotfix", expected.tag, string(object(receipt.previous_release, "previous release").tag, "previous release tag"));
+  const upstreamState = object(receipt.upstream_state, "upstream state receipt"); exactKeys(upstreamState, ["sync_id", "plan_fingerprint", "sha256"], "upstream state receipt"); if (upstreamState.sync_id !== state.SYNC_ID || upstreamState.plan_fingerprint !== state.PLAN_FINGERPRINT || upstreamState.sha256 !== digestBytes(stateBytes).slice(7) || !SHA256.test(string(upstreamState.sha256, "upstream state digest"))) throw new RejectedDelivery("hotfix upstream state receipt differs");
+  const assetDigests = object(receipt.release_asset_digests, "release asset digests"), wanted = Object.fromEntries(assets.nonReceipt.map(a => [a.name, a.digest])); exactKeys(assetDigests, Object.keys(wanted), "release asset digests"); if (Object.entries(wanted).some(([name, value]) => assetDigests[name] !== value)) throw new RejectedDelivery("release asset digests differ");
+  const workflowReceipt = object(receipt.release_workflow, "release workflow receipt"); exactKeys(workflowReceipt, ["path", "ref", "commit", "run_id", "run_attempt"], "release workflow receipt"); if (workflowReceipt.path !== HOTFIX_WORKFLOW || workflowReceipt.ref !== `${REPOSITORY}/${HOTFIX_WORKFLOW}@refs/heads/main` || workflowReceipt.commit !== expected.commit || decimalInteger(workflowReceipt.run_id, "release workflow run ID") !== core.workflowRunID) throw new RejectedDelivery("release workflow receipt differs");
+  const run = await validateWorkflowRun(client, core.workflowRunID, HOTFIX_WORKFLOW, expected.commit, signal, { hotfix: true, allowNotReady: false });
+  if (decimalInteger(workflowReceipt.run_attempt, "release workflow attempt") !== run.attempt || expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== run.attempt || expected.workflow.headSHA !== run.headSHA) throw new RejectedDelivery("recorded parent workflow differs");
+  const files = await workflowArtifact(client, core.workflowRunID, run.attempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
+  await verifyRegistry(registry, expected.tag, core.imageDigest, core.architectureImages, signal, { requireLatestParity: false });
+  const previousRaw = object(receipt.previous_release, "previous release");
+  if (version === 1) {
+    exactKeys(previousRaw, ["tag", "commit"], "previous release"); const parentTag = string(previousRaw.tag, "previous release tag"), parentCommit = sha(previousRaw.commit, "previous release commit");
+    if (!expected.tag.endsWith(".1") || parentTag !== root.tag || parentCommit !== root.commit || nextHotfixTag(parentTag) !== expected.tag) throw new RejectedDelivery("schema-v1 hotfix is only valid at suffix .1");
+    const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${parentCommit}...${expected.commit}`, signal), "historical comparison");
+    if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
+    await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root);
+  } else if (version === 2) {
+    const previous = releaseLink(previousRaw, expected.tag.endsWith(".1") ? "upstream" : "hotfix", "previous release"), recordedRoot = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+    if (JSON.stringify(recordedRoot) !== JSON.stringify(root) || nextHotfixTag(previous.tag) !== expected.tag) throw new RejectedDelivery("hotfix parent or root identity differs");
+    const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${previous.commit}...${expected.commit}`, signal), "historical comparison"); if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
+    if (previous.tag === root.tag) await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root); else await validateHistoricalHotfix(client, registry, previous, root, stateBytes, state, signal, seen, depth + 1);
+  } else throw new RejectedDelivery("hotfix receipt schema differs");
 }
 
 export async function validateRelease(
@@ -1221,7 +1291,7 @@ export async function validateRelease(
     receiptAsset.name === "upstream-sync-receipt.json" ? "upstream" : "hotfix";
   exactKeys(
     receipt,
-    kind === "upstream" ? RECEIPT_CORE_KEYS : HOTFIX_RECEIPT_KEYS,
+    kind === "upstream" ? RECEIPT_CORE_KEYS : receipt.hotfix_schema_version === 2 ? HOTFIX_RECEIPT_V2_KEYS : HOTFIX_RECEIPT_KEYS,
     "release receipt",
   );
 
@@ -1256,18 +1326,26 @@ export async function validateRelease(
   } else {
     if (
       receipt.receipt_type !== "hotfix-release" ||
-      receipt.hotfix_schema_version !== 1
+      (receipt.hotfix_schema_version !== 1 && receipt.hotfix_schema_version !== 2)
     ) {
       throw new RejectedDelivery("hotfix receipt schema differs");
     }
     const previous = object(receipt.previous_release, "previous release");
-    exactKeys(previous, ["tag", "commit"], "previous release");
-    const baseTag = string(previous.tag, "previous release tag");
-    const baseCommit = sha(previous.commit, "previous release commit");
+    let baseTag: string, baseCommit: string, parentLink: ReleaseLink | undefined, rootLink: ReleaseLink | undefined;
+    if (receipt.hotfix_schema_version === 1) {
+      exactKeys(previous, ["tag", "commit"], "previous release");
+      baseTag = string(previous.tag, "previous release tag"); baseCommit = sha(previous.commit, "previous release commit");
+      if (!tag.endsWith(".1")) throw new RejectedDelivery("schema-v1 hotfix is only valid at suffix .1");
+    } else {
+      const suffix = Number(tag.slice(tag.lastIndexOf(".") + 1));
+      parentLink = releaseLink(previous, suffix === 1 ? "upstream" : "hotfix", "previous release"); rootLink = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+      baseTag = parentLink.tag; baseCommit = parentLink.commit;
+      if (rootLink.tag !== currentState.state.EXPECTED_FORK_TAG || !rootLink.tag.endsWith(".0") || !tag.startsWith(rootLink.tag.slice(0, -1))) throw new RejectedDelivery("accepted upstream root identity differs");
+    }
     if (
       !RELEASE_TAG.test(baseTag) ||
       nextHotfixTag(baseTag) !== tag ||
-      currentState.state.EXPECTED_FORK_TAG !== baseTag
+      (receipt.hotfix_schema_version === 1 ? currentState.state.EXPECTED_FORK_TAG !== baseTag : false)
     ) {
       throw new RejectedDelivery("hotfix tag relationship differs");
     }
@@ -1351,15 +1429,9 @@ export async function validateRelease(
         "hotfix commit is not strictly ahead of its base",
       );
     }
-    await validatePreviousUpstreamRelease(
-      client,
-      registry,
-      baseTag,
-      baseCommit,
-      currentState.bytes,
-      currentState.state,
-      signal,
-    );
+    if (receipt.hotfix_schema_version === 1) await validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal);
+    else if (parentLink!.tag === rootLink!.tag) await validatePreviousUpstreamRelease(client, registry, rootLink!.tag, rootLink!.commit, currentState.bytes, currentState.state, signal, rootLink);
+    else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
     const workflowRun = await validateWorkflowRun(
       client,
       core.workflowRunID,

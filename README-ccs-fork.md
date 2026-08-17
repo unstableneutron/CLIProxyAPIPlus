@@ -29,6 +29,25 @@ The retired workflow is retained at `.github/workflows-disabled/upstream-sync.ym
 
 `release.yaml` builds via goreleaser on tag push. Binary name `cli-proxy-api-plus`, archives `CLIProxyAPIPlus_<ver>_<os>_<arch>.*`. CCS CLI's `BACKEND_CONFIG.plus.repo` points here, so tagging a release (e.g., `v6.9.19-ccs.1`) publishes binaries CCS users pick up automatically.
 
+### Chained hotfix policy
+
+`.github/workflows/hotfix-release.yml` is the only supported publication path
+for reviewed fixes after an accepted upstream-sync release. A dispatch pins the
+exact current `origin/main`, the immediately previous immutable release and
+peeled commit, and the consecutive next suffix. A fresh planner must remain a
+clean represented no-op, and the candidate tag, release, and GHCR identities
+must all be absent.
+
+Legacy schema-1 receipts remain valid only for suffix `.1` directly above the
+accepted `.0` upstream release. Suffix `.2` and later use schema 2: each receipt
+records the immediate parent's receipt asset, workflow run, and receipt artifact,
+plus the same identities for the accepted upstream root. Verification walks the
+chain recursively, checks every annotated tag, commit ancestry, stable release,
+asset/checksum set, receipt byte identity, workflow artifact, unchanged upstream
+state, and architecture image, and rejects cycles or chains over 32 hotfix nodes.
+Gaps, stale main, reused identities, missing historical evidence, drafts,
+prereleases, and mismatches stop publication fail closed.
+
 ## Related issues
 
 - CCS CLI #1062 — runtime degrades `backend: plus → original` until this fork's releases are wired up in `BACKEND_CONFIG.plus.repo`.

@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
+CHAIN_VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
 
 die() {
   echo "[hotfix-release-verifier] $*" >&2
@@ -143,12 +144,45 @@ fi
 STATE_SYNC_ID=$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_FINGERPRINT=$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_RECORDED_TAG=$(awk -F= '$1 == "EXPECTED_FORK_TAG" { print $2; exit }' "${EXPECTED_STATE}")
+if [[ "${TAG}" =~ ^(.+unstableneutron\.)([0-9]+)$ ]]; then
+  HOTFIX_PREFIX=${BASH_REMATCH[1]}
+  HOTFIX_SUFFIX=$((10#${BASH_REMATCH[2]}))
+else
+  die "hotfix tag has an invalid release suffix"
+fi
+if [[ "${BASE_TAG}" =~ ^(.+unstableneutron\.)([0-9]+)$ ]]; then
+  BASE_PREFIX=${BASH_REMATCH[1]}
+  BASE_SUFFIX=$((10#${BASH_REMATCH[2]}))
+else
+  die "base tag has an invalid release suffix"
+fi
+if [ "${HOTFIX_PREFIX}" != "${BASE_PREFIX}" ] || \
+   [ "${HOTFIX_SUFFIX}" -ne $((BASE_SUFFIX + 1)) ]; then
+  die "hotfix tag is not the consecutive successor of its base tag"
+fi
 if [ "${STATE_SYNC_ID}" != "${EXPECTED_SYNC_ID}" ] || \
    [ "${STATE_FINGERPRINT}" != "${EXPECTED_PLAN_FINGERPRINT}" ] || \
-   [ "${STATE_RECORDED_TAG}" != "${BASE_TAG}" ]; then
+   [ "${STATE_RECORDED_TAG}" != "${HOTFIX_PREFIX}0" ]; then
   die "hotfix upstream-sync state does not match the accepted base release"
 fi
 STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
+
+CHAIN_RECEIPT=$(mktemp)
+printf '{}\n' > "${CHAIN_RECEIPT}"
+if [ "${HOTFIX_SUFFIX}" -ge 2 ]; then
+  trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
+  "${CHAIN_VERIFIER}" \
+    --tag "${TAG}" \
+    --expected-commit "${EXPECTED_COMMIT}" \
+    --parent-tag "${BASE_TAG}" \
+    --expected-parent-commit "${EXPECTED_BASE_COMMIT}" \
+    --expected-sync-id "${EXPECTED_SYNC_ID}" \
+    --expected-plan-fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
+    --image "${IMAGE}" \
+    --output "${CHAIN_RECEIPT}"
+elif [ "${BASE_TAG}" != "${STATE_RECORDED_TAG}" ]; then
+  die "legacy suffix .1 must directly follow the accepted upstream root"
+fi
 
 "${UPSTREAM_VERIFIER}" \
   --tag "${TAG}" \
@@ -233,12 +267,13 @@ WORKFLOW_RUN_ID=${GITHUB_RUN_ID:-local}
 WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
 mkdir -p "$(dirname -- "${RECEIPT}")"
 RECEIPT_TEMP=$(mktemp "${RECEIPT}.tmp.XXXXXX")
-trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
+trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
 jq \
   --arg receipt_type hotfix-release \
-  --argjson hotfix_schema_version 1 \
+  --argjson hotfix_schema_version "$([ "${HOTFIX_SUFFIX}" -ge 2 ] && echo 2 || echo 1)" \
   --arg base_tag "${BASE_TAG}" \
   --arg base_commit "${EXPECTED_BASE_COMMIT}" \
+  --slurpfile chain "${CHAIN_RECEIPT}" \
   --arg state_sha256 "${STATE_SHA256}" \
   --argjson release_asset_digests "${RELEASE_ASSET_DIGESTS}" \
   --arg workflow_path "${WORKFLOW_PATH}" \
@@ -249,10 +284,10 @@ jq \
     . + {
       receipt_type: $receipt_type,
       hotfix_schema_version: $hotfix_schema_version,
-      previous_release: {
+      previous_release: (if $hotfix_schema_version == 1 then {
         tag: $base_tag,
         commit: $base_commit
-      },
+      } else $chain[0].immediate_parent end),
       upstream_state: {
         sync_id: .sync_id,
         plan_fingerprint: .plan_fingerprint,
@@ -266,7 +301,9 @@ jq \
         run_id: $workflow_run_id,
         run_attempt: $workflow_run_attempt
       }
-    }
+    } + if $hotfix_schema_version == 2 then {
+      accepted_upstream_root: ($chain[0].accepted_upstream_root)
+    } else {} end
   ' "${CORE_RECEIPT}" > "${RECEIPT_TEMP}"
 if [ -n "${ATTACHED_RECEIPT}" ]; then
   [ -f "${ATTACHED_RECEIPT}" ] \
@@ -280,6 +317,6 @@ if [ -n "${ATTACHED_RECEIPT}" ]; then
   fi
 fi
 mv "${RECEIPT_TEMP}" "${RECEIPT}"
-trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
+trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
 
 echo "[OK] verified hotfix release ${TAG} at ${EXPECTED_COMMIT}; receipt=${RECEIPT}"

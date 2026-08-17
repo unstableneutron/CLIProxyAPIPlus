@@ -119,6 +119,12 @@ test_policy_accepts_only_exact_next_release() {
     "$(sha256sum "${repo}/.ccs-fork-upstream.env" | awk '{ print $1 }')" ] \
     || fail "policy output did not bind upstream state"
 
+  touch "${repo}/untracked"
+  expect_policy_failure \
+    "${repo}" "requires a clean checkout" \
+    "${HOTFIX_TAG}" "${hotfix_commit}" "${BASE_TAG}" "${base_commit}"
+  rm "${repo}/untracked"
+
   expect_policy_failure \
     "${repo}" "origin/main resolves" \
     "${HOTFIX_TAG}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -151,6 +157,46 @@ test_policy_accepts_only_exact_next_release() {
   rm -rf "${root}"
 }
 
+test_policy_accepts_consecutive_chained_suffixes() {
+  local root
+  root=$(mktemp -d)
+  setup_policy_repo "${root}"
+  local repo=${root}/repo
+  local first_commit second_commit third_commit output
+  first_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  run_git -C "${repo}" tag -a "${HOTFIX_TAG}" \
+    -m "Hotfix release ${HOTFIX_TAG} after ${BASE_TAG}"
+
+  echo second > "${repo}/app.txt"
+  run_git -C "${repo}" commit -am "second hotfix" >/dev/null
+  second_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  run_git -C "${repo}" push -q origin +HEAD:main "refs/tags/${HOTFIX_TAG}"
+  run_git -C "${repo}" fetch -q origin main:refs/remotes/origin/main
+  output=${root}/second.out
+  run_policy \
+    "${repo}" "${output}" v7.2.131-unstableneutron.2 "${second_commit}" \
+    "${HOTFIX_TAG}" "${first_commit}" >/dev/null
+  [ "$(output_value "${output}" root_tag)" = "${BASE_TAG}" ] \
+    || fail "second hotfix did not preserve the accepted upstream root"
+
+  run_git -C "${repo}" tag -a v7.2.131-unstableneutron.2 \
+    -m "Hotfix release v7.2.131-unstableneutron.2 after ${HOTFIX_TAG}"
+  echo third > "${repo}/app.txt"
+  run_git -C "${repo}" commit -am "third hotfix" >/dev/null
+  third_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  run_git -C "${repo}" push -q origin +HEAD:main refs/tags/v7.2.131-unstableneutron.2
+  run_git -C "${repo}" fetch -q origin main:refs/remotes/origin/main
+  run_policy \
+    "${repo}" "${root}/third.out" v7.2.131-unstableneutron.3 "${third_commit}" \
+    v7.2.131-unstableneutron.2 "${second_commit}" >/dev/null
+
+  expect_policy_failure \
+    "${repo}" "hotfix tag must be the next suffix" \
+    v7.2.131-unstableneutron.4 "${third_commit}" \
+    v7.2.131-unstableneutron.2 "${second_commit}"
+  rm -rf "${root}"
+}
+
 test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "workflow_dispatch:"
   assert_not_contains "${WORKFLOW}" "schedule:"
@@ -158,7 +204,8 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "github.actor"
   assert_contains "${WORKFLOW}" "github.ref"
   assert_contains "${WORKFLOW}" "validate-hotfix-release.sh"
-  assert_contains "${WORKFLOW}" "Verify previous accepted release receipt"
+  assert_contains "${WORKFLOW}" "Verify complete previous release chain"
+  assert_contains "${WORKFLOW}" "verify-hotfix-chain.sh"
   assert_contains "${WORKFLOW}" "Reject reused or partially published identity"
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${WORKFLOW}" 'git push origin "refs/tags/${TAG}"'
@@ -183,6 +230,7 @@ test_workflow_contract_is_fail_closed() {
 main() {
   [ -x "${POLICY}" ] || fail "policy script is missing or not executable"
   test_policy_accepts_only_exact_next_release
+  test_policy_accepts_consecutive_chained_suffixes
   test_workflow_contract_is_fail_closed
   echo "[OK] hotfix release policy tests passed"
 }
