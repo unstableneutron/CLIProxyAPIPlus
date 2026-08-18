@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import releaseAssetContract from "../../../.github/release-asset-contract.json";
+import sharedRegistryIndex from "../../../.github/scripts/testdata/upstream-release/image-index.json";
 import {
   BOT_ID,
   BOT_LOGIN,
@@ -2500,6 +2501,37 @@ describe("hotfix release provenance", () => {
 });
 
 describe("canonical registry verification", () => {
+  test("accepts the shared shell registry descriptor fixture", async () => {
+    const tag = "v1.2.3-unstableneutron.0";
+    const fixture = registryFixture(tag);
+    const amd64 = fixture.architectureImages["linux/amd64"].digest;
+    const arm64 = fixture.architectureImages["linux/arm64"].digest;
+    const index = structuredClone(sharedRegistryIndex) as Record<string, any>;
+    for (const descriptor of index.manifests) {
+      const platform = `${descriptor.platform.os}/${descriptor.platform.architecture}`;
+      if (platform === "linux/amd64") descriptor.digest = amd64;
+      if (platform === "linux/arm64") descriptor.digest = arm64;
+      if (
+        platform === "unknown/unknown" &&
+        descriptor.annotations["vnd.docker.reference.digest"] ===
+          sharedRegistryIndex.manifests[0].digest
+      ) {
+        descriptor.annotations["vnd.docker.reference.digest"] = amd64;
+      }
+    }
+    fixture.index = index;
+    const expected = fixture.refreshIndex();
+    await expect(
+      verifyRegistry(
+        fixture.client,
+        tag,
+        expected,
+        fixture.architectureImages,
+        signal,
+      ),
+    ).resolves.toEqual({ amd64, arm64 });
+  });
+
   test("accepts exact tag, latest, platform, architecture tag, and receipt parity", async () => {
     const fixture = registryFixture("v1.2.3-unstableneutron.0");
     const result = await verifyRegistry(

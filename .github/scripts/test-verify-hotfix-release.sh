@@ -307,7 +307,7 @@ test_receipt_binds_release_and_upstream_state() {
   jq 'del(.manifests[] | select(.platform.architecture == "arm64"))' \
     "${FIXTURES}/image-index.json" > "${root}/missing-platform.json"
   expect_failure \
-    "${root}" "missing linux/arm64" \
+    "${root}" "invalid platform or attestation descriptor set" \
     "${root}/platform-output.json" "" "${root}/release-api.json" \
     "${root}/missing-platform.json"
 

@@ -74,6 +74,12 @@ existing releases; new upstream roots are not emitted with those schemas. Shell
 publication/chain verification and release-webhook admission enforce the same
 schema, byte bounds, attempt recovery, and run-state contract.
 
+Represented no-op planning accepts only the exact schema-2 state key set and
+deterministically regenerates its repository, source, fingerprint, candidate,
+and inherited accepted-root tag identities. A later hotfix may inherit that
+root state, but malformed, missing, duplicate, extra, or drifted fields are not
+treated as represented. Scheduled and manual runs use the same verifier.
+
 Publication is restartable only by exact evidence. Before the first side effect,
 all candidate identities must be absent. After an interruption, the same policy
 may adopt an existing annotated tag only when its object, peeled SHA, bot tagger,
@@ -93,6 +99,14 @@ the receipt: it must reproduce its bytes and verify the exact earlier-attempt
 artifact and final plan, and that earlier attempt must have ended in `failure`,
 `cancelled`, or `timed_out`. Successful attempts are never recovery evidence.
 Artifact ZIP members are allowlisted and size-bounded before bounded extraction.
+Docker platform evidence is likewise immutable and run-attempt-qualified. The
+manifest publisher selects one complete current attempt or one earlier
+`failure`, `cancelled`, or `timed_out` attempt, authenticates its artifact IDs,
+archive URLs, sizes, digests, workflow head, target commit, and architecture
+tags, and never overwrites it. Canonical and `latest` indexes must contain the
+exact amd64/arm64 platform set and only well-formed, uniquely bound attestation
+descriptors. Repository, current main, and tag identities are freshly checked
+immediately before every registry or receipt mutation.
 The final successful attempt may therefore be later than the immutable evidence
 attempt recorded by the receipt. Tags, releases, receipts, and canonical GHCR
 tags are never deleted, moved, clobbered, or overwritten during recovery.

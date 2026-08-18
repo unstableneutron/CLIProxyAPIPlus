@@ -176,14 +176,8 @@ IMAGE_INDEX=$(docker buildx imagetools inspect "${IMAGE_REF}" --format '{{json .
 IMAGE_DIGEST=$(jq -r '.digest // empty' <<< "${IMAGE_INDEX}")
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] \
   || die "Image ${IMAGE_REF} did not resolve to a valid index digest"
-for ARCH in amd64 arm64; do
-  if ! jq -e \
-    --arg arch "${ARCH}" \
-    'any(.manifests[]?; .platform.os == "linux" and .platform.architecture == $arch)' \
-    <<< "${IMAGE_INDEX}" >/dev/null; then
-    die "Image ${IMAGE_REF} is missing linux/${ARCH}"
-  fi
-done
+jq -e -f "${SCRIPT_DIR}/verify-registry-index.jq" <<< "${IMAGE_INDEX}" >/dev/null \
+  || die "Image ${IMAGE_REF} has an invalid platform or attestation descriptor set"
 
 ARCHITECTURE_IMAGES='{}'
 RECEIPT_PLATFORMS='["linux/amd64","linux/arm64"]'
@@ -219,7 +213,12 @@ if [ "${REQUIRE_ARCHITECTURE_TAGS}" = true ]; then
       "${ARCHITECTURE_REF}" \
       --format '{{json .Manifest}}')
     ARCHITECTURE_DIGEST=$(jq -r '.digest // empty' <<< "${ARCHITECTURE_MANIFEST}")
-    if [ "${ARCHITECTURE_DIGEST}" != "${PLATFORM_DIGEST}" ]; then
+    if [ "${ARCHITECTURE_DIGEST}" != "${PLATFORM_DIGEST}" ] || \
+       ! jq -e '
+         .schemaVersion == 2 and
+         (.mediaType == "application/vnd.oci.image.manifest.v1+json" or
+          .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
+       ' <<< "${ARCHITECTURE_MANIFEST}" >/dev/null; then
       die "Architecture tag ${ARCHITECTURE_REF} resolves to ${ARCHITECTURE_DIGEST}, expected ${PLATFORM_DIGEST}"
     fi
     PLATFORM_KEY="${PLATFORM_OS}/${PLATFORM_ARCH}"
@@ -247,7 +246,9 @@ if [ "${REQUIRE_LATEST_PARITY}" = true ]; then
     "${IMAGE_REPOSITORY}:latest" \
     --format '{{json .Manifest}}')
   LATEST_DIGEST=$(jq -r '.digest // empty' <<< "${LATEST_INDEX}")
-  if [ "${LATEST_DIGEST}" != "${IMAGE_DIGEST}" ]; then
+  if [ "${LATEST_DIGEST}" != "${IMAGE_DIGEST}" ] || \
+     ! jq -e -f "${SCRIPT_DIR}/verify-registry-index.jq" \
+       <<< "${LATEST_INDEX}" >/dev/null; then
     die "latest digest ${LATEST_DIGEST} does not match ${TAG} digest ${IMAGE_DIGEST}"
   fi
 fi

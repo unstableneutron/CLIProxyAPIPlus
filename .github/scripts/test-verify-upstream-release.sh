@@ -329,14 +329,52 @@ test_rejects_missing_required_platforms() {
   jq 'del(.manifests[] | select(.platform.architecture == "amd64"))' \
     "${FIXTURES}/image-index.json" > "${root}/missing-amd64.json"
   expect_failure \
-    "${root}" "${root}/receipt-amd64.json" "linux/amd64" \
+    "${root}" "${root}/receipt-amd64.json" "invalid platform or attestation descriptor set" \
     false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" "${root}/missing-amd64.json"
 
   jq 'del(.manifests[] | select(.platform.architecture == "arm64"))' \
     "${FIXTURES}/image-index.json" > "${root}/missing-arm64.json"
   expect_failure \
-    "${root}" "${root}/receipt-arm64.json" "linux/arm64" \
+    "${root}" "${root}/receipt-arm64.json" "invalid platform or attestation descriptor set" \
     false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" "${root}/missing-arm64.json"
+  rm -rf "${root}"
+}
+
+test_rejects_extra_duplicate_and_malformed_descriptors() {
+  local root mutation
+  root=$(mktemp -d)
+  make_stubs "${root}"
+  jq '.manifests += [{
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      digest: ("sha256:" + ("4" * 64)),
+      platform: {architecture: "amd64", os: "windows"}
+    }]' "${FIXTURES}/image-index.json" > "${root}/extra.json"
+  jq '.manifests += [.manifests[0]]' \
+    "${FIXTURES}/image-index.json" > "${root}/duplicate.json"
+  jq 'del(.manifests[2].annotations["vnd.docker.reference.digest"])' \
+    "${FIXTURES}/image-index.json" > "${root}/malformed-attestation.json"
+  jq '.manifests += [(.manifests[2] | .digest = ("sha256:" + ("5" * 64)))]' \
+    "${FIXTURES}/image-index.json" > "${root}/duplicate-attestation.json"
+  for mutation in extra duplicate malformed-attestation duplicate-attestation; do
+    expect_failure \
+      "${root}" "${root}/${mutation}-receipt.json" \
+      "invalid platform or attestation descriptor set" \
+      false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+      "${root}/${mutation}.json"
+  done
+
+  jq '.mediaType = "application/octet-stream"' \
+    "${FIXTURES}/image-amd64.json" > "${root}/bad-architecture.json"
+  expect_failure \
+    "${root}" "${root}/bad-architecture-receipt.json" "Architecture tag" \
+    false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${FIXTURES}/image-index.json" \
+    exact ahead true "${root}/bad-architecture.json" "${FIXTURES}/image-arm64.json"
+
+  expect_failure \
+    "${root}" "${root}/bad-latest-receipt.json" "latest digest" \
+    true "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+    "${FIXTURES}/image-index.json" "${root}/extra.json"
   rm -rf "${root}"
 }
 
@@ -367,6 +405,7 @@ main() {
   test_rejects_incomplete_or_conflicting_release_asset_matrix
   test_rejects_semantically_wrong_or_duplicate_receipts
   test_rejects_missing_required_platforms
+  test_rejects_extra_duplicate_and_malformed_descriptors
   test_rejects_mismatched_architecture_tag
   test_latest_parity_is_conditional
   echo "[OK] upstream release verifier tests passed"

@@ -606,6 +606,14 @@ jobs:
             attached-receipt/hotfix-release-receipt.json \
             final-plan.out
 
+      - name: Revalidate target before immutable receipt evidence upload
+        if: steps.receipt.outputs.state == 'absent'
+        env:
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: steps.receipt.outputs.state == 'absent'
@@ -620,6 +628,7 @@ jobs:
 
       - name: Publish or adopt immutable hotfix receipt
         env:
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RECEIPT_STATE: ${{ steps.receipt.outputs.state }}
           TAG: ${{ needs.tag.outputs.tag }}
@@ -630,6 +639,7 @@ jobs:
               echo "Receipt identity appeared after finalization preflight." >&2
               exit 1
             fi
+            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
             gh release upload "${TAG}" hotfix-release-receipt.json \
               --repo "${GITHUB_REPOSITORY}"
             mkdir published-receipt

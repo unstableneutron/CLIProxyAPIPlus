@@ -197,7 +197,6 @@ jobs:
         env:
           EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODE: ${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}
           PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}
           PLAN_ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
           PLAN_PLUS_HEAD_COMMIT: ${{ steps.plan.outputs.plus_head }}
@@ -208,6 +207,12 @@ jobs:
           mkdir -p "${RECEIPT_DIR}"
           git fetch --force origin "refs/tags/${EXPECTED_FORK_TAG}:refs/tags/${EXPECTED_FORK_TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${EXPECTED_FORK_TAG}^{}")"
+          CURRENT_MAIN_COMMIT="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$(git rev-parse HEAD)" != "${CURRENT_MAIN_COMMIT}" ]; then
+            echo "Represented-release checkout is not exact current main." >&2
+            exit 1
+          fi
           STATE_FILE="${RECEIPT_DIR}/expected-state.env"
           set +e
           git show "refs/tags/${EXPECTED_FORK_TAG}:.ccs-fork-upstream.env" > "${STATE_FILE}"
@@ -228,14 +233,38 @@ jobs:
           fi
           set -e
 
+          STATE_KEYS=$(mktemp)
+          EXPECTED_STATE_KEYS=$(mktemp)
+          if [ "${STATE_EXIT}" -eq 0 ]; then
+            if ! awk -F= '
+              !/^[A-Z][A-Z0-9_]*=[^\r\n]+$/ { exit 1 }
+              seen[$1]++ { exit 1 }
+              { print $1 }
+            ' "${STATE_FILE}" | sort > "${STATE_KEYS}"; then
+              echo "Represented release state syntax differs." >&2
+              exit 1
+            fi
+            printf '%s\n' \
+              SCHEMA_VERSION SYNC_ID PLAN_FINGERPRINT BASE_FORK_COMMIT \
+              ORIGINAL_REPOSITORY ORIGINAL_TAG ORIGINAL_COMMIT PLUS_REPOSITORY PLUS_TAG \
+              PLUS_TAG_COMMIT PLUS_HEAD_COMMIT PLUS_HEAD_INCLUDED MODELS_REPOSITORY \
+              MODELS_COMMIT EXPECTED_FORK_TAG CANDIDATE_BRANCH | sort > "${EXPECTED_STATE_KEYS}"
+            if ! cmp -s "${STATE_KEYS}" "${EXPECTED_STATE_KEYS}"; then
+              echo "Represented release state fields differ." >&2
+              exit 1
+            fi
+          fi
+
           state_value() {
             local key=$1
             awk -F= -v key="${key}" \
               '$1 == key { sub(/^[^=]*=/, ""); print; exit }' \
               "${STATE_FILE}"
           }
+          STATE_SCHEMA="$(state_value SCHEMA_VERSION)"
           STATE_SYNC_ID="$(state_value SYNC_ID)"
           STATE_FINGERPRINT="$(state_value PLAN_FINGERPRINT)"
+          STATE_BASE_FORK_COMMIT="$(state_value BASE_FORK_COMMIT)"
           STATE_ORIGINAL_TAG="$(state_value ORIGINAL_TAG)"
           STATE_PLUS_TAG="$(state_value PLUS_TAG)"
           STATE_ORIGINAL_REPOSITORY="$(state_value ORIGINAL_REPOSITORY)"
@@ -246,9 +275,23 @@ jobs:
           STATE_PLUS_HEAD_COMMIT="$(state_value PLUS_HEAD_COMMIT)"
           STATE_PLUS_HEAD_INCLUDED="$(state_value PLUS_HEAD_INCLUDED)"
           STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"
+          STATE_EXPECTED_FORK_TAG="$(state_value EXPECTED_FORK_TAG)"
+          STATE_CANDIDATE_BRANCH="$(state_value CANDIDATE_BRANCH)"
+          # shellcheck source=/dev/null
+          source .github/scripts/hotfix-release-tag.sh
+          parse_fork_release_tag "${EXPECTED_FORK_TAG}" \
+            || { echo "Represented release tag is invalid." >&2; exit 1; }
+          TAG_PREFIX=${FORK_TAG_PREFIX}
+          TAG_SUFFIX=${FORK_TAG_SUFFIX}
+          parse_fork_release_tag "${STATE_EXPECTED_FORK_TAG}" \
+            || { echo "Represented state release tag is invalid." >&2; exit 1; }
+          STATE_TAG_PREFIX=${FORK_TAG_PREFIX}
+          STATE_TAG_SUFFIX=${FORK_TAG_SUFFIX}
           if [ "${STATE_EXIT}" -ne 0 ] || \
+             [ "${STATE_SCHEMA}" != 2 ] || \
              [ -z "${STATE_SYNC_ID}" ] || \
              [ -z "${STATE_FINGERPRINT}" ] || \
+             [ -z "${STATE_BASE_FORK_COMMIT}" ] || \
              [ -z "${STATE_ORIGINAL_TAG}" ] || \
              [ -z "${STATE_PLUS_TAG}" ] || \
              [ -z "${STATE_ORIGINAL_REPOSITORY}" ] || \
@@ -259,12 +302,33 @@ jobs:
              [ -z "${STATE_PLUS_HEAD_COMMIT}" ] || \
              [ -z "${STATE_PLUS_HEAD_INCLUDED}" ] || \
              [ -z "${STATE_MODELS_COMMIT}" ] || \
+             [ "${STATE_TAG_PREFIX}" != "${TAG_PREFIX}" ] || \
+             [ "${STATE_TAG_SUFFIX}" -gt "${TAG_SUFFIX}" ] || \
+             [ -z "${STATE_CANDIDATE_BRANCH}" ] || \
              [ "${DOWNLOAD_EXIT}" -ne 0 ]; then
-            if [ "${MODE}" = shadow ]; then
-              echo "Legacy release without a v2 receipt; shadow verification made no changes." >> "${GITHUB_STEP_SUMMARY}"
-              exit 0
-            fi
             echo "Represented release lacks v2 state or a supported release receipt." >&2
+            exit 1
+          fi
+          EXPECTED_STATE_SYNC_ID="original-$(printf '%s' "${STATE_ORIGINAL_TAG}" | tr -c 'A-Za-z0-9._-' '-')_plus-$(printf '%s' "${STATE_PLUS_TAG}" | tr -c 'A-Za-z0-9._-' '-')"
+          EXPECTED_STATE_FINGERPRINT=$(
+            printf '%s\n' \
+              "base_fork_commit=${STATE_BASE_FORK_COMMIT}" \
+              "original_tag=${STATE_ORIGINAL_TAG}" \
+              "original_commit=${STATE_ORIGINAL_COMMIT}" \
+              "plus_tag=${STATE_PLUS_TAG}" \
+              "plus_tag_commit=${STATE_PLUS_TAG_COMMIT}" \
+              "plus_head_commit=${STATE_PLUS_HEAD_COMMIT}" \
+              "plus_head_included=${STATE_PLUS_HEAD_INCLUDED}" \
+              "models_commit=${STATE_MODELS_COMMIT}" \
+              "expected_fork_tag=${STATE_EXPECTED_FORK_TAG}" \
+              | git hash-object --stdin
+          )
+          EXPECTED_STATE_CANDIDATE="upstream-sync/${STATE_SYNC_ID}-${STATE_FINGERPRINT:0:12}"
+          if [ "${STATE_SYNC_ID}" != "${EXPECTED_STATE_SYNC_ID}" ] || \
+             [ "${STATE_FINGERPRINT}" != "${EXPECTED_STATE_FINGERPRINT}" ] || \
+             [ "${STATE_CANDIDATE_BRANCH}" != "${EXPECTED_STATE_CANDIDATE}" ] || \
+             ! git merge-base --is-ancestor "${STATE_BASE_FORK_COMMIT}" "${TAG_COMMIT}"; then
+            echo "Represented release state derivation differs." >&2
             exit 1
           fi
           PLAN_FILE="${SYNC_WORK_DIR}/plan.out"
@@ -295,15 +359,9 @@ jobs:
             echo "Represented planner output fields differ." >&2
             exit 1
           fi
-          # shellcheck source=/dev/null
-          source .github/scripts/hotfix-release-tag.sh
-          parse_fork_release_tag "${EXPECTED_FORK_TAG}" \
-            || { echo "Represented release tag is invalid." >&2; exit 1; }
-          TAG_PREFIX=${FORK_TAG_PREFIX}
-          TAG_SUFFIX=${FORK_TAG_SUFFIX}
           EXPECTED_PLAN_FINGERPRINT=$(
             printf '%s\n' \
-              "base_fork_commit=${TAG_COMMIT}" \
+              "base_fork_commit=${CURRENT_MAIN_COMMIT}" \
               "original_tag=${STATE_ORIGINAL_TAG}" \
               "original_commit=${STATE_ORIGINAL_COMMIT}" \
               "plus_tag=${STATE_PLUS_TAG}" \
@@ -318,8 +376,8 @@ jobs:
           EXPECTED_CANDIDATE="upstream-sync/$(printf '%s' "${STATE_SYNC_ID}" | tr -c 'A-Za-z0-9._-' '-')-${EXPECTED_PLAN_FINGERPRINT:0:12}"
           if [ "$(plan_value "${PLAN_FILE}" original_tag)" != "${STATE_ORIGINAL_TAG}" ] || \
              [ "$(plan_value "${PLAN_FILE}" plus_tag)" != "${STATE_PLUS_TAG}" ] || \
-             [ "$(plan_value "${PLAN_FILE}" pre_sync_head)" != "${TAG_COMMIT}" ] || \
-             [ "$(plan_value "${PLAN_FILE}" base_fork_commit)" != "${TAG_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" pre_sync_head)" != "${CURRENT_MAIN_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" base_fork_commit)" != "${CURRENT_MAIN_COMMIT}" ] || \
              [ "$(plan_value "${PLAN_FILE}" original_repository)" != "${STATE_ORIGINAL_REPOSITORY}" ] || \
              [ "$(plan_value "${PLAN_FILE}" plus_repository)" != "${STATE_PLUS_REPOSITORY}" ] || \
              [ "$(plan_value "${PLAN_FILE}" models_repository)" != "${STATE_MODELS_REPOSITORY}" ] || \
@@ -947,6 +1005,13 @@ jobs:
             ' "${STATE_FILE}" > "${STATE_FILE}.tmp"
           mv "${STATE_FILE}.tmp" "${STATE_FILE}"
 
+      - name: Revalidate target before immutable receipt evidence upload
+        env:
+          EXPECTED_COMMIT: ${{ needs.promote.outputs.commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.promote.outputs.tag }}
+        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -959,6 +1024,7 @@ jobs:
 
       - name: Attach immutable receipt after complete evidence publication
         env:
+          EXPECTED_COMMIT: ${{ needs.promote.outputs.commit }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.promote.outputs.tag }}
         run: |
@@ -968,6 +1034,7 @@ jobs:
             echo "A receipt identity appeared after upstream finalization preflight." >&2
             exit 1
           fi
+          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
           gh release upload "${TAG}" upstream-sync-receipt.json \
             --repo "${GITHUB_REPOSITORY}"
           mkdir published-upstream-receipt
