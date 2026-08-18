@@ -82,13 +82,13 @@ and inherited accepted-root tag identities. A later hotfix may inherit that
 root state, but malformed, missing, duplicate, extra, or drifted fields are not
 treated as represented. Scheduled and manual runs use the same verifier.
 
-Publication is restartable only by exact evidence. Before the first side effect,
-all candidate identities must be absent. After an interruption, the same policy
-may adopt an existing annotated tag only when its object, peeled SHA, bot tagger,
-message, current main, chain, and fresh planner state match exactly; release and
-GHCR identities are classified independently. GoReleaser builds the exact asset
-matrix without publishing it; the assets, checksums, and a deterministic manifest
-are first stored as one immutable Actions artifact. Release mutation then creates
+Before the first hotfix side effect, all candidate tag, release, and GHCR
+identities must be absent. Normal dispatch never adopts a preexisting candidate
+tag, including an exact tag left by an interrupted run; that identity remains
+blocked pending a separately reviewed recovery path. GoReleaser builds the
+exact asset matrix without publishing it; the assets, checksums, and a
+deterministic manifest are first stored as one immutable Actions artifact.
+Release mutation then creates
 a draft bound to that artifact ID and digest, validates every already-uploaded
 asset against the manifest, uploads only absent names, and publishes only after a
 complete recheck. A rerun can resume a matching partial draft from the original

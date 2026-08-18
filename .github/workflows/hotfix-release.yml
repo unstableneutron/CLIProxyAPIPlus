@@ -51,8 +51,6 @@ jobs:
       plan_fingerprint: ${{ steps.policy.outputs.plan_fingerprint }}
       sync_id: ${{ steps.policy.outputs.sync_id }}
       tag: ${{ steps.policy.outputs.tag }}
-      tag_state: ${{ steps.policy.outputs.tag_state }}
-      receipt_state: ${{ steps.publication.outputs.receipt_state }}
       upstream_state_sha256: ${{ steps.policy.outputs.upstream_state_sha256 }}
     steps:
       # actions/checkout v7.0.0
@@ -111,8 +109,7 @@ jobs:
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
             --base-tag "${BASE_TAG}" \
-            --expected-base-commit "${EXPECTED_BASE_COMMIT}" \
-            --existing-tag-policy exact
+            --expected-base-commit "${EXPECTED_BASE_COMMIT}"
 
       - name: Require fresh represented upstream state
         env:
@@ -128,25 +125,13 @@ jobs:
           plan_value() {
             awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
           }
-          TAG_STATE=${{ steps.policy.outputs.tag_state }}
-          if [ "${TAG_STATE}" = absent ]; then
-            EXPECTED_LATEST_TAG=${BASE_TAG}
-            EXPECTED_EXPECTED_TAG=${BASE_TAG}
-            EXPECTED_NEXT_TAG=${TAG}
-          else
-            EXPECTED_LATEST_TAG=${TAG}
-            EXPECTED_EXPECTED_TAG=${TAG}
-            TAG_PREFIX=${TAG%.*}
-            TAG_SUFFIX=$((10#${TAG##*.}))
-            EXPECTED_NEXT_TAG="${TAG_PREFIX}.$((TAG_SUFFIX + 1))"
-          fi
           if [ "$(plan_value "${PLAN}" pre_sync_head)" != "${EXPECTED_COMMIT}" ] || \
              [ "$(plan_value "${PLAN}" has_changes)" != false ] || \
              [ "$(plan_value "${PLAN}" target_drift)" != false ] || \
              [ "$(plan_value "${PLAN}" blocked)" != false ] || \
-             [ "$(plan_value "${PLAN}" latest_fork_tag)" != "${EXPECTED_LATEST_TAG}" ] || \
-             [ "$(plan_value "${PLAN}" expected_fork_tag)" != "${EXPECTED_EXPECTED_TAG}" ] || \
-             [ "$(plan_value "${PLAN}" next_fork_tag)" != "${EXPECTED_NEXT_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" latest_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" expected_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" next_fork_tag)" != "${TAG}" ] || \
              [ "$(plan_value "${PLAN}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
              [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
             echo "Fresh planner does not preserve the exact accepted upstream state and next release slot." >&2
@@ -173,46 +158,17 @@ jobs:
             --image "${IMAGE}" \
             --output "${HOTFIX_WORK_DIR}/verified-chain.json"
 
-      - name: Classify absent or exact resumable publication state
-        id: publication
+      - name: Require absent candidate publication identities
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.policy.outputs.tag }}
-          TAG_STATE: ${{ steps.policy.outputs.tag_state }}
         run: |
-          STEP_OUTPUT=${GITHUB_OUTPUT}
           PUBLICATION_OUTPUT=$(mktemp)
           trap 'rm -f "${PUBLICATION_OUTPUT}"' EXIT
           GITHUB_OUTPUT=${PUBLICATION_OUTPUT} .github/scripts/inspect-hotfix-publication-state.sh \
-            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" "${TAG_STATE}"
-          cat "${PUBLICATION_OUTPUT}" >> "${STEP_OUTPUT}"
-          if [ "${TAG_STATE}" = absent ]; then
-            .github/scripts/confirm-hotfix-identities-absent.sh \
-              "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
-          fi
-          RECEIPT_STATE=$(awk -F= '$1 == "receipt_state" { print $2; exit }' "${PUBLICATION_OUTPUT}")
-          if [ "${RECEIPT_STATE}" = exact ]; then
-            mkdir -p "${HOTFIX_WORK_DIR}/attached-receipt"
-            gh release download "${TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --pattern hotfix-release-receipt.json \
-              --dir "${HOTFIX_WORK_DIR}/attached-receipt"
-            .github/scripts/verify-hotfix-release.sh \
-              --tag "${TAG}" \
-              --expected-commit "${{ steps.policy.outputs.expected_commit }}" \
-              --base-tag "${{ steps.policy.outputs.base_tag }}" \
-              --expected-base-commit "${{ steps.policy.outputs.base_commit }}" \
-              --expected-sync-id "${{ steps.policy.outputs.sync_id }}" \
-              --expected-plan-fingerprint "${{ steps.policy.outputs.plan_fingerprint }}" \
-              --image "${IMAGE}" \
-              --main-policy exact \
-              --require-latest-parity true \
-              --attached-receipt "${HOTFIX_WORK_DIR}/attached-receipt/hotfix-release-receipt.json" \
-              --receipt "${HOTFIX_WORK_DIR}/recovered-receipt.json"
-            .github/scripts/verify-hotfix-finalization-evidence.sh \
-              "${HOTFIX_WORK_DIR}/attached-receipt/hotfix-release-receipt.json" \
-              "${HOTFIX_WORK_DIR}/plan.out"
-          fi
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" absent
+          .github/scripts/confirm-hotfix-identities-absent.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
 
       - name: Run complete repository and upstream validation
         env:
@@ -293,10 +249,7 @@ jobs:
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
             --base-tag "${BASE_TAG}" \
-            --expected-base-commit "${BASE_COMMIT}" \
-            --existing-tag-policy exact
-          TAG_STATE=$(awk -F= '$1 == "tag_state" { print $2; exit }' "${POLICY_OUTPUT}")
-          echo "tag_state=${TAG_STATE}" >> "${GITHUB_OUTPUT}"
+            --expected-base-commit "${BASE_COMMIT}"
           .github/scripts/verify-hotfix-chain.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
@@ -310,31 +263,20 @@ jobs:
           plan_value() {
             awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
           }
-          if [ "${TAG_STATE}" = absent ]; then
-            EXPECTED_LATEST_TAG=${BASE_TAG}
-            EXPECTED_NEXT_TAG=${TAG}
-          else
-            EXPECTED_LATEST_TAG=${TAG}
-            TAG_PREFIX=${TAG%.*}
-            TAG_SUFFIX=$((10#${TAG##*.}))
-            EXPECTED_NEXT_TAG="${TAG_PREFIX}.$((TAG_SUFFIX + 1))"
-          fi
           if [ "$(plan_value "${FINAL_PREFLIGHT}" has_changes)" != false ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" target_drift)" != false ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" blocked)" != false ] || \
-             [ "$(plan_value "${FINAL_PREFLIGHT}" latest_fork_tag)" != "${EXPECTED_LATEST_TAG}" ] || \
-             [ "$(plan_value "${FINAL_PREFLIGHT}" next_fork_tag)" != "${EXPECTED_NEXT_TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" latest_fork_tag)" != "${BASE_TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" next_fork_tag)" != "${TAG}" ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
              [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
             echo "Upstream or release state moved after validation." >&2
             exit 1
           fi
           GITHUB_OUTPUT=${PUBLICATION_OUTPUT} .github/scripts/inspect-hotfix-publication-state.sh \
-            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" "${TAG_STATE}"
-          if [ "${TAG_STATE}" = absent ]; then
-            .github/scripts/confirm-hotfix-identities-absent.sh \
-              "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
-          fi
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" absent
+          .github/scripts/confirm-hotfix-identities-absent.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
 
       - name: Create exact annotated hotfix tag
         id: tag
@@ -343,15 +285,11 @@ jobs:
           EXPECTED_COMMIT: ${{ needs.validate.outputs.expected_commit }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          if [ "${{ steps.revalidate.outputs.tag_state }}" = absent ]; then
-            git config user.name "cliproxy-hotfix-release[bot]"
-            git config user.email "cliproxy-hotfix-release@users.noreply.github.com"
-            git tag -a "${TAG}" "${EXPECTED_COMMIT}" \
-              -m "Hotfix release ${TAG} after ${BASE_TAG}"
-            git push origin "refs/tags/${TAG}"
-          else
-            echo "Adopting independently verified existing tag ${TAG}."
-          fi
+          git config user.name "cliproxy-hotfix-release[bot]"
+          git config user.email "cliproxy-hotfix-release@users.noreply.github.com"
+          git tag -a "${TAG}" "${EXPECTED_COMMIT}" \
+            -m "Hotfix release ${TAG} after ${BASE_TAG}"
+          git push origin "refs/tags/${TAG}"
           REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{ print $1; exit }')"
           git fetch --quiet origin main
           if [ "${REMOTE_TAG_COMMIT}" != "${EXPECTED_COMMIT}" ] || \

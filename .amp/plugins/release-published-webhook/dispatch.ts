@@ -29,6 +29,8 @@ export interface State {
 export interface Store {
   load(): Promise<State>;
   save(s: State): Promise<void>;
+  /** Revalidates the mutable release frontier before an external side effect. */
+  recheck(): Promise<void>;
   /** Atomically and permanently claims an immutable release key. */
   claim(key: string): Promise<boolean>;
 }
@@ -154,9 +156,11 @@ export async function notifyIssue(
   thread: Thread,
   code: string,
   key: string,
+  beforeAppend: () => Promise<void> = async () => {},
 ): Promise<boolean> {
   const marker = issueMarker(code, key);
   if (await thread.hasMarker(marker)) return false;
+  await beforeAppend();
   await thread.append(
     `${marker}\nDeployment dispatch requires operator review. See sanitized workspace state and plugin logs; no release content or credentials are included.`,
   );
@@ -182,29 +186,48 @@ export async function dispatch(
       return { outcome: "blocked" as const, issue: "identity-rebind", releaseKey: key };
   const old = s.releases[key];
   if (old) {
+    const bindingsChanged =
+      s.ampEvents[ampID] !== key || s.githubDeliveries[deliveryID] !== key;
     s.ampEvents[ampID] = key;
     s.githubDeliveries[deliveryID] = key;
-    await store.save(s);
     if (
       (old.status === "thread-created" || old.status === "append-failed") &&
       old.threadID
     ) {
       const t = spawner.get(old.threadID);
+      let markerExists: boolean;
       try {
-        if (!(await t.hasMarker(`- Amp event: ${old.ampEventID}`)))
-          await t.append(prompt(r, old.ampEventID, source));
-        old.status = "dispatched";
-        old.error = undefined;
-        old.updatedAt = now();
-        await store.save(s);
-        return { outcome: "dispatched" as const, threadID: t.id };
+        markerExists = await t.hasMarker(`- Amp event: ${old.ampEventID}`);
       } catch (e) {
         old.status = "append-failed";
         old.error = "thread-append-failed";
         old.updatedAt = now();
+        await store.recheck();
         await store.save(s);
         throw new Error("thread-append-failed");
       }
+      if (!markerExists) {
+        await store.recheck();
+        try {
+          await t.append(prompt(r, old.ampEventID, source));
+        } catch (e) {
+          old.status = "append-failed";
+          old.error = "thread-append-failed";
+          old.updatedAt = now();
+          await store.save(s);
+          throw new Error("thread-append-failed");
+        }
+      }
+      old.status = "dispatched";
+      old.error = undefined;
+      old.updatedAt = now();
+      await store.recheck();
+      await store.save(s);
+      return { outcome: "dispatched" as const, threadID: t.id };
+    }
+    if (bindingsChanged) {
+      await store.recheck();
+      await store.save(s);
     }
     return {
       outcome:
@@ -216,6 +239,7 @@ export async function dispatch(
       releaseKey: key,
     };
   }
+  await store.recheck();
   if (!(await store.claim(key))) {
     return { outcome: "blocked" as const, issue: "existing-claim", releaseKey: key };
   }
@@ -256,6 +280,7 @@ export async function dispatch(
     updatedAt: now(),
   });
   await store.save(s);
+  await store.recheck();
   try {
     await t.append(prompt(r, ampID, source));
   } catch (e) {

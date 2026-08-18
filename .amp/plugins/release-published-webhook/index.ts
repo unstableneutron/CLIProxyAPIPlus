@@ -3,7 +3,13 @@ import { chmod, lstat, mkdir, open, readFile, writeFile } from "node:fs/promises
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { admitWebhook } from "./admission";
-import { dispatch, notifyIssue, parseState, type Thread } from "./dispatch";
+import {
+  dispatch,
+  notifyIssue,
+  parseState,
+  releaseKey,
+  type Thread,
+} from "./dispatch";
 import {
   GitHubHTTPError,
   REPOSITORY,
@@ -185,6 +191,7 @@ export default async function (amp: PluginAPI) {
     handler: async (event, context) =>
       exclusive(async () => {
         let verifiedKey: string | undefined;
+        let recheck: (() => Promise<void>) | undefined;
         try {
           const admitted = admitWebhook(event.headers, event.body, secret);
           if (admitted.kind === "ignored") return;
@@ -195,17 +202,18 @@ export default async function (amp: PluginAPI) {
             registry,
             context.signal,
           );
+          recheck = async () => {
+            await revalidateRelease(release, gh, registry, context.signal);
+            verifiedKey = releaseKey(release);
+          };
           const result = await dispatch(
             {
               load: async () =>
                 parseState((await amp.configuration.get())[stateKey]),
               save: (s) =>
                 amp.configuration.update({ [stateKey]: s }, "workspace"),
-              claim: async (key) => {
-                await revalidateRelease(release, gh, registry, context.signal);
-                verifiedKey = key;
-                return atomicClaim(claimsDir, key);
-              },
+              recheck,
+              claim: (key) => atomicClaim(claimsDir, key),
             },
             {
               create: async () =>
@@ -225,6 +233,7 @@ export default async function (amp: PluginAPI) {
               adapter(amp.threads.get(source as `T-${string}`)),
               result.issue,
               result.releaseKey!,
+              recheck,
             );
           }
         } catch (e) {
@@ -233,12 +242,13 @@ export default async function (amp: PluginAPI) {
             amp.logger.log(`release webhook rejected: ${e.message}`);
             return;
           }
-          if (verifiedKey) {
+          if (verifiedKey && recheck) {
             try {
               await notifyIssue(
                 adapter(amp.threads.get(source as `T-${string}`)),
                 "unexpected-verified-failure",
                 verifiedKey,
+                recheck,
               );
             } catch {}
           }

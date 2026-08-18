@@ -80,15 +80,13 @@ run_policy() {
   local expected_commit=$4
   local base_tag=$5
   local base_commit=$6
-  local existing_tag_policy=${7:-absent}
   (
     cd "${repo}"
     GITHUB_OUTPUT="${output}" "${POLICY}" \
       --tag "${tag}" \
       --expected-commit "${expected_commit}" \
       --base-tag "${base_tag}" \
-      --expected-base-commit "${base_commit}" \
-      --existing-tag-policy "${existing_tag_policy}"
+      --expected-base-commit "${base_commit}"
   )
 }
 
@@ -170,35 +168,27 @@ test_policy_accepts_only_exact_next_release() {
   rm -rf "${root}"
 }
 
-test_policy_adopts_only_exact_pushed_tag_after_side_effect_failure() {
+test_policy_rejects_existing_exact_fourth_hotfix() {
   local root
   root=$(mktemp -d)
   setup_policy_repo "${root}"
-  local repo=${root}/repo base_commit hotfix_commit output
-  base_commit=$(run_git -C "${repo}" rev-parse "${BASE_TAG}^{}")
-  hotfix_commit=$(run_git -C "${repo}" rev-parse HEAD)
-  run_git -C "${repo}" config user.name 'cliproxy-hotfix-release[bot]'
-  run_git -C "${repo}" config user.email 'cliproxy-hotfix-release@users.noreply.github.com'
-  GIT_COMMITTER_NAME='cliproxy-hotfix-release[bot]' \
-    GIT_COMMITTER_EMAIL=cliproxy-hotfix-release@users.noreply.github.com \
-    run_git -C "${repo}" tag -a "${HOTFIX_TAG}" \
-      -m "Hotfix release ${HOTFIX_TAG} after ${BASE_TAG}"
-  run_git -C "${repo}" push -q origin "refs/tags/${HOTFIX_TAG}"
-  output=${root}/recovered.out
-  run_policy \
-    "${repo}" "${output}" "${HOTFIX_TAG}" "${hotfix_commit}" \
-    "${BASE_TAG}" "${base_commit}" exact >/dev/null
-  [ "$(output_value "${output}" tag_state)" = exact ] \
-    || fail "pushed exact tag was not classified as resumable"
-
-  run_git -C "${repo}" tag -d "${HOTFIX_TAG}" >/dev/null
-  GIT_COMMITTER_NAME='cliproxy-hotfix-release[bot]' \
-    GIT_COMMITTER_EMAIL=cliproxy-hotfix-release@users.noreply.github.com \
-    run_git -C "${repo}" tag -a "${HOTFIX_TAG}" -m "wrong message"
-  run_git -C "${repo}" push -q --force origin "refs/tags/${HOTFIX_TAG}"
+  local repo=${root}/repo previous_tag=${BASE_TAG} suffix
+  for suffix in 1 2 3 4; do
+    echo "hotfix-${suffix}" > "${repo}/app.txt"
+    run_git -C "${repo}" commit -am "hotfix ${suffix}" >/dev/null
+    run_git -C "${repo}" tag -a "v7.2.131-unstableneutron.${suffix}" \
+      -m "Hotfix release v7.2.131-unstableneutron.${suffix} after ${previous_tag}"
+    previous_tag=v7.2.131-unstableneutron.${suffix}
+  done
+  run_git -C "${repo}" push -q origin +HEAD:main --tags
+  run_git -C "${repo}" fetch -q origin main:refs/remotes/origin/main
+  local fourth_commit third_commit
+  fourth_commit=$(run_git -C "${repo}" rev-parse v7.2.131-unstableneutron.4^{})
+  third_commit=$(run_git -C "${repo}" rev-parse v7.2.131-unstableneutron.3^{})
   expect_policy_failure \
-    "${repo}" "unexpected message" \
-    "${HOTFIX_TAG}" "${hotfix_commit}" "${BASE_TAG}" "${base_commit}" exact
+    "${repo}" "hotfix tag v7.2.131-unstableneutron.4 already exists" \
+    v7.2.131-unstableneutron.4 "${fourth_commit}" \
+    v7.2.131-unstableneutron.3 "${third_commit}"
   rm -rf "${root}"
 }
 
@@ -284,17 +274,33 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "Verify complete previous release chain"
   assert_contains "${WORKFLOW}" "verify-hotfix-chain.sh"
   assert_contains "${WORKFLOW}" "test-verify-hotfix-chain.sh"
-  assert_contains "${WORKFLOW}" "Classify absent or exact resumable publication state"
+  assert_contains "${WORKFLOW}" "Require absent candidate publication identities"
   assert_contains "${WORKFLOW}" ".github/scripts/inspect-hotfix-publication-state.sh"
   assert_contains "${WORKFLOW}" ".github/scripts/verify-hotfix-finalization-evidence.sh"
   assert_contains "${WORKFLOW}" ".github/scripts/confirm-hotfix-identities-absent.sh"
+  assert_not_contains "${WORKFLOW}" "--existing-tag-policy"
   assert_not_contains "${WORKFLOW}" 'if docker buildx imagetools inspect'
   assert_contains "${DOCKER_WORKFLOW}" "inspect_image_state()"
   assert_not_contains "${DOCKER_WORKFLOW}" ".github/scripts/inspect-ghcr-image-state.sh"
   assert_not_contains "${DOCKER_WORKFLOW}" '2>/dev/null)"; then'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${WORKFLOW}" 'git push origin "refs/tags/${TAG}"'
-  assert_contains "${WORKFLOW}" "Adopting independently verified existing tag"
+  assert_not_contains "${WORKFLOW}" "Adopting independently verified existing tag"
+  local absence_line push_line release_line docker_line
+  absence_line=$(grep -nF "name: Require absent candidate publication identities" \
+    "${WORKFLOW}" | head -n 1 | cut -d: -f1)
+  # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
+  push_line=$(grep -nF 'git push origin "refs/tags/${TAG}"' \
+    "${WORKFLOW}" | head -n 1 | cut -d: -f1)
+  release_line=$(grep -nF "uses: ./.github/workflows/release.yaml" \
+    "${WORKFLOW}" | head -n 1 | cut -d: -f1)
+  docker_line=$(grep -nF "uses: ./.github/workflows/docker-image.yml" \
+    "${WORKFLOW}" | head -n 1 | cut -d: -f1)
+  if [ "${absence_line}" -ge "${push_line}" ] || \
+     [ "${push_line}" -ge "${release_line}" ] || \
+     [ "${push_line}" -ge "${docker_line}" ]; then
+    fail "candidate absence policy must precede every tag, release, and GHCR mutation"
+  fi
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/release.yaml"
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/docker-image.yml"
   assert_contains "${WORKFLOW}" "verify-hotfix-release.sh"
@@ -655,7 +661,7 @@ main() {
   [ -x "${PUBLICATION_STATE_CHECK}" ] || fail "publication state checker is missing or not executable"
   [ -x "${FINALIZATION_EVIDENCE_CHECK}" ] || fail "finalization evidence checker is missing or not executable"
   test_policy_accepts_only_exact_next_release
-  test_policy_adopts_only_exact_pushed_tag_after_side_effect_failure
+  test_policy_rejects_existing_exact_fourth_hotfix
   test_policy_accepts_consecutive_chained_suffixes
   test_policy_accepts_nonzero_and_prerelease_roots
   test_workflow_contract_is_fail_closed

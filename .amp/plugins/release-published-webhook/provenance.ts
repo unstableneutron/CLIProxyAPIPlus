@@ -1918,7 +1918,7 @@ export function validateRelease(
   );
 }
 
-/** Re-sample the current mutable release frontier immediately before a claim. */
+/** Re-sample the current mutable release frontier before an external side effect. */
 export async function revalidateRelease(
   verified: VerifiedRelease,
   client: GitHubClient,
