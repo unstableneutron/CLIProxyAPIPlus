@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
+
 die() {
   echo "[upstream-release-verifier] $*" >&2
   exit 1
@@ -133,15 +137,10 @@ RELEASE_ASSETS=$(jq -c \
     select(. != "upstream-sync-receipt.json" and . != "hotfix-release-receipt.json")] |
     sort' \
   <<< "${RELEASE_JSON}")
-if ! jq -e 'index("checksums.txt") != null' <<< "${RELEASE_ASSETS}" >/dev/null; then
-  die "Release ${TAG} is missing checksums.txt"
-fi
-if ! jq -e 'any(.[]; startswith("CLIProxyAPIPlus_"))' <<< "${RELEASE_ASSETS}" >/dev/null; then
-  die "Release ${TAG} has no CLIProxyAPIPlus-branded archive"
-fi
-if jq -e 'any(.[]; startswith("CLIProxyAPI_"))' <<< "${RELEASE_ASSETS}" >/dev/null; then
-  die "Release ${TAG} contains an upstream-branded archive"
-fi
+EXPECTED_RELEASE_ASSETS=$(expected_release_assets_json "${TAG}") \
+  || die "could not derive the expected release assets for ${TAG}"
+[ "${RELEASE_ASSETS}" = "${EXPECTED_RELEASE_ASSETS}" ] \
+  || die "Release ${TAG} asset set differs from the release contract"
 
 IMAGE_INDEX=$(docker buildx imagetools inspect "${IMAGE_REF}" --format '{{json .Manifest}}')
 IMAGE_DIGEST=$(jq -r '.digest // empty' <<< "${IMAGE_INDEX}")

@@ -6,6 +6,8 @@ UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
 CHAIN_VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
 
 die() {
   echo "[hotfix-release-verifier] $*" >&2
@@ -249,11 +251,11 @@ RELEASE_ASSET_DIGESTS=$(jq -ce '
     end
   ' <<< "${RELEASE_API}") \
   || die "release assets do not have a unique SHA-256 identity"
-if [ "$(jq 'length' <<< "${RELEASE_ASSET_DIGESTS}")" -lt 2 ]; then
-  die "release must contain checksums.txt and at least one archive"
-fi
-if ! jq -e 'has("checksums.txt")' <<< "${RELEASE_ASSET_DIGESTS}" >/dev/null; then
-  die "release asset digest set is missing checksums.txt"
+EXPECTED_RELEASE_ASSETS=$(expected_release_assets_json "${TAG}") \
+  || die "could not derive the expected release assets for ${TAG}"
+if ! jq -e --argjson expected "${EXPECTED_RELEASE_ASSETS}" \
+  'keys == $expected' <<< "${RELEASE_ASSET_DIGESTS}" >/dev/null; then
+  die "release asset digest set differs from the release contract"
 fi
 
 gh release download "${TAG}" \

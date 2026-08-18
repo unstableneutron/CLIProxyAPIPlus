@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readZipBasenames } from "./zip";
+import releaseAssetContract from "../../../.github/release-asset-contract.json";
 
 export const REPOSITORY = "unstableneutron/CLIProxyAPIPlus";
 export const REPOSITORY_ID = 1247056725;
@@ -195,6 +196,38 @@ function releaseTagParts(tag: string): { prefix: string; suffix: number } {
     prefix: tag.slice(0, separator),
     suffix,
   };
+}
+
+export function isReleaseTag(tag: string): boolean {
+  try {
+    releaseTagParts(tag);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function expectedReleaseArchives(tag: string): string[] {
+  releaseTagParts(tag);
+  const contract = releaseAssetContract as unknown as JSONObject;
+  if (
+    Object.keys(contract).sort().join() !==
+      ["archive_suffixes", "schema_version"].join() ||
+    contract.schema_version !== 1 ||
+    !Array.isArray(contract.archive_suffixes) ||
+    contract.archive_suffixes.length === 0 ||
+    new Set(contract.archive_suffixes).size !== contract.archive_suffixes.length ||
+    contract.archive_suffixes.some(
+      (suffix) =>
+        typeof suffix !== "string" ||
+        !/^[a-z0-9_-]+(?:\.tar\.gz|\.zip)$/.test(suffix),
+    )
+  ) {
+    throw new RejectedDelivery("release asset contract differs");
+  }
+  return contract.archive_suffixes.map(
+    (suffix) => `CLIProxyAPIPlus_${tag.slice(1)}_${suffix}`,
+  );
 }
 
 function expectedFinalPlanFingerprint(state: UpstreamState, tag: string, commit: string): string {
@@ -677,7 +710,11 @@ async function workflowArtifact(
   return files;
 }
 
-function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAssets {
+function classifyAssets(
+  release: JSONObject,
+  tag: string,
+  allowNotReady = true,
+): ReleaseAssets {
   if (!Array.isArray(release.assets))
     throw new RejectedDelivery("release assets differ");
   const all = release.assets.map(validateAsset);
@@ -689,11 +726,11 @@ function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAsset
     "upstream-sync-receipt.json",
     "hotfix-release-receipt.json",
   ]);
+  const expectedArchiveNames = expectedReleaseArchives(tag);
+  const expectedArchives = new Set(expectedArchiveNames);
   const receipts = all.filter((asset) => receiptNames.has(asset.name));
   const checksums = all.filter((asset) => asset.name === "checksums.txt");
-  const archives = all.filter((asset) =>
-    /^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\.(?:tar\.gz|zip)$/.test(asset.name),
-  );
+  const archives = all.filter((asset) => expectedArchives.has(asset.name));
   const knownCount = receipts.length + checksums.length + archives.length;
   if (receipts.length > 1) {
     throw new RejectedDelivery("release must contain exactly one receipt");
@@ -703,7 +740,7 @@ function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAsset
   }
   if (
     checksums.length === 0 ||
-    archives.length === 0 ||
+    archives.length !== expectedArchiveNames.length ||
     receipts.length === 0
   ) {
     if (!allowNotReady)
@@ -1206,7 +1243,7 @@ async function validatePreviousUpstreamRelease(
     throw new RejectedDelivery("previous upstream state differs");
   }
 
-  const assets = classifyAssets(release, false);
+  const assets = classifyAssets(release, baseTag, false);
   await validateChecksums(client, assets, signal);
   if (
     assets.receipts.length !== 1 ||
@@ -1291,7 +1328,7 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   identity(release.author, BOT_LOGIN, BOT_ID, "Bot", "historical release author"); identity(byTag.author, BOT_LOGIN, BOT_ID, "Bot", "historical tag release author");
   const tag = await fetchAnnotatedTag(client, expected.tag, signal); if (tag.commit !== expected.commit) throw new RejectedDelivery("historical tag commit differs");
   const historicalState = await readStateAt(client, expected.commit, signal); if (!equalBytes(historicalState.bytes, stateBytes) || historicalState.state.SYNC_ID !== state.SYNC_ID || historicalState.state.PLAN_FINGERPRINT !== state.PLAN_FINGERPRINT) throw new RejectedDelivery("hotfix changed upstream state");
-  const assets = classifyAssets(release, false); await validateChecksums(client, assets, signal);
+  const assets = classifyAssets(release, expected.tag, false); await validateChecksums(client, assets, signal);
   if (assets.receipts[0].name !== "hotfix-release-receipt.json" || assets.receipts[0].id !== expected.receipt.id || assets.receipts[0].digest !== expected.receipt.digest) throw new RejectedDelivery("recorded parent receipt identity differs");
   const receiptBytes = await downloadAsset(client, assets.receipts[0], signal, MAXIMUM_METADATA_BYTES), receipt = object(parseJSON(receiptBytes, "historical receipt"), "historical receipt");
   if (receipt.receipt_type !== "hotfix-release") throw new RejectedDelivery("historical hotfix receipt type differs");
@@ -1419,7 +1456,7 @@ export async function validateRelease(
   }
 
   const currentState = await readStateAt(client, commit, signal);
-  const assets = classifyAssets(canonical);
+  const assets = classifyAssets(canonical, tag);
   await validateChecksums(client, assets, signal);
   if (assets.receipts.length === 0) {
     throw new RetryableNotReady("release receipt is not attached yet");

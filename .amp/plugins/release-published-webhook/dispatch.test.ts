@@ -109,9 +109,9 @@ function harness() {
   };
   return {
     store: {
-      load: async () => structuredClone(state),
+      load: async () => parseState(structuredClone(state)),
       save: async (s: State) => {
-        state = structuredClone(s);
+        state = parseState(structuredClone(s));
       },
       claim: async () => {
         if (claimed) return false;
@@ -180,6 +180,42 @@ describe("durable dispatch", () => {
       (await dispatch(h.store, h.spawner, r, "amp-1", gh1, tid)).outcome,
     ).toBe("dispatched");
     expect(h.counts()).toEqual({ creates: 1, appends: 1 });
+  });
+  test("prerelease-derived tags survive save, reload, and duplicate delivery", async () => {
+    const h = harness();
+    const prerelease = {
+      ...r,
+      tag: "v1.2.3-rc.1.unstableneutron.4",
+    };
+    expect(
+      (await dispatch(h.store, h.spawner, prerelease, "amp-1", gh1, tid)).outcome,
+    ).toBe("dispatched");
+    expect(parseState(h.state())).toEqual(h.state());
+    expect(
+      (await dispatch(h.store, h.spawner, prerelease, "amp-2", gh2, tid)).outcome,
+    ).toBe("duplicate");
+    expect(h.counts()).toEqual({ creates: 1, appends: 1 });
+  });
+  test("rejects an invalid release key before claim or thread side effects", async () => {
+    let loads = 0, claims = 0, creates = 0;
+    await expect(
+      dispatch(
+        {
+          load: async () => { loads++; return emptyState(); },
+          save: async () => {},
+          claim: async () => { claims++; return true; },
+        },
+        {
+          create: async () => { creates++; throw new Error("must not create"); },
+          get: () => { throw new Error("must not get"); },
+        },
+        { ...r, tag: "v1.2.3-unstableneutron.9007199254740991" },
+        "amp-1",
+        gh1,
+        tid,
+      ),
+    ).rejects.toThrow("verified release key malformed");
+    expect({ loads, claims, creates }).toEqual({ loads: 0, claims: 0, creates: 0 });
   });
   test("atomic claim permits only one concurrent create", async () => {
     let state: State = emptyState(), claimed = false, arrivals = 0;

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "archive_suffixes": [
+    "darwin_aarch64_no-plugin.tar.gz",
+    "darwin_amd64_no-plugin.tar.gz",
+    "freebsd_aarch64_no-plugin.tar.gz",
+    "freebsd_amd64_no-plugin.tar.gz",
+    "linux_aarch64_no-plugin.tar.gz",
+    "linux_amd64_no-plugin.tar.gz",
+    "windows_aarch64.zip",
+    "windows_amd64.zip"
+  ]
+}

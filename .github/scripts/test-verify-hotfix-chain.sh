@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
 ROOT_TAG=v7.2.131-unstableneutron.0
 FIRST_TAG=v7.2.131-unstableneutron.1
 SECOND_TAG=v7.2.131-unstableneutron.2
@@ -44,18 +46,48 @@ asset_json() {
     }'
 }
 
+write_archive_set() {
+  local node=$1 tag=$2 label=$3
+  local expected_assets archive digest digests='{}' first_archive=""
+  expected_assets=$(expected_release_assets_json "${tag}") \
+    || fail "could not derive expected release assets for ${tag}"
+  : > "${node}/checksums.txt"
+  while IFS= read -r archive; do
+    [ "${archive}" != checksums.txt ] || continue
+    [ -n "${first_archive}" ] || first_archive=${archive}
+    printf '%s archive for %s\n' "${label}" "${archive}" > "${node}/${archive}"
+    digest=$(sha256_digest "${node}/${archive}")
+    printf '%s  %s\n' "${digest#sha256:}" "${archive}" >> "${node}/checksums.txt"
+    digests=$(jq -c --arg name "${archive}" --arg digest "${digest}" \
+      '. + {($name): $digest}' <<< "${digests}")
+  done < <(jq -r '.[]' <<< "${expected_assets}")
+  digest=$(sha256_digest "${node}/checksums.txt")
+  jq -c --arg digest "${digest}" '. + {"checksums.txt": $digest}' \
+    <<< "${digests}" > "${node}/release-asset-digests.json"
+  printf '%s\n' "${expected_assets}" > "${node}/release-asset-names.json"
+  ln -s "${first_archive}" "${node}/archive"
+}
+
 write_release() {
   local root=$1 tag=$2 release_id=$3 archive_id=$4 checksum_id=$5 receipt_id=$6 receipt_name=$7
-  local node="${root}/fixtures/${tag}" archive_name
-  archive_name=$(readlink "${node}/archive")
+  local node="${root}/fixtures/${tag}" archive_name asset_id assets='[]' index=0
+  while IFS= read -r archive_name; do
+    [ "${archive_name}" != checksums.txt ] || continue
+    asset_id=$((archive_id + index * 1000))
+    assets=$(jq -c --argjson asset "$(asset_json "${asset_id}" "${archive_name}" "${node}/${archive_name}")" \
+      '. + [$asset]' <<< "${assets}")
+    index=$((index + 1))
+  done < <(jq -r '.[]' "${node}/release-asset-names.json")
+  assets=$(jq -c \
+    --argjson checksum "$(asset_json "${checksum_id}" checksums.txt "${node}/checksums.txt")" \
+    --argjson receipt "$(asset_json "${receipt_id}" "${receipt_name}" "${node}/${receipt_name}")" \
+    '. + [$checksum, $receipt]' <<< "${assets}")
   jq -n \
     --argjson id "${release_id}" \
     --arg tag "${tag}" \
     --arg url "https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/${tag}" \
     --arg assets_url "https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/${release_id}/assets" \
-    --argjson archive "$(asset_json "${archive_id}" "${archive_name}" "${node}/${archive_name}")" \
-    --argjson checksum "$(asset_json "${checksum_id}" checksums.txt "${node}/checksums.txt")" \
-    --argjson receipt "$(asset_json "${receipt_id}" "${receipt_name}" "${node}/${receipt_name}")" \
+    --argjson assets "${assets}" \
     '{
       id: $id,
       tag_name: $tag,
@@ -66,7 +98,7 @@ write_release() {
       prerelease: false,
       target_commitish: "main",
       author: {login: "github-actions[bot]", id: 41898282, type: "Bot"},
-      assets: [$checksum, $archive, $receipt]
+      assets: $assets
     }' > "${node}/release.json"
 }
 
@@ -124,7 +156,7 @@ PY
 write_root_fixture() {
   local root=$1 commit=$2
   local node="${root}/fixtures/${ROOT_TAG}"
-  local archive_name="CLIProxyAPIPlus_${ROOT_TAG#v}_linux_amd64_no-plugin.tar.gz" final_fingerprint
+  local final_fingerprint
   final_fingerprint=$(
     printf '%s\n' \
       "base_fork_commit=${commit}" \
@@ -139,17 +171,13 @@ write_root_fixture() {
       | git hash-object --stdin
   )
   mkdir -p "${node}"
-  printf 'root archive\n' > "${node}/archive"
-  printf '%s  %s\n' "$(sha256sum "${node}/archive" | awk '{ print $1 }')" "${archive_name}" \
-    > "${node}/checksums.txt"
-  mv "${node}/archive" "${node}/${archive_name}"
-  ln -s "${archive_name}" "${node}/archive"
+  write_archive_set "${node}" "${ROOT_TAG}" root
   jq -n \
     --arg sync_id "${SYNC_ID}" \
     --arg fingerprint "${FINGERPRINT}" \
     --arg commit "${commit}" \
     --arg tag "${ROOT_TAG}" \
-    --arg archive "${archive_name}" \
+    --argjson release_assets "$(cat "${node}/release-asset-names.json")" \
     --arg image "${IMAGE}:${ROOT_TAG}" \
     --arg digest "sha256:$(printf 'a%.0s' {1..64})" '
       {
@@ -160,7 +188,7 @@ write_root_fixture() {
         tag: $tag,
         tag_commit: $commit,
         release_url: ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + $tag),
-        release_assets: [$archive, "checksums.txt"] | sort,
+        release_assets: $release_assets,
         image: $image,
         image_digest: $digest,
         platforms: ["linux/amd64", "linux/arm64"],
@@ -286,18 +314,11 @@ EOF
 write_first_fixture() {
   local root=$1 commit=$2 root_commit=$3
   local node="${root}/fixtures/${FIRST_TAG}"
-  local archive_name="CLIProxyAPIPlus_${FIRST_TAG#v}_linux_amd64_no-plugin.tar.gz"
   mkdir -p "${node}"
-  printf 'first archive\n' > "${node}/archive"
-  printf '%s  %s\n' "$(sha256sum "${node}/archive" | awk '{ print $1 }')" "${archive_name}" \
-    > "${node}/checksums.txt"
-  mv "${node}/archive" "${node}/${archive_name}"
-  ln -s "${archive_name}" "${node}/archive"
+  write_archive_set "${node}" "${FIRST_TAG}" first
   write_final_plan "${root}" "${commit}"
-  local state_digest archive_digest checksums_digest
+  local state_digest
   state_digest=$(sha256sum "${root}/repo/.ccs-fork-upstream.env" | awk '{ print $1 }')
-  archive_digest=$(sha256_digest "${node}/archive")
-  checksums_digest=$(sha256_digest "${node}/checksums.txt")
   jq -n \
     --arg sync_id "${SYNC_ID}" \
     --arg fingerprint "${FINGERPRINT}" \
@@ -305,9 +326,8 @@ write_first_fixture() {
     --arg root_commit "${root_commit}" \
     --arg tag "${FIRST_TAG}" \
     --arg root_tag "${ROOT_TAG}" \
-    --arg archive "${archive_name}" \
-    --arg archive_digest "${archive_digest}" \
-    --arg checksums_digest "${checksums_digest}" \
+    --argjson release_assets "$(cat "${node}/release-asset-names.json")" \
+    --argjson release_asset_digests "$(cat "${node}/release-asset-digests.json")" \
     --arg state_digest "${state_digest}" \
     --arg image "${IMAGE}:${FIRST_TAG}" \
     --arg digest "sha256:$(printf 'a%.0s' {1..64})" '
@@ -319,7 +339,7 @@ write_first_fixture() {
         tag: $tag,
         tag_commit: $commit,
         release_url: ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + $tag),
-        release_assets: [$archive, "checksums.txt"] | sort,
+        release_assets: $release_assets,
         image: $image,
         image_digest: $digest,
         platforms: ["linux/amd64", "linux/arm64"],
@@ -332,7 +352,7 @@ write_first_fixture() {
         hotfix_schema_version: 1,
         previous_release: {tag: $root_tag, commit: $root_commit},
         upstream_state: {sync_id: $sync_id, plan_fingerprint: $fingerprint, sha256: $state_digest},
-        release_asset_digests: {($archive): $archive_digest, "checksums.txt": $checksums_digest},
+        release_asset_digests: $release_asset_digests,
         release_workflow: {
           path: ".github/workflows/hotfix-release.yml",
           ref: "unstableneutron/CLIProxyAPIPlus/.github/workflows/hotfix-release.yml@refs/heads/main",
@@ -690,6 +710,13 @@ test_rejects_historical_receipt_and_planner_drift() {
 
   root=$(mktemp -d); EXTRA_STATE_LINE=EXTRA_STATE_KEY=unexpected setup_fixture "${root}"
   expect_second_failure "${root}" "state schema differs"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/release.json"
+  jq 'del(.assets[] | select(.name | endswith("_windows_amd64.zip")))' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "asset set differs from the release contract"
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"

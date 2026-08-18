@@ -356,21 +356,69 @@ EOF
   chmod +x "${gh}" "${docker}"
   GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=absent \
     PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
-      test owner/repository ghcr.io/example/image absent >/dev/null
+      "${HOTFIX_TAG}" owner/repository ghcr.io/example/image absent >/dev/null
   [ "$(output_value "${output}" publication_state)" = absent ] \
     || fail "fully absent publication was not classified as absent"
 
   : > "${output}"
   GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=partial \
     PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
-      test owner/repository ghcr.io/example/image exact >/dev/null
+      "${HOTFIX_TAG}" owner/repository ghcr.io/example/image exact >/dev/null
   [ "$(output_value "${output}" publication_state)" = publishing ] \
     || fail "exact-tag partial architecture publication was not resumable"
   if GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=partial \
     PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
-      test owner/repository ghcr.io/example/image absent >/dev/null 2>&1; then
+      "${HOTFIX_TAG}" owner/repository ghcr.io/example/image absent >/dev/null 2>&1; then
     fail "publication state accepted image identities without an exact tag"
   fi
+  rm -rf "${root}"
+}
+
+test_publication_state_rejects_incomplete_existing_release() {
+  local root gh docker release output
+  root=$(mktemp -d)
+  gh=${root}/gh
+  docker=${root}/docker
+  release=${root}/release.json
+  output=${root}/output
+  jq -n \
+    --arg tag "${HOTFIX_TAG}" \
+    --arg repo owner/repository '
+      {
+        tag_name: $tag,
+        draft: false,
+        prerelease: false,
+        target_commitish: "main",
+        html_url: ("https://github.com/" + $repo + "/releases/tag/" + $tag),
+        author: {login: "github-actions[bot]", id: 41898282},
+        assets: [{
+          id: 1,
+          name: "checksums.txt",
+          size: 1,
+          state: "uploaded",
+          url: ("https://api.github.com/repos/" + $repo + "/releases/assets/1"),
+          uploader: {login: "github-actions[bot]", id: 41898282, type: "Bot"},
+          digest: ("sha256:" + ("a" * 64))
+        }]
+      }
+    ' > "${release}"
+  cat > "${gh}" <<'EOF'
+#!/usr/bin/env bash
+cat "${PUBLICATION_RELEASE_JSON:?}"
+EOF
+  cat > "${docker}" <<'EOF'
+#!/usr/bin/env bash
+echo "docker must not run for an incomplete release" >&2
+exit 99
+EOF
+  chmod +x "${gh}" "${docker}"
+  if GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_JSON=${release} \
+    PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
+      "${HOTFIX_TAG}" owner/repository ghcr.io/example/image exact \
+      > "${root}/failure.log" 2>&1; then
+    fail "publication state accepted an incomplete existing release"
+  fi
+  assert_contains "${root}/failure.log" "incomplete or has a conflicting identity"
   rm -rf "${root}"
 }
 
@@ -604,6 +652,7 @@ main() {
   test_policy_accepts_nonzero_and_prerelease_roots
   test_workflow_contract_is_fail_closed
   test_publication_state_requires_correlated_identities
+  test_publication_state_rejects_incomplete_existing_release
   test_finalization_recovers_exact_prior_attempt_evidence
   test_ghcr_image_state_is_fail_closed
   test_candidate_identity_absence_is_fail_closed

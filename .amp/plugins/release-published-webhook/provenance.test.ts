@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import releaseAssetContract from "../../../.github/release-asset-contract.json";
 import {
   BOT_ID,
   BOT_LOGIN,
@@ -281,6 +282,43 @@ function makeAsset(
   };
 }
 
+function makeReleaseArchiveAssets(
+  firstID: number,
+  tag: string,
+  label: string,
+  assetBytes: Map<string, Uint8Array>,
+) {
+  const archives = releaseAssetContract.archive_suffixes.map((suffix, index) => {
+    const name = `CLIProxyAPIPlus_${tag.slice(1)}_${suffix}`;
+    return makeAsset(
+      firstID + index,
+      name,
+      bytes(`${label}-${suffix}`),
+      assetBytes,
+    );
+  });
+  const checksumContent = archives
+    .map((asset) => `${asset.digest.slice(7)}  ${asset.name}\n`)
+    .join("");
+  const checksum = makeAsset(
+    firstID + archives.length,
+    "checksums.txt",
+    bytes(checksumContent),
+    assetBytes,
+  );
+  return {
+    archives,
+    archive: archives.find((asset) =>
+      asset.name.endsWith("_linux_amd64_no-plugin.tar.gz"),
+    )!,
+    checksum,
+    names: [...archives.map((asset) => asset.name), checksum.name].sort(),
+    digests: Object.fromEntries(
+      [...archives, checksum].map((asset) => [asset.name, asset.digest]),
+    ),
+  };
+}
+
 function stateFile(
   expectedTag: string,
   plusTag = "v7.2.127-3",
@@ -339,16 +377,14 @@ function releaseFixture(
       if (reference !== "latest") registry.manifests.set(reference, manifest);
     }
   }
-  const archiveName = `CLIProxyAPIPlus_${currentTag.slice(1)}_linux_amd64_no-plugin.tar.gz`;
-  const archiveContent = bytes(`archive-${kind}`);
-  const archiveAsset = makeAsset(11, archiveName, archiveContent, assetBytes);
-  const checksumContent = `${rawSHA256(archiveContent)}  ${archiveName}\n`;
-  const checksumAsset = makeAsset(
-    12,
-    "checksums.txt",
-    bytes(checksumContent),
+  const releaseArchiveAssets = makeReleaseArchiveAssets(
+    11,
+    currentTag,
+    `archive-${kind}`,
     assetBytes,
   );
+  const archiveAsset = releaseArchiveAssets.archive;
+  const checksumAsset = releaseArchiveAssets.checksum;
   const releaseURL = `https://github.com/${REPOSITORY}/releases/tag/${currentTag}`;
   const architectureImages = structuredClone(registry.architectureImages);
   const receipt: Record<string, any> = {
@@ -359,7 +395,7 @@ function releaseFixture(
     tag: currentTag,
     tag_commit: currentCommit,
     release_url: releaseURL,
-    release_assets: [archiveName, "checksums.txt"].sort(),
+    release_assets: releaseArchiveAssets.names,
     image: `${IMAGE}:${currentTag}`,
     image_digest: registry.manifests.get(currentTag)!.digest,
     platforms: ["linux/amd64", "linux/arm64"],
@@ -377,10 +413,7 @@ function releaseFixture(
         plan_fingerprint: receipt.plan_fingerprint,
         sha256: rawSHA256(stateBytes),
       },
-      release_asset_digests: {
-        [archiveName]: archiveAsset.digest,
-        "checksums.txt": checksumAsset.digest,
-      },
+      release_asset_digests: releaseArchiveAssets.digests,
       release_workflow: {
         path: ".github/workflows/hotfix-release.yml",
         ref: `${REPOSITORY}/.github/workflows/hotfix-release.yml@refs/heads/main`,
@@ -394,7 +427,7 @@ function releaseFixture(
     ? "hotfix-release-receipt.json"
     : "upstream-sync-receipt.json";
   const receiptAsset = makeAsset(
-    13,
+    20,
     receiptName,
     bytes(JSON.stringify(receipt)),
     assetBytes,
@@ -409,7 +442,7 @@ function releaseFixture(
     prerelease: false,
     target_commitish: "main",
     author: structuredClone(bot),
-    assets: [checksumAsset, archiveAsset, receiptAsset],
+    assets: [...releaseArchiveAssets.archives, checksumAsset, receiptAsset],
   };
   const payload = {
     action: "published",
@@ -505,20 +538,13 @@ function releaseFixture(
       `/repos/${REPOSITORY}/compare/${baseCommit}...${currentCommit}`,
       { status: "ahead" },
     );
-    const baseArchiveName = `CLIProxyAPIPlus_${baseTag.slice(1)}_linux_amd64_no-plugin.tar.gz`;
-    const baseArchiveContent = bytes("base-archive");
-    const baseArchive = makeAsset(
+    const baseArchiveAssets = makeReleaseArchiveAssets(
       21,
-      baseArchiveName,
-      baseArchiveContent,
+      baseTag,
+      "base-archive",
       assetBytes,
     );
-    const baseChecksum = makeAsset(
-      22,
-      "checksums.txt",
-      bytes(`${rawSHA256(baseArchiveContent)}  ${baseArchiveName}\n`),
-      assetBytes,
-    );
+    const baseChecksum = baseArchiveAssets.checksum;
     const baseURL = `https://github.com/${REPOSITORY}/releases/tag/${baseTag}`;
     baseReceipt = {
       schema_version: 2,
@@ -528,7 +554,7 @@ function releaseFixture(
       tag: baseTag,
       tag_commit: baseCommit,
       release_url: baseURL,
-      release_assets: [baseArchiveName, "checksums.txt"].sort(),
+      release_assets: baseArchiveAssets.names,
       image: `${IMAGE}:${baseTag}`,
       image_digest: baseRegistry.manifests.get(baseTag)!.digest,
       platforms: ["linux/amd64", "linux/arm64"],
@@ -536,7 +562,7 @@ function releaseFixture(
       architecture_images: structuredClone(baseRegistry.architectureImages),
     };
     baseReceiptAsset = makeAsset(
-      23,
+      30,
       "upstream-sync-receipt.json",
       bytes(JSON.stringify(baseReceipt)),
       assetBytes,
@@ -551,7 +577,7 @@ function releaseFixture(
       prerelease: false,
       target_commitish: "main",
       author: structuredClone(bot),
-      assets: [baseChecksum, baseArchive, baseReceiptAsset],
+      assets: [...baseArchiveAssets.archives, baseChecksum, baseReceiptAsset],
     };
     values.set(
       `/repos/${REPOSITORY}/releases/tags/${baseTag}`,
@@ -777,20 +803,14 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
           fixture.baseReceiptAsset!,
           800,
         );
-  const archiveName = `CLIProxyAPIPlus_${tag.slice(1)}_linux_amd64_no-plugin.tar.gz`;
-  const archiveContent = bytes(`archive-hotfix-${suffix}`);
-  const archiveAsset = makeAsset(
+  const releaseArchiveAssets = makeReleaseArchiveAssets(
     assetBase + 1,
-    archiveName,
-    archiveContent,
+    tag,
+    `archive-hotfix-${suffix}`,
     fixture.assetBytes,
   );
-  const checksumAsset = makeAsset(
-    assetBase + 2,
-    "checksums.txt",
-    bytes(`${rawSHA256(archiveContent)}  ${archiveName}\n`),
-    fixture.assetBytes,
-  );
+  const archiveAsset = releaseArchiveAssets.archive;
+  const checksumAsset = releaseArchiveAssets.checksum;
   const releaseURL = `https://github.com/${REPOSITORY}/releases/tag/${tag}`;
   const receipt: Record<string, any> = {
     schema_version: 2,
@@ -800,7 +820,7 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
     tag,
     tag_commit: commit,
     release_url: releaseURL,
-    release_assets: [archiveName, "checksums.txt"].sort(),
+    release_assets: releaseArchiveAssets.names,
     image: `${IMAGE}:${tag}`,
     image_digest: registry.manifests.get(tag)!.digest,
     platforms: ["linux/amd64", "linux/arm64"],
@@ -811,10 +831,7 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
     previous_release: previous,
     accepted_upstream_root: root,
     upstream_state: structuredClone(fixture.receipt.upstream_state),
-    release_asset_digests: {
-      [archiveName]: archiveAsset.digest,
-      "checksums.txt": checksumAsset.digest,
-    },
+    release_asset_digests: releaseArchiveAssets.digests,
     release_workflow: {
       path: ".github/workflows/hotfix-release.yml",
       ref: `${REPOSITORY}/.github/workflows/hotfix-release.yml@refs/heads/main`,
@@ -824,7 +841,7 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
     },
   };
   const receiptAsset = makeAsset(
-    assetBase + 3,
+    assetBase + 10,
     "hotfix-release-receipt.json",
     bytes(JSON.stringify(receipt)),
     fixture.assetBytes,
@@ -839,7 +856,7 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
     prerelease: false,
     target_commitish: "main",
     author: structuredClone(bot),
-    assets: [checksumAsset, archiveAsset, receiptAsset],
+    assets: [...releaseArchiveAssets.archives, checksumAsset, receiptAsset],
   };
   fixture.values.set(`/repos/${REPOSITORY}/releases/${releaseID}`, canonical);
   fixture.values.set(
@@ -1309,10 +1326,35 @@ describe("upstream release provenance", () => {
     await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
   });
 
+  test("keeps a fresh incomplete archive matrix retryable", async () => {
+    const fixture = releaseFixture();
+    fixture.canonical.assets = fixture.canonical.assets.filter(
+      (asset: any) => asset.name !== fixture.archiveAsset.name,
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
+  test("rejects renamed release archives", async () => {
+    const fixture = releaseFixture();
+    fixture.archiveAsset.name = fixture.archiveAsset.name.replace(
+      "linux_amd64",
+      "linux_x86_64",
+    );
+    await expect(validate(fixture)).rejects.toThrow("asset set differs");
+  });
+
   test("historical previous-release missing assets are permanent", async () => {
     const fixture = releaseFixture("hotfix");
     fixture.baseRelease!.assets = fixture.baseRelease!.assets.filter(
       (asset: any) => asset.name !== "upstream-sync-receipt.json",
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
+  });
+
+  test("historical previous-release incomplete archive matrices are permanent", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.baseRelease!.assets = fixture.baseRelease!.assets.filter(
+      (asset: any) => !asset.name.endsWith("_windows_amd64.zip"),
     );
     await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
   });

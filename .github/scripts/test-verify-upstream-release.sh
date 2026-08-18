@@ -205,8 +205,36 @@ test_rejects_wrong_release_branding() {
   jq '.assets = [{"name":"checksums.txt"},{"name":"CLIProxyAPI_v7.2.67_linux_amd64.tar.gz"}]' \
     "${FIXTURES}/release.json" > "${root}/wrong-brand.json"
   expect_failure \
-    "${root}" "${root}/receipt.json" "CLIProxyAPIPlus-branded" \
+    "${root}" "${root}/receipt.json" "asset set differs from the release contract" \
     false "${COMMIT}" "${COMMIT}" "${root}/wrong-brand.json"
+  rm -rf "${root}"
+}
+
+test_rejects_incomplete_or_conflicting_release_asset_matrix() {
+  local root mutation
+  root=$(mktemp -d)
+  make_stubs "${root}"
+  for mutation in missing extra duplicate renamed; do
+    case "${mutation}" in
+      missing)
+        jq 'del(.assets[1])' "${FIXTURES}/release.json" > "${root}/${mutation}.json"
+        ;;
+      extra)
+        jq '.assets += [{name: "notes.txt"}]' "${FIXTURES}/release.json" > "${root}/${mutation}.json"
+        ;;
+      duplicate)
+        jq '.assets += [.assets[1]]' "${FIXTURES}/release.json" > "${root}/${mutation}.json"
+        ;;
+      renamed)
+        jq '(.assets[1].name) |= sub("darwin_aarch64"; "darwin_arm64")' \
+          "${FIXTURES}/release.json" > "${root}/${mutation}.json"
+        ;;
+    esac
+    expect_failure \
+      "${root}" "${root}/${mutation}-receipt.json" \
+      "asset set differs from the release contract" \
+      false "${COMMIT}" "${COMMIT}" "${root}/${mutation}.json"
+  done
   rm -rf "${root}"
 }
 
@@ -252,6 +280,7 @@ main() {
   test_rejects_main_or_tag_mismatch
   test_allows_verified_main_descendant_when_requested
   test_rejects_wrong_release_branding
+  test_rejects_incomplete_or_conflicting_release_asset_matrix
   test_rejects_missing_required_platforms
   test_rejects_mismatched_architecture_tag
   test_latest_parity_is_conditional

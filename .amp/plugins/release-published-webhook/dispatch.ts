@@ -1,9 +1,9 @@
 import type { VerifiedRelease } from "./provenance";
-import { REPOSITORY_ID } from "./provenance";
+import { isReleaseTag, REPOSITORY_ID } from "./provenance";
 import { createHash } from "node:crypto";
 const THREAD_ID = /^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GITHUB_DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const RELEASE_KEY = new RegExp(`^${REPOSITORY_ID}:[1-9][0-9]*:v[0-9]+\\.[0-9]+\\.[0-9]+-unstableneutron\\.[0-9]+:[0-9a-f]{40}:sha256:[0-9a-f]{64}$`);
+const RELEASE_KEY = new RegExp(`^${REPOSITORY_ID}:[1-9][0-9]*:([^:]+):[0-9a-f]{40}:sha256:[0-9a-f]{64}$`);
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export type Status =
   | "claimed"
@@ -40,6 +40,10 @@ export interface Thread {
 export interface Spawner {
   create(): Promise<Thread>;
   get(id: string): Thread;
+}
+function validReleaseKey(key: string): boolean {
+  const match = RELEASE_KEY.exec(key);
+  return match !== null && isReleaseTag(match[1]);
 }
 export const emptyState = (): State => ({
   schemaVersion: 1,
@@ -79,7 +83,7 @@ export function parseState(v: unknown): State {
     if (
       keys.some((k) => !allowed.includes(k)) ||
       required.some((k) => !keys.includes(k)) ||
-      !RELEASE_KEY.test(key) ||
+      !validReleaseKey(key) ||
       value.key !== key ||
       typeof value.ampEventID !== "string" ||
       !value.ampEventID ||
@@ -168,6 +172,7 @@ export async function dispatch(
   now = () => new Date().toISOString(),
 ) {
   const key = releaseKey(r);
+  if (!validReleaseKey(key)) throw new Error("verified release key malformed");
   let s = await store.load();
   for (const [map, id] of [
     [s.ampEvents, ampID],

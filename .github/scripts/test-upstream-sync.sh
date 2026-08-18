@@ -893,6 +893,9 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${release}" "expected_commit:"
   assert_contains "${release}" "release_url:"
   assert_contains "${release}" "asset_names_json:"
+  assert_contains "${release}" "source .github/scripts/release-assets.sh"
+  # shellcheck disable=SC2016 # Workflow jq expression is asserted literally.
+  assert_contains "${release}" '== $expected_assets'
   assert_contains "${release}" "release_commit:"
   assert_contains "${release}" "goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94"
   assert_contains "${release}" "version: v2.17.0"

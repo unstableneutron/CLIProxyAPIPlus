@@ -47,6 +47,10 @@ the accepted upstream root. Verification walks the
 chain recursively, checks every annotated tag, commit ancestry, stable release,
 asset/checksum set, receipt byte identity, workflow artifact, unchanged upstream
 state, and architecture image, and rejects cycles or chains over 32 hotfix nodes.
+Every release must contain the exact archive matrix declared by
+`.github/release-asset-contract.json`; a Go regression test derives that matrix
+from `.goreleaser.yml`, while publication, recursive verification, and webhook
+admission consume the same contract and reject partial, renamed, or extra assets.
 Gaps, stale main, reused identities, missing historical evidence, drafts,
 prereleases, and mismatches stop publication fail closed.
 

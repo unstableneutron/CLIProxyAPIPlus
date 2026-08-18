@@ -15,6 +15,10 @@ REPOSITORY=$2
 IMAGE=$3
 TAG_STATE=$4
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
+EXPECTED_ASSETS=$(expected_release_assets_json "${TAG}") \
+  || die "could not derive the expected release assets for ${TAG}"
 
 case "${TAG_STATE}" in
   absent|exact) ;;
@@ -31,22 +35,17 @@ if gh api --include "/repos/${REPOSITORY}/releases/tags/${TAG}" > "${RELEASE_RES
   gh api "/repos/${REPOSITORY}/releases/tags/${TAG}" > "${RELEASE}"
   jq -e \
     --arg tag "${TAG}" \
-    --arg repo "${REPOSITORY}" '
+    --arg repo "${REPOSITORY}" \
+    --argjson expected_assets "${EXPECTED_ASSETS}" '
       .tag_name == $tag and .draft == false and .prerelease == false and
       .target_commitish == "main" and
       .html_url == ("https://github.com/" + $repo + "/releases/tag/" + $tag) and
       .author.login == "github-actions[bot]" and .author.id == 41898282 and
       (.assets | type) == "array" and
       ([.assets[].name] | length) == ([.assets[].name] | unique | length) and
-      ([.assets[] | select(.name == "checksums.txt")] | length) == 1 and
-      ([.assets[] | select(.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$"))] | length) > 0 and
       ([.assets[] | select(.name == "hotfix-release-receipt.json")] | length) <= 1 and
       ([.assets[] | select(.name == "upstream-sync-receipt.json")] | length) == 0 and
-      ([.assets[] | select(
-        .name != "checksums.txt" and
-        .name != "hotfix-release-receipt.json" and
-        (.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$") | not)
-      )] | length) == 0 and
+      ([.assets[].name | select(. != "hotfix-release-receipt.json")] | sort) == $expected_assets and
       all(.assets[];
         (.id | type) == "number" and (.id | floor) == .id and .id > 0 and .id <= 9007199254740991 and
         (.size | type) == "number" and (.size | floor) == .size and .size > 0 and .size <= 2000000000 and

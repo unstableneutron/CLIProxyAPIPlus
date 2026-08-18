@@ -6,6 +6,8 @@ UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
 ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
 MAX_HOTFIX_DEPTH=32
 REPOSITORY_ID=1247056725
 OWNER_LOGIN=unstableneutron
@@ -311,23 +313,18 @@ verify_release_and_link() {
     <(jq -S '{id,tag_name,html_url,assets_url,published_at,draft,prerelease,target_commitish,author,assets}' "${canonical_file}") >/dev/null \
     || die "canonical release ${tag} differs from its tag lookup"
 
-  local receipt_count unknown_count receipt_id receipt_digest
+  local receipt_count receipt_kind_count receipt_id receipt_digest
   receipt_count=$(jq --arg name "${receipt_name}" '[.assets[] | select(.name == $name)] | length' "${release_file}")
-  unknown_count=$(jq '[.assets[] | select(
-      .name != "checksums.txt" and
-      .name != "upstream-sync-receipt.json" and
-      .name != "hotfix-release-receipt.json" and
-      (.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$") | not)
-    )] | length' "${release_file}")
-  if [ "${receipt_count}" -ne 1 ] || [ "${unknown_count}" -ne 0 ]; then
+  receipt_kind_count=$(jq '[.assets[] | select(.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json")] | length' "${release_file}")
+  if [ "${receipt_count}" -ne 1 ] || [ "${receipt_kind_count}" -ne 1 ]; then
     die "release ${tag} has an incomplete or unexpected asset set"
   fi
-  [ "$(jq '[.assets[] | select(.name == "checksums.txt")] | length' "${release_file}")" -eq 1 ] \
-    || die "release ${tag} must contain exactly one checksums.txt"
-  [ "$(jq '[.assets[] | select(.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$"))] | length' "${release_file}")" -gt 0 ] \
-    || die "release ${tag} has no archives"
-  [ "$(jq '[.assets[] | select(.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json")] | length' "${release_file}")" -eq 1 ] \
-    || die "release ${tag} has a wrong or duplicate receipt"
+  local expected_assets actual_assets
+  expected_assets=$(expected_release_assets_json "${tag}") \
+    || die "could not derive the expected release assets for ${tag}"
+  actual_assets=$(jq -c '[.assets[].name | select(. != "upstream-sync-receipt.json" and . != "hotfix-release-receipt.json")] | sort' "${release_file}")
+  [ "${actual_assets}" = "${expected_assets}" ] \
+    || die "release ${tag} asset set differs from the release contract"
   jq -e \
     --arg repo "${GITHUB_REPOSITORY}" \
     --arg login "${BOT_LOGIN}" \
@@ -389,7 +386,7 @@ verify_release_and_link() {
     [ "${api_digest}" = "${expected_digest}" ] \
       || die "checksum for ${asset_name} does not match its release asset digest"
   done < "${checksum_file}"
-  [ "$(wc -l < "${seen_checksums}" | tr -d ' ')" -eq "$(jq '[.assets[] | select(.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$"))] | length' "${release_file}")" ] \
+  [ "$(wc -l < "${seen_checksums}" | tr -d ' ')" -eq "$(jq 'length - 1' <<< "${expected_assets}")" ] \
     || die "checksums.txt for ${tag} does not cover every archive"
 
   local receipt_file="${node_dir}/${receipt_name}" run_id run_attempt evidence_attempt run_head

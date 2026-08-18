@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="${SCRIPT_DIR}/verify-hotfix-release.sh"
 FIXTURES="${SCRIPT_DIR}/testdata/upstream-release"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
 BASE_TAG=v7.2.131-unstableneutron.0
 TAG=v7.2.131-unstableneutron.1
 ORIGINAL_SOURCE_TAG=v7.2.131
@@ -52,30 +54,37 @@ EOF
 
 make_fixtures() {
   local root=$1
-  local archive="CLIProxyAPIPlus_${TAG#v}_linux_amd64_no-plugin.tar.gz"
-  printf 'archive fixture\n' > "${root}/${archive}"
-  local archive_sha
-  archive_sha=$(sha256sum "${root}/${archive}" | awk '{ print $1 }')
-  printf '%s  %s\n' "${archive_sha}" "${archive}" > "${root}/checksums.txt"
+  local expected_assets archive archive_sha assets='[]'
+  expected_assets=$(expected_release_assets_json "${TAG}") \
+    || fail "could not derive expected release assets"
+  : > "${root}/checksums.txt"
+  while IFS= read -r archive; do
+    [ "${archive}" != checksums.txt ] || continue
+    printf 'archive fixture for %s\n' "${archive}" > "${root}/${archive}"
+    archive_sha=$(sha256sum "${root}/${archive}" | awk '{ print $1 }')
+    printf '%s  %s\n' "${archive_sha}" "${archive}" >> "${root}/checksums.txt"
+    assets=$(jq -c \
+      --arg name "${archive}" \
+      --arg digest "sha256:${archive_sha}" \
+      '. + [{name: $name, digest: $digest}]' <<< "${assets}")
+  done < <(jq -r '.[]' <<< "${expected_assets}")
   local checksums_sha
   checksums_sha=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
+  assets=$(jq -c \
+    --arg digest "sha256:${checksums_sha}" \
+    '. + [{name: "checksums.txt", digest: $digest}] | sort_by(.name)' <<< "${assets}")
   jq -n \
     --arg tag "${TAG}" \
-    --arg archive "${archive}" \
+    --argjson assets "${assets}" \
     '{
       url: ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + $tag),
       isDraft: false,
       isPrerelease: false,
-      assets: [{name: "checksums.txt"}, {name: $archive}]
+      assets: [$assets[].name | {name: .}]
     }' > "${root}/release.json"
   jq -n \
-    --arg archive "${archive}" \
-    --arg archive_digest "sha256:${archive_sha}" \
-    --arg checksums_digest "sha256:${checksums_sha}" \
-    '{assets: [
-      {name: "checksums.txt", digest: $checksums_digest},
-      {name: $archive, digest: $archive_digest}
-    ]}' > "${root}/release-api.json"
+    --argjson assets "${assets}" \
+    '{assets: $assets}' > "${root}/release-api.json"
 }
 
 make_stubs() {
