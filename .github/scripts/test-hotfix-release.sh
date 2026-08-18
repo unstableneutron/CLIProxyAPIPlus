@@ -324,9 +324,17 @@ test_workflow_contract_is_fail_closed() {
   # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
   assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" next_fork_tag'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
-  assert_contains "${RECOVERY_WORKFLOW}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
+  assert_contains "${RECOVERY_WORKFLOW}" "Reject Unsafe Release Recovery"
+  assert_contains "${RECOVERY_WORKFLOW}" "contents: read"
+  assert_contains "${RECOVERY_WORKFLOW}" "publish a new immutable identity instead."
+  assert_not_contains "${RECOVERY_WORKFLOW}" "contents: write"
+  assert_not_contains "${RECOVERY_WORKFLOW}" "packages: write"
+  assert_not_contains "${RECOVERY_WORKFLOW}" "gh release"
+  assert_not_contains "${RECOVERY_WORKFLOW}" "docker"
+  assert_not_contains "${RECOVERY_WORKFLOW}" "--clobber"
   assert_contains "${UPSTREAM_WORKFLOW}" "hotfix-release-receipt.json"
   assert_contains "${UPSTREAM_WORKFLOW}" "verify-hotfix-release.sh"
+  assert_not_contains "${UPSTREAM_WORKFLOW}" "--clobber"
 }
 
 test_publication_state_requires_correlated_identities() {

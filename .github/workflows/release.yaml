@@ -11,6 +11,10 @@ on:
         description: Commit the tag and release must represent
         required: true
         type: string
+      receipt_name:
+        description: The only provenance receipt kind this caller may attach
+        required: true
+        type: string
     outputs:
       release_url:
         description: Published GitHub release URL
@@ -32,6 +36,13 @@ on:
         required: false
         default: ''
         type: string
+      receipt_name:
+        description: The only provenance receipt kind this publication permits
+        required: true
+        type: choice
+        options:
+          - upstream-sync-receipt.json
+          - hotfix-release-receipt.json
 
 permissions:
   contents: write
@@ -62,7 +73,12 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           EXPECTED_COMMIT_INPUT: ${{ inputs.expected_commit }}
+          RECEIPT_NAME: ${{ inputs.receipt_name }}
         run: |
+          case "${RECEIPT_NAME}" in
+            upstream-sync-receipt.json|hotfix-release-receipt.json) ;;
+            *) echo "Unsupported receipt kind ${RECEIPT_NAME}." >&2; exit 1 ;;
+          esac
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
           EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
@@ -138,6 +154,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
           EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          EXPECTED_RECEIPT: ${{ inputs.receipt_name }}
         run: |
           source .github/scripts/release-assets.sh
           EXPECTED_ASSET_NAMES_JSON="$(expected_release_assets_json "${TAG}")"
@@ -145,6 +162,7 @@ jobs:
           if ! jq -e \
             --arg tag "${TAG}" \
             --arg repo "${GITHUB_REPOSITORY}" \
+            --arg expected_receipt "${EXPECTED_RECEIPT}" \
             --argjson expected_assets "${EXPECTED_ASSET_NAMES_JSON}" '
               .tag_name == $tag and .draft == false and .prerelease == false and
               .target_commitish == "main" and
@@ -152,7 +170,12 @@ jobs:
               .author.login == "github-actions[bot]" and .author.id == 41898282 and
               (.assets | type) == "array" and
               ([.assets[].name] | length) == ([.assets[].name] | unique | length) and
-              ([.assets[] | select(.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json")] | length) <= 1 and
+              ([.assets[] | select(.name == $expected_receipt)] | length) <= 1 and
+              ([.assets[] |
+                select(
+                  (.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json") and
+                  .name != $expected_receipt
+                )] | length) == 0 and
               ([.assets[].name | select(. != "upstream-sync-receipt.json" and . != "hotfix-release-receipt.json")] | sort) == $expected_assets and
               all(.assets[];
                 (.id | type) == "number" and (.id | floor) == .id and .id > 0 and .id <= 9007199254740991 and

@@ -369,6 +369,7 @@ jobs:
     with:
       tag: ${{ needs.tag.outputs.tag }}
       expected_commit: ${{ needs.tag.outputs.commit }}
+      receipt_name: hotfix-release-receipt.json
     secrets: inherit
 
   docker_build:

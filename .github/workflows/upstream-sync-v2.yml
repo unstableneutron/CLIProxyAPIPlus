@@ -695,6 +695,7 @@ jobs:
     with:
       tag: ${{ needs.promote.outputs.tag }}
       expected_commit: ${{ needs.promote.outputs.commit }}
+      receipt_name: upstream-sync-receipt.json
     secrets: inherit
 
   docker_build:
@@ -752,6 +753,12 @@ jobs:
           IMAGE: ${{ needs.docker.outputs.image }}
           TAG: ${{ needs.promote.outputs.tag }}
         run: |
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          if grep -Fx upstream-sync-receipt.json <<< "${ASSETS}" >/dev/null || \
+             grep -Fx hotfix-release-receipt.json <<< "${ASSETS}" >/dev/null; then
+            echo "Upstream publication requires an absent receipt identity; existing receipts are immutable and cannot be adopted or overwritten." >&2
+            exit 1
+          fi
           .github/scripts/verify-upstream-release.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
@@ -766,20 +773,6 @@ jobs:
             echo "Verified digest ${RECEIPT_DIGEST} does not match publisher output ${EXPECTED_IMAGE_DIGEST}." >&2
             exit 1
           fi
-
-      - name: Attach receipt to the verified release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.promote.outputs.tag }}
-        run: |
-          gh release upload "${TAG}" upstream-sync-receipt.json \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
-          gh release view "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json assets \
-            --jq '.assets[].name' \
-            | grep -Fx upstream-sync-receipt.json
 
       - name: Require final fetched no-op plan
         env:
@@ -857,3 +850,24 @@ jobs:
             ${{ env.SYNC_WORK_DIR }}/run-state.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Attach immutable receipt after complete evidence publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.promote.outputs.tag }}
+        run: |
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          if grep -Fx upstream-sync-receipt.json <<< "${ASSETS}" >/dev/null || \
+             grep -Fx hotfix-release-receipt.json <<< "${ASSETS}" >/dev/null; then
+            echo "A receipt identity appeared after upstream finalization preflight." >&2
+            exit 1
+          fi
+          gh release upload "${TAG}" upstream-sync-receipt.json \
+            --repo "${GITHUB_REPOSITORY}"
+          mkdir published-upstream-receipt
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern upstream-sync-receipt.json \
+            --dir published-upstream-receipt
+          cmp -s upstream-sync-receipt.json published-upstream-receipt/upstream-sync-receipt.json \
+            || { echo "Published upstream receipt bytes differ." >&2; exit 1; }

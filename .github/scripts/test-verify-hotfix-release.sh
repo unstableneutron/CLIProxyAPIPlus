@@ -261,6 +261,15 @@ test_receipt_binds_release_and_upstream_state() {
     "${root}" "attached hotfix receipt does not match independent verification" \
     "${root}/mismatched-output.json" "${root}/mismatched-receipt.json"
 
+  cp "${root}/release.json" "${root}/release-without-wrong-receipt.json"
+  jq '.assets += [{name: "upstream-sync-receipt.json"}]' \
+    "${root}/release.json" > "${root}/wrong-receipt-release.json"
+  mv "${root}/wrong-receipt-release.json" "${root}/release.json"
+  expect_failure \
+    "${root}" "duplicate or semantically wrong receipt" \
+    "${root}/wrong-receipt-output.json"
+  mv "${root}/release-without-wrong-receipt.json" "${root}/release.json"
+
   jq '.assets[1].digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' \
     "${root}/release-api.json" > "${root}/wrong-asset.json"
   expect_failure \

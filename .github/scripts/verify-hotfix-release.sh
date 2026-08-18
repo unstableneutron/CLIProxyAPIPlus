@@ -232,6 +232,7 @@ GITHUB_RUN_ID="${WORKFLOW_RUN_ID}" "${UPSTREAM_VERIFIER}" \
   --main-policy "${MAIN_POLICY}" \
   --require-architecture-tags true \
   --require-latest-parity "${REQUIRE_LATEST_PARITY}" \
+  --allowed-receipt-name hotfix-release-receipt.json \
   --receipt "${CORE_RECEIPT}"
 
 RELEASE_API=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")

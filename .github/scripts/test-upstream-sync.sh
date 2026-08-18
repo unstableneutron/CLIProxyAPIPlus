@@ -877,6 +877,7 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
 }
 
 test_publication_workflows_are_reusable_and_checked() {
+  local workflow=${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml
   local release=${SCRIPT_DIR}/../workflows/release.yaml
   local docker=${SCRIPT_DIR}/../workflows/docker-image.yml
   local recovery=${SCRIPT_DIR}/../workflows/sync-release-tag.yml
@@ -891,6 +892,9 @@ test_publication_workflows_are_reusable_and_checked() {
 
   assert_contains "${release}" "workflow_call:"
   assert_contains "${release}" "expected_commit:"
+  assert_contains "${release}" "receipt_name:"
+  # shellcheck disable=SC2016 # The workflow jq expression is asserted literally.
+  assert_contains "${release}" 'name == $expected_receipt'
   assert_contains "${release}" "release_url:"
   assert_contains "${release}" "asset_names_json:"
   assert_contains "${release}" "source .github/scripts/release-assets.sh"
@@ -924,17 +928,27 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${docker}" "setup-qemu-action"
   assert_not_contains "${docker}" "Refresh models catalog"
 
-  assert_contains "${recovery}" "uses: ./.github/workflows/release.yaml"
-  assert_contains "${recovery}" "uses: ./.github/workflows/docker-image.yml"
-  assert_contains "${recovery}" "docker_build:"
-  assert_contains "${recovery}" "needs: [resolve, release, docker_build]"
-  assert_contains "${recovery}" "verify-upstream-release.sh"
-  assert_contains "${recovery}" "gh release upload"
-  assert_contains "${recovery}" "upstream-sync-receipt.json"
-  assert_contains "${recovery}" "--require-architecture-tags true"
-  # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
-  assert_contains "${recovery}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
-  assert_not_contains "${recovery}" "gh workflow run"
+  assert_contains "${recovery}" "Reject Unsafe Release Recovery"
+  assert_contains "${recovery}" "contents: read"
+  assert_contains "${recovery}" "publish a new immutable identity instead."
+  assert_not_contains "${recovery}" "contents: write"
+  assert_not_contains "${recovery}" "packages: write"
+  assert_not_contains "${recovery}" "gh release"
+  assert_not_contains "${recovery}" "docker"
+  assert_not_contains "${recovery}" "--clobber"
+
+  assert_contains "${workflow}" "receipt_name: upstream-sync-receipt.json"
+  assert_contains "${workflow}" "requires an absent receipt identity"
+  assert_contains "${workflow}" "Attach immutable receipt after complete evidence publication"
+  assert_not_contains "${workflow}" "--clobber"
+  local upstream_artifact_line upstream_receipt_line
+  # shellcheck disable=SC2016 # GitHub expression is asserted literally.
+  upstream_artifact_line=$(grep -nF 'name: upstream-sync-receipt-${{ github.run_id }}-${{ github.run_attempt }}' \
+    "${workflow}" | tail -n 1 | cut -d: -f1)
+  upstream_receipt_line=$(grep -nF 'name: Attach immutable receipt after complete evidence publication' \
+    "${workflow}" | tail -n 1 | cut -d: -f1)
+  [ "${upstream_artifact_line}" -lt "${upstream_receipt_line}" ] \
+    || fail "upstream receipt must publish only after its complete Actions artifact"
 
   assert_contains "${dockerfile}" "# syntax=docker/dockerfile:1"
   assert_contains "${dockerfile}" "golang:1.26-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113"

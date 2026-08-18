@@ -19,6 +19,7 @@ MAIN_POLICY=exact
 REQUIRE_LATEST_PARITY=""
 REQUIRE_ARCHITECTURE_TAGS=false
 RECEIPT=""
+ALLOWED_RECEIPT_NAME=upstream-sync-receipt.json
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -67,6 +68,11 @@ while [ "$#" -gt 0 ]; do
       RECEIPT=$2
       shift 2
       ;;
+    --allowed-receipt-name)
+      [ "$#" -ge 2 ] || die "--allowed-receipt-name requires a value"
+      ALLOWED_RECEIPT_NAME=$2
+      shift 2
+      ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -90,6 +96,10 @@ case "${REQUIRE_ARCHITECTURE_TAGS}" in
   *) die "--require-architecture-tags must be true or false" ;;
 esac
 [ -n "${RECEIPT}" ] || die "--receipt is required"
+case "${ALLOWED_RECEIPT_NAME}" in
+  upstream-sync-receipt.json|hotfix-release-receipt.json) ;;
+  *) die "--allowed-receipt-name must identify an upstream or hotfix receipt" ;;
+esac
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
 case "${IMAGE_INPUT}" in
@@ -132,6 +142,16 @@ if ! jq -e '.isDraft == false and .isPrerelease == false and (.url | length > 0)
   die "Release ${TAG} is missing, draft, prerelease, or has no URL"
 fi
 RELEASE_URL=$(jq -r '.url' <<< "${RELEASE_JSON}")
+if ! jq -e --arg allowed "${ALLOWED_RECEIPT_NAME}" '
+    ([.assets[] | select(.name == $allowed)] | length) <= 1 and
+    ([.assets[] |
+      select(
+        (.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json") and
+        .name != $allowed
+      )] | length) == 0
+  ' <<< "${RELEASE_JSON}" >/dev/null; then
+  die "Release ${TAG} contains a duplicate or semantically wrong receipt"
+fi
 RELEASE_ASSETS=$(jq -c \
   '[.assets[].name |
     select(. != "upstream-sync-receipt.json" and . != "hotfix-release-receipt.json")] |

@@ -402,6 +402,7 @@ verify_release_and_link() {
     --main-policy descendant \
     --require-architecture-tags true \
     --require-latest-parity false \
+    --allowed-receipt-name "${receipt_name}" \
     --receipt "${regenerated}" >/dev/null
   diff -u \
     <(jq -S '{schema_version,sync_id,plan_fingerprint,main_commit,tag,tag_commit,release_url,release_assets,image,image_digest,platforms,workflow_run_id,architecture_images}' "${receipt_file}") \

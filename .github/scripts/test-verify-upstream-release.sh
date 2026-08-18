@@ -238,6 +238,28 @@ test_rejects_incomplete_or_conflicting_release_asset_matrix() {
   rm -rf "${root}"
 }
 
+test_rejects_semantically_wrong_or_duplicate_receipts() {
+  local root
+  root=$(mktemp -d)
+  make_stubs "${root}"
+  jq '.assets += [{name: "hotfix-release-receipt.json"}]' \
+    "${FIXTURES}/release.json" > "${root}/wrong-receipt.json"
+  expect_failure \
+    "${root}" "${root}/wrong-receipt-output.json" \
+    "duplicate or semantically wrong receipt" \
+    false "${COMMIT}" "${COMMIT}" "${root}/wrong-receipt.json"
+
+  jq '.assets += [
+      {name: "upstream-sync-receipt.json"},
+      {name: "upstream-sync-receipt.json"}
+    ]' "${FIXTURES}/release.json" > "${root}/duplicate-receipt.json"
+  expect_failure \
+    "${root}" "${root}/duplicate-receipt-output.json" \
+    "duplicate or semantically wrong receipt" \
+    false "${COMMIT}" "${COMMIT}" "${root}/duplicate-receipt.json"
+  rm -rf "${root}"
+}
+
 test_rejects_missing_required_platforms() {
   local root
   root=$(mktemp -d)
@@ -281,6 +303,7 @@ main() {
   test_allows_verified_main_descendant_when_requested
   test_rejects_wrong_release_branding
   test_rejects_incomplete_or_conflicting_release_asset_matrix
+  test_rejects_semantically_wrong_or_duplicate_receipts
   test_rejects_missing_required_platforms
   test_rejects_mismatched_architecture_tag
   test_latest_parity_is_conditional
