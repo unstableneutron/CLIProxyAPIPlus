@@ -9,7 +9,7 @@ export const BOT_LOGIN = "github-actions[bot]";
 export const BOT_ID = 41898282;
 export const IMAGE = "ghcr.io/unstableneutron/cli-proxy-api-plus";
 
-const RELEASE_TAG = /^v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.[0-9]+$/;
+const RELEASE_TAG = /^v[0-9][0-9A-Za-z._+-]*[-.]unstableneutron\.(?:0|[1-9][0-9]*)$/;
 const SOURCE_TAG = /^v[0-9A-Za-z][0-9A-Za-z._+-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -180,6 +180,23 @@ function safeRefComponent(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "-");
 }
 
+function forkTagPrefixForSourceTag(sourceTag: string): string {
+  if (!SOURCE_TAG.test(sourceTag)) throw new RejectedDelivery("source tag differs");
+  return `${sourceTag}${sourceTag.includes("-") ? "." : "-"}unstableneutron`;
+}
+
+function releaseTagParts(tag: string): { prefix: string; suffix: number } {
+  if (!RELEASE_TAG.test(tag)) throw new RejectedDelivery("release tag grammar differs");
+  const separator = tag.lastIndexOf(".");
+  const suffix = Number(tag.slice(separator + 1));
+  if (!Number.isSafeInteger(suffix) || suffix >= Number.MAX_SAFE_INTEGER)
+    throw new RejectedDelivery("release tag suffix differs");
+  return {
+    prefix: tag.slice(0, separator),
+    suffix,
+  };
+}
+
 function expectedFinalPlanFingerprint(state: UpstreamState, tag: string, commit: string): string {
   const input = [
     `base_fork_commit=${commit}`,
@@ -215,9 +232,10 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
     sha(values[key], `final plan ${key}`);
   for (const key of ["plus_head_included","plus_head_already_represented","blocked","target_drift","has_changes"])
     if (values[key] !== "true" && values[key] !== "false") throw new RejectedDelivery("final plan boolean differs");
-  const tagParts = /^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron)\.([0-9]+)$/.exec(tag);
-  if (!tagParts) throw new RejectedDelivery("final plan release tag differs");
-  const suffix = Number(tagParts[2]);
+  const tagParts = releaseTagParts(tag);
+  if (tagParts.prefix !== forkTagPrefixForSourceTag(state.ORIGINAL_TAG))
+    throw new RejectedDelivery("final plan release tag differs");
+  const suffix = tagParts.suffix;
   const expectedFingerprint = expectedFinalPlanFingerprint(state, tag, commit);
   const safeSyncID = safeRefComponent(state.SYNC_ID);
   const expectedCandidate = `upstream-sync/${safeSyncID}-${expectedFingerprint.slice(0, 12)}`;
@@ -230,8 +248,8 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
       values.plus_head_included !== state.PLUS_HEAD_INCLUDED || values.safe_sync_id !== state.SYNC_ID ||
       values.latest_fork_tag !== tag || values.expected_fork_tag !== tag || values.latest_fork_models_commit !== state.MODELS_COMMIT ||
       values.plus_head_already_represented !== "true" || values.plus_head_delta_paths !== "" || values.unsafe_plus_head_delta_paths !== "" ||
-      values.block_reason !== "" || values.fork_tag_prefix !== tagParts[1] || values.latest_fork_suffix !== String(suffix) ||
-      values.next_fork_tag !== `${tagParts[1]}.${suffix + 1}` || values.plan_fingerprint !== expectedFingerprint ||
+      values.block_reason !== "" || values.fork_tag_prefix !== tagParts.prefix || values.latest_fork_suffix !== String(suffix) ||
+      values.next_fork_tag !== `${tagParts.prefix}.${suffix + 1}` || values.plan_fingerprint !== expectedFingerprint ||
       values.candidate_branch !== expectedCandidate || values.snapshot_namespace !== snapshotNamespace ||
       values.original_snapshot_ref !== `${snapshotNamespace}/original` || values.plus_tag_snapshot_ref !== `${snapshotNamespace}/plus-tag` ||
       values.plus_head_snapshot_ref !== `${snapshotNamespace}/plus-head` || values.models_snapshot_ref !== `${snapshotNamespace}/models` ||
@@ -489,6 +507,8 @@ export function parseUpstreamState(bytes: Uint8Array): UpstreamState {
   ) {
     throw new RejectedDelivery("state tag is invalid");
   }
+  if (releaseTagParts(state.EXPECTED_FORK_TAG).prefix !== forkTagPrefixForSourceTag(state.ORIGINAL_TAG))
+    throw new RejectedDelivery("state release line differs");
 
   const syncID = `original-${safeRefComponent(state.ORIGINAL_TAG)}_plus-${safeRefComponent(state.PLUS_TAG)}`;
   const candidateBranch = `upstream-sync/${syncID}-${state.PLAN_FINGERPRINT.slice(0, 12)}`;
@@ -1098,11 +1118,8 @@ function validateCanonicalReleaseIdentity(
 }
 
 function nextHotfixTag(baseTag: string): string {
-  const match = /^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.)([0-9]+)$/.exec(
-    baseTag,
-  );
-  if (!match) throw new RejectedDelivery("previous release tag differs");
-  return `${match[1]}${Number(match[2]) + 1}`;
+  const { prefix, suffix } = releaseTagParts(baseTag);
+  return `${prefix}.${suffix + 1}`;
 }
 
 interface ReleaseLink {
@@ -1308,16 +1325,15 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   const previousRaw = object(receipt.previous_release, "previous release");
   if (version === 1) {
     exactKeys(previousRaw, ["tag", "commit"], "previous release"); const parentTag = string(previousRaw.tag, "previous release tag"), parentCommit = sha(previousRaw.commit, "previous release commit");
-    if (!expected.tag.endsWith(".1") || parentTag !== root.tag || parentCommit !== root.commit || nextHotfixTag(parentTag) !== expected.tag) throw new RejectedDelivery("schema-v1 hotfix is only valid at suffix .1");
+    if (parentTag !== root.tag || parentCommit !== root.commit || nextHotfixTag(parentTag) !== expected.tag) throw new RejectedDelivery("schema-v1 hotfix must directly follow the accepted upstream root");
     const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${parentCommit}...${expected.commit}`, signal), "historical comparison");
     if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
     await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root);
   } else if (version === 2) {
-    if (expected.tag.endsWith(".1")) throw new RejectedDelivery("schema-v2 hotfix requires suffix .2 or later");
     const previous = releaseLink(previousRaw, "hotfix", "previous release"), recordedRoot = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
-    if (JSON.stringify(recordedRoot) !== JSON.stringify(root) || nextHotfixTag(previous.tag) !== expected.tag) throw new RejectedDelivery("hotfix parent or root identity differs");
+    if (previous.tag === root.tag || JSON.stringify(recordedRoot) !== JSON.stringify(root) || nextHotfixTag(previous.tag) !== expected.tag) throw new RejectedDelivery("hotfix parent or root identity differs");
     const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${previous.commit}...${expected.commit}`, signal), "historical comparison"); if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
-    if (previous.tag === root.tag) await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root); else await validateHistoricalHotfix(client, registry, previous, root, stateBytes, state, signal, seen, depth + 1);
+    await validateHistoricalHotfix(client, registry, previous, root, stateBytes, state, signal, seen, depth + 1);
   } else throw new RejectedDelivery("hotfix receipt schema differs");
 }
 
@@ -1469,13 +1485,10 @@ export async function validateRelease(
     if (receipt.hotfix_schema_version === 1) {
       exactKeys(previous, ["tag", "commit"], "previous release");
       baseTag = string(previous.tag, "previous release tag"); baseCommit = sha(previous.commit, "previous release commit");
-      if (!tag.endsWith(".1")) throw new RejectedDelivery("schema-v1 hotfix is only valid at suffix .1");
     } else {
-      const suffix = Number(tag.slice(tag.lastIndexOf(".") + 1));
-      if (suffix < 2) throw new RejectedDelivery("schema-v2 hotfix requires suffix .2 or later");
       parentLink = releaseLink(previous, "hotfix", "previous release"); rootLink = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
       baseTag = parentLink.tag; baseCommit = parentLink.commit;
-      if (rootLink.tag !== currentState.state.EXPECTED_FORK_TAG || !rootLink.tag.endsWith(".0") || !tag.startsWith(rootLink.tag.slice(0, -1))) throw new RejectedDelivery("accepted upstream root identity differs");
+      if (rootLink.tag !== currentState.state.EXPECTED_FORK_TAG || parentLink.tag === rootLink.tag || releaseTagParts(tag).prefix !== releaseTagParts(rootLink.tag).prefix) throw new RejectedDelivery("accepted upstream root identity differs");
     }
     if (
       !RELEASE_TAG.test(baseTag) ||
@@ -1567,7 +1580,6 @@ export async function validateRelease(
       );
     }
     if (receipt.hotfix_schema_version === 1) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal));
-    else if (parentLink!.tag === rootLink!.tag) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, rootLink!.tag, rootLink!.commit, currentState.bytes, currentState.state, signal, rootLink));
     else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
     const workflowRun = await validateWorkflowRun(
       client,

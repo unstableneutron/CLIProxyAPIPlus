@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
 CHAIN_VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
 
 die() {
   echo "[hotfix-release-verifier] $*" >&2
@@ -177,32 +179,36 @@ fi
 STATE_SYNC_ID=$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_FINGERPRINT=$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_RECORDED_TAG=$(awk -F= '$1 == "EXPECTED_FORK_TAG" { print $2; exit }' "${EXPECTED_STATE}")
-if [[ "${TAG}" =~ ^(.+unstableneutron\.)([0-9]+)$ ]]; then
-  HOTFIX_PREFIX=${BASH_REMATCH[1]}
-  HOTFIX_SUFFIX=$((10#${BASH_REMATCH[2]}))
-else
-  die "hotfix tag has an invalid release suffix"
-fi
-if [[ "${BASE_TAG}" =~ ^(.+unstableneutron\.)([0-9]+)$ ]]; then
-  BASE_PREFIX=${BASH_REMATCH[1]}
-  BASE_SUFFIX=$((10#${BASH_REMATCH[2]}))
-else
-  die "base tag has an invalid release suffix"
-fi
+STATE_ORIGINAL_TAG=$(awk -F= '$1 == "ORIGINAL_TAG" { print $2; exit }' "${EXPECTED_STATE}")
+parse_fork_release_tag "${TAG}" || die "hotfix tag has an invalid release suffix"
+HOTFIX_PREFIX=${FORK_TAG_PREFIX}
+HOTFIX_SUFFIX=${FORK_TAG_SUFFIX}
+parse_fork_release_tag "${BASE_TAG}" || die "base tag has an invalid release suffix"
+BASE_PREFIX=${FORK_TAG_PREFIX}
+BASE_SUFFIX=${FORK_TAG_SUFFIX}
 if [ "${HOTFIX_PREFIX}" != "${BASE_PREFIX}" ] || \
    [ "${HOTFIX_SUFFIX}" -ne $((BASE_SUFFIX + 1)) ]; then
   die "hotfix tag is not the consecutive successor of its base tag"
 fi
+parse_fork_release_tag "${STATE_RECORDED_TAG}" \
+  || die "hotfix upstream-sync state records an invalid accepted root"
+ROOT_PREFIX=${FORK_TAG_PREFIX}
+ROOT_SUFFIX=${FORK_TAG_SUFFIX}
+fork_tag_prefix_for_source_tag "${STATE_ORIGINAL_TAG}" \
+  || die "hotfix upstream-sync state records an invalid source tag"
+SOURCE_PREFIX=${FORK_TAG_PREFIX}
 if [ "${STATE_SYNC_ID}" != "${EXPECTED_SYNC_ID}" ] || \
    [ "${STATE_FINGERPRINT}" != "${EXPECTED_PLAN_FINGERPRINT}" ] || \
-   [ "${STATE_RECORDED_TAG}" != "${HOTFIX_PREFIX}0" ]; then
+   [ "${ROOT_PREFIX}" != "${HOTFIX_PREFIX}" ] || \
+   [ "${ROOT_PREFIX}" != "${SOURCE_PREFIX}" ] || \
+   [ "${ROOT_SUFFIX}" -gt "${BASE_SUFFIX}" ]; then
   die "hotfix upstream-sync state does not match the accepted base release"
 fi
 STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
 
 CHAIN_RECEIPT=$(mktemp)
 printf '{}\n' > "${CHAIN_RECEIPT}"
-if [ "${HOTFIX_SUFFIX}" -ge 2 ]; then
+if [ "${BASE_TAG}" != "${STATE_RECORDED_TAG}" ]; then
   trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
   "${CHAIN_VERIFIER}" \
     --tag "${TAG}" \
@@ -213,8 +219,6 @@ if [ "${HOTFIX_SUFFIX}" -ge 2 ]; then
     --expected-plan-fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
     --image "${IMAGE}" \
     --output "${CHAIN_RECEIPT}"
-elif [ "${BASE_TAG}" != "${STATE_RECORDED_TAG}" ]; then
-  die "legacy suffix .1 must directly follow the accepted upstream root"
 fi
 
 GITHUB_RUN_ID="${WORKFLOW_RUN_ID}" "${UPSTREAM_VERIFIER}" \
@@ -299,9 +303,11 @@ WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-${WORKFLOW_PATH}@local}
 mkdir -p "$(dirname -- "${RECEIPT}")"
 RECEIPT_TEMP=$(mktemp "${RECEIPT}.tmp.XXXXXX")
 trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
+HOTFIX_SCHEMA_VERSION=2
+[ "${BASE_TAG}" = "${STATE_RECORDED_TAG}" ] && HOTFIX_SCHEMA_VERSION=1
 jq \
   --arg receipt_type hotfix-release \
-  --argjson hotfix_schema_version "$([ "${HOTFIX_SUFFIX}" -ge 2 ] && echo 2 || echo 1)" \
+  --argjson hotfix_schema_version "${HOTFIX_SCHEMA_VERSION}" \
   --arg base_tag "${BASE_TAG}" \
   --arg base_commit "${EXPECTED_BASE_COMMIT}" \
   --slurpfile chain "${CHAIN_RECEIPT}" \

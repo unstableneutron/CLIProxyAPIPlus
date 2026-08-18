@@ -124,7 +124,7 @@ PY
 write_root_fixture() {
   local root=$1 commit=$2
   local node="${root}/fixtures/${ROOT_TAG}"
-  local archive_name=CLIProxyAPIPlus_7.2.131-unstableneutron.0_linux_amd64_no-plugin.tar.gz final_fingerprint
+  local archive_name="CLIProxyAPIPlus_${ROOT_TAG#v}_linux_amd64_no-plugin.tar.gz" final_fingerprint
   final_fingerprint=$(
     printf '%s\n' \
       "base_fork_commit=${commit}" \
@@ -263,10 +263,10 @@ plus_head_delta_paths=
 unsafe_plus_head_delta_paths=
 blocked=false
 block_reason=
-fork_tag_prefix=v7.2.131-unstableneutron
+fork_tag_prefix=${FIRST_TAG%.*}
 latest_fork_tag=${FIRST_TAG}
 latest_fork_models_commit=4444444444444444444444444444444444444444
-latest_fork_suffix=1
+latest_fork_suffix=$((10#${FIRST_TAG##*.}))
 next_fork_tag=${SECOND_TAG}
 expected_fork_tag=${FIRST_TAG}
 safe_sync_id=${SYNC_ID}
@@ -286,7 +286,7 @@ EOF
 write_first_fixture() {
   local root=$1 commit=$2 root_commit=$3
   local node="${root}/fixtures/${FIRST_TAG}"
-  local archive_name=CLIProxyAPIPlus_7.2.131-unstableneutron.1_linux_amd64_no-plugin.tar.gz
+  local archive_name="CLIProxyAPIPlus_${FIRST_TAG#v}_linux_amd64_no-plugin.tar.gz"
   mkdir -p "${node}"
   printf 'first archive\n' > "${node}/archive"
   printf '%s  %s\n' "$(sha256sum "${node}/archive" | awk '{ print $1 }')" "${archive_name}" \
@@ -398,26 +398,26 @@ done
 [ -n "${path}" ] || { echo "missing gh api path" >&2; exit 2; }
 case "${path}" in
   repos/*/commits/main) printf '{"sha":"%s"}\n' "$(cat "${STUB_ROOT}/second.commit")" ;;
-  repos/*/commits/*unstableneutron.0) printf '{"sha":"%s"}\n' "$(cat "${STUB_ROOT}/root.commit")" ;;
-  repos/*/commits/*unstableneutron.1) printf '{"sha":"%s"}\n' "$(cat "${STUB_ROOT}/first.commit")" ;;
+  repos/*/commits/${STUB_ROOT_TAG}) printf '{"sha":"%s"}\n' "$(cat "${STUB_ROOT}/root.commit")" ;;
+  repos/*/commits/${STUB_FIRST_TAG}) printf '{"sha":"%s"}\n' "$(cat "${STUB_ROOT}/first.commit")" ;;
   repos/*/compare/*) printf '{"status":"ahead"}\n' ;;
   repos/*/releases/tags/*)
     tag=${path##*/}; cat "${STUB_ROOT}/fixtures/${tag}/release.json" ;;
-  repos/*/releases/100) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/release.json" ;;
-  repos/*/releases/101) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/release.json" ;;
-  repos/*/releases/assets/1) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/archive" ;;
-  repos/*/releases/assets/2) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/checksums.txt" ;;
-  repos/*/releases/assets/3) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/upstream-sync-receipt.json" ;;
-  repos/*/releases/assets/11) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/archive" ;;
-  repos/*/releases/assets/12) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/checksums.txt" ;;
-  repos/*/releases/assets/13) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/hotfix-release-receipt.json" ;;
-  repos/*/actions/runs/800/artifacts*) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/artifacts.json" ;;
-  repos/*/actions/runs/900/artifacts*) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/artifacts.json" ;;
-  repos/*/actions/runs/900/attempts/1) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/attempt-1.json" ;;
-  repos/*/actions/runs/800) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/run.json" ;;
-  repos/*/actions/runs/900) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/run.json" ;;
-  repos/*/actions/artifacts/10800/zip) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/artifact.zip" ;;
-  repos/*/actions/artifacts/10900/zip) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/artifact.zip" ;;
+  repos/*/releases/100) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/release.json" ;;
+  repos/*/releases/101) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/release.json" ;;
+  repos/*/releases/assets/1) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/archive" ;;
+  repos/*/releases/assets/2) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/checksums.txt" ;;
+  repos/*/releases/assets/3) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/upstream-sync-receipt.json" ;;
+  repos/*/releases/assets/11) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/archive" ;;
+  repos/*/releases/assets/12) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/checksums.txt" ;;
+  repos/*/releases/assets/13) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/hotfix-release-receipt.json" ;;
+  repos/*/actions/runs/800/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/artifacts.json" ;;
+  repos/*/actions/runs/900/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/artifacts.json" ;;
+  repos/*/actions/runs/900/attempts/1) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/attempt-1.json" ;;
+  repos/*/actions/runs/800) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/run.json" ;;
+  repos/*/actions/runs/900) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/run.json" ;;
+  repos/*/actions/artifacts/10800/zip) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/artifact.zip" ;;
+  repos/*/actions/artifacts/10900/zip) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/artifact.zip" ;;
   *) echo "unexpected gh api path: ${path}" >&2; exit 2 ;;
 esac | if [ -n "${jq_filter}" ]; then jq -r "${jq_filter}"; else cat; fi
 EOF
@@ -489,6 +489,8 @@ run_chain() {
     cd "${root}/repo"
     PATH="${root}/bin:${PATH}" \
       STUB_ROOT="${root}" \
+      STUB_ROOT_TAG="${ROOT_TAG}" \
+      STUB_FIRST_TAG="${FIRST_TAG}" \
       GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
       "${VERIFIER}" \
         --tag "${candidate}" \
@@ -537,6 +539,43 @@ test_workflow_legacy_preflight_and_chained_parent() {
     '.immediate_parent.tag == $parent and .accepted_upstream_root.tag == $root_tag' \
     "${root}/second-chain.json" >/dev/null \
     || fail "schema-v2 chain output did not bind parent and root"
+  rm -rf "${root}"
+}
+
+test_accepts_nonzero_and_prerelease_root_chains() {
+  local root root_suffix
+  local ROOT_TAG FIRST_TAG SECOND_TAG ORIGINAL_SOURCE_TAG PLUS_SOURCE_TAG SYNC_ID
+  PLUS_SOURCE_TAG=v7.2.127-3
+  ORIGINAL_SOURCE_TAG=v7.2.131
+  SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-${PLUS_SOURCE_TAG}
+  for root_suffix in 1 4; do
+    ROOT_TAG="v7.2.131-unstableneutron.${root_suffix}"
+    FIRST_TAG="v7.2.131-unstableneutron.$((root_suffix + 1))"
+    SECOND_TAG="v7.2.131-unstableneutron.$((root_suffix + 2))"
+    root=$(mktemp -d)
+    setup_fixture "${root}"
+    run_chain \
+      "${root}" "${FIRST_TAG}" "${ROOT_TAG}" \
+      "$(cat "${root}/first.commit")" "$(cat "${root}/root.commit")" \
+      "${root}/first-chain.json" >/dev/null
+    run_chain \
+      "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+      "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+      "${root}/second-chain.json" >/dev/null
+    rm -rf "${root}"
+  done
+
+  ORIGINAL_SOURCE_TAG=v7.1.45-0
+  ROOT_TAG=v7.1.45-0.unstableneutron.0
+  FIRST_TAG=v7.1.45-0.unstableneutron.1
+  SECOND_TAG=v7.1.45-0.unstableneutron.2
+  SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-${PLUS_SOURCE_TAG}
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  run_chain \
+    "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+    "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+    "${root}/prerelease-chain.json" >/dev/null
   rm -rf "${root}"
 }
 
@@ -600,10 +639,10 @@ PY
   rm -rf "${root}"
 }
 
-test_accepts_planner_sanitized_source_tag_linkage() (
+test_accepts_planner_sanitized_source_tag_linkage() {
   local root
-  PLUS_SOURCE_TAG=v7.2.127+meta
-  SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-v7.2.127-meta
+  local PLUS_SOURCE_TAG=v7.2.127+meta
+  local SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-v7.2.127-meta
   root=$(mktemp -d)
   setup_fixture "${root}"
   run_chain \
@@ -611,7 +650,18 @@ test_accepts_planner_sanitized_source_tag_linkage() (
     "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
     "${root}/source-tag-chain.json" >/dev/null
   rm -rf "${root}"
-)
+}
+
+test_rejects_root_line_not_derived_from_source_tag() {
+  local root
+  local ORIGINAL_SOURCE_TAG=v7.2.130
+  local PLUS_SOURCE_TAG=v7.2.127-3
+  local SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-${PLUS_SOURCE_TAG}
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  expect_second_failure "${root}" "release line differs from its source tag"
+  rm -rf "${root}"
+}
 
 test_rejects_noncanonical_historical_checksum_separators() {
   local root checksum release separator digest
@@ -758,7 +808,7 @@ test_rejects_historical_receipt_and_planner_drift() {
   rm -rf "${baseline}"
 }
 
-test_rejects_schema_v2_at_suffix_one() {
+test_rejects_schema_v2_for_the_first_hotfix() {
   local root receipt descriptor
   root=$(mktemp -d)
   setup_fixture "${root}"
@@ -783,7 +833,7 @@ test_rejects_schema_v2_at_suffix_one() {
     ' "${receipt}" > "${receipt}.new"
   mv "${receipt}.new" "${receipt}"
   rebuild_first_fixture "${root}"
-  expect_second_failure "${root}" "requires suffix .2 or later"
+  expect_second_failure "${root}" "must have a hotfix parent"
   rm -rf "${root}"
 }
 
@@ -793,12 +843,14 @@ main() {
     command -v "${command}" >/dev/null || fail "${command} is required"
   done
   test_workflow_legacy_preflight_and_chained_parent
+  test_accepts_nonzero_and_prerelease_root_chains
   test_accepts_parent_artifact_only_from_earlier_failed_attempt
   test_rejects_oversized_compressed_artifact_member
   test_accepts_planner_sanitized_source_tag_linkage
+  test_rejects_root_line_not_derived_from_source_tag
   test_rejects_noncanonical_historical_checksum_separators
   test_rejects_historical_receipt_and_planner_drift
-  test_rejects_schema_v2_at_suffix_one
+  test_rejects_schema_v2_for_the_first_hotfix
   echo "[OK] hotfix chain verifier tests passed"
 }
 

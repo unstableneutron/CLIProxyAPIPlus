@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+
 die() {
   echo "[hotfix-release-policy] $*" >&2
   exit 1
@@ -47,10 +51,11 @@ done
   || die "--expected-commit must be a 40-character lowercase commit"
 [[ "${EXPECTED_BASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "--expected-base-commit must be a 40-character lowercase commit"
-[[ "${TAG}" =~ ^v[0-9][0-9A-Za-z.+-]*unstableneutron\.[0-9]+$ ]] \
-  || die "--tag must be a fork release tag"
-[[ "${BASE_TAG}" =~ ^v[0-9][0-9A-Za-z.+-]*unstableneutron\.[0-9]+$ ]] \
-  || die "--base-tag must be a fork release tag"
+parse_fork_release_tag "${TAG}" || die "--tag must be a fork release tag"
+TAG_PREFIX=${FORK_TAG_PREFIX}
+parse_fork_release_tag "${BASE_TAG}" || die "--base-tag must be a fork release tag"
+BASE_PREFIX=${FORK_TAG_PREFIX}
+BASE_SUFFIX=${FORK_TAG_SUFFIX}
 case "${EXISTING_TAG_POLICY}" in
   absent|exact) ;;
   *) die "--existing-tag-policy must be absent or exact" ;;
@@ -87,11 +92,10 @@ if [ "${BASE_COMMIT}" = "${EXPECTED_COMMIT}" ]; then
   die "a hotfix release must contain at least one commit after ${BASE_TAG}"
 fi
 
-if [[ "${BASE_TAG}" =~ ^(.+unstableneutron\.)([0-9]+)$ ]]; then
-  EXPECTED_TAG="${BASH_REMATCH[1]}$((10#${BASH_REMATCH[2]} + 1))"
-else
-  die "could not derive the next hotfix tag from ${BASE_TAG}"
+if [ "${TAG_PREFIX}" != "${BASE_PREFIX}" ]; then
+  die "hotfix tag and base tag are on different release lines"
 fi
+EXPECTED_TAG="${BASE_PREFIX}.$((BASE_SUFFIX + 1))"
 if [ "${TAG}" != "${EXPECTED_TAG}" ]; then
   die "hotfix tag must be the next suffix ${EXPECTED_TAG}, got ${TAG}"
 fi
@@ -174,18 +178,24 @@ state_value() {
 SYNC_ID=$(state_value SYNC_ID)
 PLAN_FINGERPRINT=$(state_value PLAN_FINGERPRINT)
 RECORDED_TAG=$(state_value EXPECTED_FORK_TAG)
+ORIGINAL_TAG=$(state_value ORIGINAL_TAG)
 if [ -z "${SYNC_ID}" ]; then
   die "upstream-sync state is missing SYNC_ID"
 fi
 [[ "${PLAN_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "upstream-sync state has an invalid PLAN_FINGERPRINT"
-if [[ "${RECORDED_TAG}" =~ ^(.+unstableneutron\.)0$ ]]; then
-  ROOT_PREFIX=${BASH_REMATCH[1]}
-else
-  die "upstream-sync state root ${RECORDED_TAG} is not a suffix .0 release"
+parse_fork_release_tag "${RECORDED_TAG}" \
+  || die "upstream-sync state records an invalid accepted root tag"
+ROOT_PREFIX=${FORK_TAG_PREFIX}
+ROOT_SUFFIX=${FORK_TAG_SUFFIX}
+fork_tag_prefix_for_source_tag "${ORIGINAL_TAG}" \
+  || die "upstream-sync state has an invalid ORIGINAL_TAG"
+if [ "${ROOT_PREFIX}" != "${FORK_TAG_PREFIX}" ] || \
+   [ "${ROOT_PREFIX}" != "${BASE_PREFIX}" ]; then
+  die "upstream-sync state root ${RECORDED_TAG} does not match release line ${BASE_PREFIX}"
 fi
-if [ "${ROOT_PREFIX}" != "${BASE_TAG%.*}." ]; then
-  die "upstream-sync state root ${RECORDED_TAG} does not match release line ${BASE_TAG%.*}"
+if [ "${ROOT_SUFFIX}" -gt "${BASE_SUFFIX}" ]; then
+  die "upstream-sync state root ${RECORDED_TAG} is newer than base ${BASE_TAG}"
 fi
 git rev-parse --verify "refs/tags/${RECORDED_TAG}^{commit}" >/dev/null 2>&1 \
   || die "accepted upstream root tag ${RECORDED_TAG} is not fetched"

@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
 ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
 MAX_HOTFIX_DEPTH=32
 REPOSITORY_ID=1247056725
 OWNER_LOGIN=unstableneutron
@@ -45,12 +47,9 @@ done
 
 release_parts() {
   local tag=$1
-  if [[ "${tag}" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron)\.([0-9]+)$ ]]; then
-    RELEASE_PREFIX=${BASH_REMATCH[1]}
-    RELEASE_SUFFIX=$((10#${BASH_REMATCH[2]}))
-    return 0
-  fi
-  return 1
+  parse_fork_release_tag "${tag}" || return 1
+  RELEASE_PREFIX=${FORK_TAG_PREFIX}
+  RELEASE_SUFFIX=${FORK_TAG_SUFFIX}
 }
 
 release_parts "${TAG}" || die "--tag must be a fork release tag"
@@ -62,7 +61,7 @@ release_parts "${PARENT_TAG}" || die "--parent-tag must be a fork release tag"
 [ "${CANDIDATE_SUFFIX}" -eq $((RELEASE_SUFFIX + 1)) ] \
   || die "parent ${PARENT_TAG} is not the immediate predecessor of ${TAG}"
 [ "${CANDIDATE_SUFFIX}" -ge 1 ] \
-  || die "hotfix verification requires suffix .1 or later"
+  || die "hotfix verification requires a positive suffix"
 [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "--expected-commit must be a 40-character lowercase commit"
 [[ "${EXPECTED_PARENT_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
@@ -122,9 +121,14 @@ validate_upstream_state() {
   done
   if [[ ! "$(state_field ORIGINAL_TAG)" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || \
      [[ ! "$(state_field PLUS_TAG)" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || \
-     [[ ! "$(state_field EXPECTED_FORK_TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.[0-9]+$ ]]; then
+     ! parse_fork_release_tag "$(state_field EXPECTED_FORK_TAG)"; then
     die "candidate upstream-sync state tag is malformed"
   fi
+  local recorded_prefix=${FORK_TAG_PREFIX}
+  fork_tag_prefix_for_source_tag "$(state_field ORIGINAL_TAG)" \
+    || die "candidate upstream-sync source tag is malformed"
+  [ "${recorded_prefix}" = "${FORK_TAG_PREFIX}" ] \
+    || die "candidate upstream-sync release line differs from its source tag"
   case "$(state_field PLUS_HEAD_INCLUDED)" in
     true|false) ;;
     *) die "candidate upstream-sync state boolean is malformed" ;;
@@ -157,9 +161,8 @@ ROOT_TAG=$(state_value EXPECTED_FORK_TAG)
 [ "${STATE_FINGERPRINT}" = "${EXPECTED_PLAN_FINGERPRINT}" ] \
   || die "candidate upstream-sync fingerprint differs"
 release_parts "${ROOT_TAG}" || die "upstream-sync state records an invalid release tag"
-if [ "${RELEASE_PREFIX}" != "${CANDIDATE_PREFIX}" ] || [ "${RELEASE_SUFFIX}" -ne 0 ]; then
-  die "receipt chain root must be ${CANDIDATE_PREFIX}.0"
-fi
+[ "${RELEASE_PREFIX}" = "${CANDIDATE_PREFIX}" ] \
+  || die "receipt chain root is on the wrong release line"
 
 json_exact_keys() {
   local file=$1
@@ -690,7 +693,7 @@ validate_chain() {
   [ "${compare_status}" = ahead ] \
     || die "${child_tag} is not strictly descended from ${tag}"
   local kind=hotfix
-  [ "${suffix}" -eq 0 ] && kind=upstream
+  [ "${tag}" = "${ROOT_TAG}" ] && kind=upstream
   verify_release_and_link "${tag}" "${commit}" "${kind}" "${output}"
 
   local receipt_name=hotfix-release-receipt.json
@@ -742,8 +745,6 @@ validate_chain() {
   schema=$(jq -r '.hotfix_schema_version // empty' "${receipt_file}")
   case "${schema}" in
     1)
-      [ "${suffix}" -eq 1 ] \
-        || die "legacy hotfix receipt schema is valid only for suffix .1"
       json_exact_keys "${receipt_file}" \
         'keys == (["architecture_images","hotfix_schema_version","image","image_digest","main_commit","plan_fingerprint","platforms","previous_release","receipt_type","release_asset_digests","release_assets","release_url","release_workflow","schema_version","sync_id","tag","tag_commit","upstream_state","workflow_run_id"] | sort)' \
         "legacy hotfix receipt"
@@ -751,14 +752,12 @@ validate_chain() {
       parent_tag=$(jq -r '.previous_release.tag // empty' "${receipt_file}")
       parent_commit=$(jq -r '.previous_release.commit // empty' "${receipt_file}")
       if [ "${parent_tag}" != "${ROOT_TAG}" ] || [[ ! "${parent_commit}" =~ ^[0-9a-f]{40}$ ]]; then
-        die "legacy .1 receipt does not terminate at the accepted upstream root"
+        die "legacy hotfix receipt does not terminate directly at the accepted upstream root"
       fi
       local root_actual="${ROOT}/root-from-${tag}.json"
       validate_chain "${parent_tag}" "${parent_commit}" "${tag}" "${commit}" $((depth + 1)) "${root_actual}"
       ;;
     2)
-      [ "${suffix}" -ge 2 ] \
-        || die "chained hotfix receipt schema requires suffix .2 or later"
       json_exact_keys "${receipt_file}" \
         'keys == (["accepted_upstream_root","architecture_images","hotfix_schema_version","image","image_digest","main_commit","plan_fingerprint","platforms","previous_release","receipt_type","release_asset_digests","release_assets","release_url","release_workflow","schema_version","sync_id","tag","tag_commit","upstream_state","workflow_run_id"] | sort)' \
         "chained hotfix receipt"
@@ -771,6 +770,8 @@ validate_chain() {
       previous_commit=$(jq -r '.commit // empty' "${parent_descriptor}")
       [[ "${previous_commit}" =~ ^[0-9a-f]{40}$ ]] \
         || die "receipt ${tag} records an invalid parent commit"
+      [ "${previous_tag}" != "${ROOT_TAG}" ] \
+        || die "chained hotfix receipt must have a hotfix parent"
       local parent_actual="${ROOT}/parent-actual-${tag}.json"
       validate_chain "${previous_tag}" "${previous_commit}" "${tag}" "${commit}" $((depth + 1)) "${parent_actual}"
       diff -u <(jq -S . "${parent_descriptor}") <(jq -S . "${parent_actual}") >/dev/null \

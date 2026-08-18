@@ -38,10 +38,12 @@ peeled commit, and the consecutive next suffix. A fresh planner must remain a
 clean represented no-op, and the candidate tag, release, and GHCR identities
 must all be absent.
 
-Legacy schema-1 receipts remain valid only for suffix `.1` directly above the
-accepted `.0` upstream release. Suffix `.2` and later use schema 2: each receipt
-records the immediate parent's receipt asset, workflow run, and receipt artifact,
-plus the same identities for the accepted upstream root. Verification walks the
+An accepted upstream-sync release may occupy any numeric suffix in its release
+line. Legacy schema-1 receipts remain valid only for the consecutive first
+hotfix directly above that recorded root. Schema 2 is required when the
+immediate parent is itself a hotfix: each receipt records the immediate parent's
+receipt asset, workflow run, and receipt artifact, plus the same identities for
+the accepted upstream root. Verification walks the
 chain recursively, checks every annotated tag, commit ancestry, stable release,
 asset/checksum set, receipt byte identity, workflow artifact, unchanged upstream
 state, and architecture image, and rejects cycles or chains over 32 hotfix nodes.

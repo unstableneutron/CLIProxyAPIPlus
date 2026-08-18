@@ -6,6 +6,7 @@ VERIFIER="${SCRIPT_DIR}/verify-hotfix-release.sh"
 FIXTURES="${SCRIPT_DIR}/testdata/upstream-release"
 BASE_TAG=v7.2.131-unstableneutron.0
 TAG=v7.2.131-unstableneutron.1
+ORIGINAL_SOURCE_TAG=v7.2.131
 SYNC_ID=original-v7.2.131_plus-v7.2.127-3
 FINGERPRINT=eeef3819ca9dfb38b4528fc5dabc3324d538b19b
 IMAGE=ghcr.io/unstableneutron/cli-proxy-api-plus
@@ -37,6 +38,7 @@ setup_repo() {
 SCHEMA_VERSION=2
 SYNC_ID=${SYNC_ID}
 PLAN_FINGERPRINT=${FINGERPRINT}
+ORIGINAL_TAG=${ORIGINAL_SOURCE_TAG}
 EXPECTED_FORK_TAG=${BASE_TAG}
 EOF
   echo base > "${repo}/app.txt"
@@ -50,7 +52,7 @@ EOF
 
 make_fixtures() {
   local root=$1
-  local archive=CLIProxyAPIPlus_7.2.131-unstableneutron.1_linux_amd64_no-plugin.tar.gz
+  local archive="CLIProxyAPIPlus_${TAG#v}_linux_amd64_no-plugin.tar.gz"
   printf 'archive fixture\n' > "${root}/${archive}"
   local archive_sha
   archive_sha=$(sha256sum "${root}/${archive}" | awk '{ print $1 }')
@@ -86,10 +88,10 @@ case "${1:-}:${2:-}" in
   api:*commits/main)
     printf '%s\n' "${STUB_HOTFIX_COMMIT}"
     ;;
-  api:*commits/*unstableneutron.0)
+  api:*commits/${STUB_BASE_TAG})
     printf '%s\n' "${STUB_BASE_COMMIT}"
     ;;
-  api:*commits/*unstableneutron.1)
+  api:*commits/${STUB_HOTFIX_TAG})
     printf '%s\n' "${STUB_HOTFIX_COMMIT}"
     ;;
   api:*compare/*)
@@ -159,7 +161,9 @@ run_verifier() {
       GITHUB_RUN_ATTEMPT="${current_attempt}" \
       GITHUB_WORKFLOW_REF=unstableneutron/CLIProxyAPIPlus/.github/workflows/hotfix-release.yml@refs/heads/main \
       STUB_BASE_COMMIT="${base_commit}" \
+      STUB_BASE_TAG="${BASE_TAG}" \
       STUB_HOTFIX_COMMIT="${hotfix_commit}" \
+      STUB_HOTFIX_TAG="${TAG}" \
       STUB_RELEASE_JSON="${root}/release.json" \
       STUB_RELEASE_API_JSON="${release_api}" \
       STUB_CHECKSUM_FILE="${root}/checksums.txt" \
@@ -292,9 +296,39 @@ test_receipt_binds_release_and_upstream_state() {
   rm -rf "${root}"
 }
 
+test_nonzero_and_prerelease_roots_still_generate_schema_one() {
+  local root receipt
+
+  for release_line in nonzero prerelease; do
+    if [ "${release_line}" = nonzero ]; then
+      local BASE_TAG=v7.2.131-unstableneutron.4
+      local TAG=v7.2.131-unstableneutron.5
+      local ORIGINAL_SOURCE_TAG=v7.2.131
+    else
+      local BASE_TAG=v7.1.45-0.unstableneutron.2
+      local TAG=v7.1.45-0.unstableneutron.3
+      local ORIGINAL_SOURCE_TAG=v7.1.45-0
+    fi
+    root=$(mktemp -d)
+    setup_repo "${root}"
+    make_fixtures "${root}"
+    make_stubs "${root}"
+    receipt=${root}/receipt.json
+    run_verifier "${root}" "${receipt}" >/dev/null
+    jq -e \
+      --arg root_tag "${BASE_TAG}" '
+        .hotfix_schema_version == 1 and .previous_release.tag == $root_tag and
+        (has("accepted_upstream_root") | not)
+      ' "${receipt}" >/dev/null \
+      || fail "first hotfix above ${BASE_TAG} was not schema one"
+    rm -rf "${root}"
+  done
+}
+
 main() {
   [ -x "${VERIFIER}" ] || fail "verifier is missing or not executable"
   test_receipt_binds_release_and_upstream_state
+  test_nonzero_and_prerelease_roots_still_generate_schema_one
   echo "[OK] hotfix release verifier tests passed"
 }
 

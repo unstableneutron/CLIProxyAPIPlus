@@ -13,6 +13,7 @@ RECOVERY_WORKFLOW="${SCRIPT_DIR}/../workflows/sync-release-tag.yml"
 UPSTREAM_WORKFLOW="${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml"
 BASE_TAG=v7.2.131-unstableneutron.0
 HOTFIX_TAG=v7.2.131-unstableneutron.1
+ORIGINAL_SOURCE_TAG=v7.2.131
 
 fail() {
   echo "[FAIL] $*" >&2
@@ -58,6 +59,7 @@ setup_policy_repo() {
 SCHEMA_VERSION=2
 SYNC_ID=original-v7.2.131_plus-v7.2.127-3
 PLAN_FINGERPRINT=eeef3819ca9dfb38b4528fc5dabc3324d538b19b
+ORIGINAL_TAG=${ORIGINAL_SOURCE_TAG}
 EXPECTED_FORK_TAG=${BASE_TAG}
 EOF
   echo base > "${repo}/app.txt"
@@ -139,6 +141,10 @@ test_policy_accepts_only_exact_next_release() {
   expect_policy_failure \
     "${repo}" "hotfix tag must be the next suffix" \
     v7.2.131-unstableneutron.2 "${hotfix_commit}" \
+    "${BASE_TAG}" "${base_commit}"
+  expect_policy_failure \
+    "${repo}" "--tag must be a fork release tag" \
+    v7.2.131-unstableneutron.9007199254740991 "${hotfix_commit}" \
     "${BASE_TAG}" "${base_commit}"
   expect_policy_failure \
     "${repo}" "base tag ${BASE_TAG} resolves" \
@@ -233,6 +239,38 @@ test_policy_accepts_consecutive_chained_suffixes() {
     "${repo}" "hotfix tag must be the next suffix" \
     v7.2.131-unstableneutron.4 "${third_commit}" \
     v7.2.131-unstableneutron.2 "${second_commit}"
+  rm -rf "${root}"
+}
+
+test_policy_accepts_nonzero_and_prerelease_roots() {
+  local root repo base_commit hotfix_commit output
+
+  root=$(mktemp -d)
+  BASE_TAG=v7.2.131-unstableneutron.4 \
+    HOTFIX_TAG=v7.2.131-unstableneutron.5 \
+    setup_policy_repo "${root}"
+  repo=${root}/repo
+  base_commit=$(run_git -C "${repo}" rev-parse 'v7.2.131-unstableneutron.4^{}')
+  hotfix_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  output=${root}/nonzero.out
+  run_policy \
+    "${repo}" "${output}" v7.2.131-unstableneutron.5 "${hotfix_commit}" \
+    v7.2.131-unstableneutron.4 "${base_commit}" >/dev/null
+  [ "$(output_value "${output}" root_tag)" = v7.2.131-unstableneutron.4 ] \
+    || fail "policy did not preserve a nonzero accepted root"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  BASE_TAG=v7.1.45-0.unstableneutron.2 \
+    HOTFIX_TAG=v7.1.45-0.unstableneutron.3 \
+    ORIGINAL_SOURCE_TAG=v7.1.45-0 \
+    setup_policy_repo "${root}"
+  repo=${root}/repo
+  base_commit=$(run_git -C "${repo}" rev-parse 'v7.1.45-0.unstableneutron.2^{}')
+  hotfix_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  run_policy \
+    "${repo}" "${root}/prerelease.out" v7.1.45-0.unstableneutron.3 "${hotfix_commit}" \
+    v7.1.45-0.unstableneutron.2 "${base_commit}" >/dev/null
   rm -rf "${root}"
 }
 
@@ -563,6 +601,7 @@ main() {
   test_policy_accepts_only_exact_next_release
   test_policy_adopts_only_exact_pushed_tag_after_side_effect_failure
   test_policy_accepts_consecutive_chained_suffixes
+  test_policy_accepts_nonzero_and_prerelease_roots
   test_workflow_contract_is_fail_closed
   test_publication_state_requires_correlated_identities
   test_finalization_recovers_exact_prior_attempt_evidence
