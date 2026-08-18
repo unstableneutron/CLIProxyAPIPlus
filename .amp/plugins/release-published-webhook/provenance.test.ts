@@ -7,6 +7,7 @@ import {
   BOT_LOGIN,
   GitHubHTTPError,
   IMAGE,
+  MAXIMUM_REGISTRY_MANIFEST_BYTES,
   OWNER_ID,
   OWNER_LOGIN,
   REPOSITORY,
@@ -2621,6 +2622,26 @@ describe("hotfix release provenance", () => {
 });
 
 describe("canonical registry verification", () => {
+  test("rejects an oversized manifest even when its digest matches", async () => {
+    const tag = "v1.2.3-unstableneutron.0";
+    const fixture = registryFixture(tag);
+    const oversized = new Uint8Array(MAXIMUM_REGISTRY_MANIFEST_BYTES + 1);
+    fixture.manifests.set(tag, {
+      bytes: oversized,
+      digest: sha256(oversized),
+      mediaType: indexMediaType,
+    });
+    await expect(
+      verifyRegistry(
+        fixture.client,
+        tag,
+        sha256(oversized),
+        fixture.architectureImages,
+        signal,
+      ),
+    ).rejects.toThrow("size differs");
+  });
+
   test("accepts the shared shell registry descriptor fixture", async () => {
     const tag = "v1.2.3-unstableneutron.0";
     const fixture = registryFixture(tag);

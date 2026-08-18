@@ -1403,8 +1403,12 @@ test_original_merge_protects_plus_owned_paths() {
   local out=${root}/merge.out
 
   commit_file "${fork}" .github/workflows/release.yaml fork-workflow "fork workflow"
+  commit_file "${fork}" .github/release-asset-contract.json fork-contract "fork release contract"
+  commit_file "${fork}" .amp/plugins/release-published-webhook/provenance.ts fork-webhook "fork webhook"
   commit_file "${original}" internal/auth/copilot/provider.go original-clobber "original clobber"
   commit_file "${original}" .github/workflows/release.yaml original-workflow "original workflow"
+  commit_file "${original}" .github/release-asset-contract.json original-contract "original release contract"
+  commit_file "${original}" .amp/plugins/release-published-webhook/provenance.ts original-webhook "original webhook"
   run_git -C "${original}" tag v7.1.67
 
   (
@@ -1421,6 +1425,12 @@ test_original_merge_protects_plus_owned_paths() {
   fi
   if ! grep -Fq fork-workflow "${fork}/.github/workflows/release.yaml"; then
     fail "original merge overwrote fork-owned workflow file"
+  fi
+  if ! grep -Fq fork-contract "${fork}/.github/release-asset-contract.json"; then
+    fail "original merge overwrote fork-owned release contract"
+  fi
+  if ! grep -Fq fork-webhook "${fork}/.amp/plugins/release-published-webhook/provenance.ts"; then
+    fail "original merge overwrote fork-owned webhook policy"
   fi
 }
 
@@ -1484,6 +1494,11 @@ test_manifest_classifies_fork_surfaces() {
     .github/scripts/test-upstream-sync.sh \
     .github/upstream-sync-ownership.tsv \
     .github/upstream-sync-invariants.tsv \
+    .github/release-asset-contract.json \
+    .github/scripts/verify-registry-index.jq \
+    .goreleaser.yml \
+    .amp/plugins/release-published-webhook/provenance.ts \
+    tools/release-asset-contract/contract_test.go \
     internal/runtime/executor/gemini_cli_executor.go \
     sdk/api/handlers/gemini/gemini-cli_handlers.go \
     sdk/auth/gemini.go \
@@ -1497,6 +1512,16 @@ test_manifest_classifies_fork_surfaces() {
   assert_contains "${out}" '| `.github/upstream-sync-ownership.tsv` | `fork-owned` |'
   # shellcheck disable=SC2016
   assert_contains "${out}" '| `.github/upstream-sync-invariants.tsv` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/release-asset-contract.json` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/scripts/verify-registry-index.jq` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.goreleaser.yml` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.amp/plugins/release-published-webhook/provenance.ts` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `tools/release-asset-contract/contract_test.go` | `fork-owned` |'
   # shellcheck disable=SC2016
   assert_contains "${out}" '| `internal/runtime/executor/gemini_cli_executor.go` | `fork-owned` |'
   # shellcheck disable=SC2016

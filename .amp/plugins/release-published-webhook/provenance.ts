@@ -21,6 +21,9 @@ const MAXIMUM_STATE_BYTES = 64_000;
 const MAXIMUM_METADATA_BYTES = 1_000_000;
 const MAXIMUM_ASSET_BYTES = 2_000_000_000;
 const MAXIMUM_HOTFIX_CHAIN_NODES = 3;
+export const MAXIMUM_GITHUB_JSON_BYTES = 1_000_000;
+export const MAXIMUM_GITHUB_DOWNLOAD_BYTES = 4_000_000;
+export const MAXIMUM_REGISTRY_MANIFEST_BYTES = 1_000_000;
 
 const UPSTREAM_WORKFLOW = ".github/workflows/upstream-sync-v2.yml";
 const HOTFIX_WORKFLOW = ".github/workflows/hotfix-release.yml";
@@ -112,7 +115,11 @@ export class GitHubHTTPError extends Error {
 
 export interface GitHubClient {
   get(path: string, signal: AbortSignal): Promise<unknown>;
-  bytes(url: string, signal: AbortSignal): Promise<Uint8Array>;
+  bytes(
+    url: string,
+    signal: AbortSignal,
+    maximumBytes: number,
+  ): Promise<Uint8Array>;
 }
 
 export interface RegistryManifest {
@@ -716,7 +723,11 @@ async function workflowArtifact(
   }
   if (expected && (expected.id !== id || expected.name !== expectedName || expected.digest !== artifactDigest))
     throw new RejectedDelivery("workflow artifact receipt identity differs");
-  const zip = await client.bytes(string(artifact.archive_download_url, "artifact archive URL"), signal);
+  const zip = await client.bytes(
+    string(artifact.archive_download_url, "artifact archive URL"),
+    signal,
+    size,
+  );
   if (zip.length !== size) throw new RejectedDelivery("workflow artifact size differs");
   if (digestBytes(zip) !== artifactDigest) throw new RejectedDelivery("workflow artifact digest differs");
   let files: Map<string, Uint8Array>;
@@ -806,7 +817,7 @@ async function downloadAsset(
 ): Promise<Uint8Array> {
   if (asset.size > maximumBytes)
     throw new RejectedDelivery("metadata asset size is invalid");
-  const bytes = await client.bytes(asset.url, signal);
+  const bytes = await client.bytes(asset.url, signal, asset.size);
   if (bytes.length !== asset.size || digestBytes(bytes) !== asset.digest) {
     throw new RejectedDelivery("asset bytes digest differs");
   }
@@ -1057,9 +1068,11 @@ async function validateWorkflowRun(
 
 function parseManifest(manifest: RegistryManifest, field: string): JSONObject {
   if (
-    !DIGEST.test(manifest.digest) ||
-    digestBytes(manifest.bytes) !== manifest.digest
-  ) {
+    manifest.bytes.length < 1 ||
+    manifest.bytes.length > MAXIMUM_REGISTRY_MANIFEST_BYTES
+  )
+    throw new RejectedDelivery(`${field} size differs`);
+  if (!DIGEST.test(manifest.digest) || digestBytes(manifest.bytes) !== manifest.digest) {
     throw new RejectedDelivery(`${field} digest differs`);
   }
   return object(parseJSON(manifest.bytes, field), field);

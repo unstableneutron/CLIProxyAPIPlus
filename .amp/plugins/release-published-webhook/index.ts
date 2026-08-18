@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, open, readFile, writeFile } from "node:fs/promises
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { admitWebhook } from "./admission";
+import { readBoundedResponse } from "./bounded-response";
 import {
   dispatch,
   notifyIssue,
@@ -12,6 +13,8 @@ import {
 } from "./dispatch";
 import {
   GitHubHTTPError,
+  MAXIMUM_GITHUB_DOWNLOAD_BYTES,
+  MAXIMUM_GITHUB_JSON_BYTES,
   REPOSITORY,
   RejectedDelivery,
   RetryableNotReady,
@@ -33,10 +36,13 @@ export function githubDownloadAccept(url: string): string {
     ? "application/vnd.github+json"
     : "application/octet-stream";
 }
-class GitHub implements GitHubClient {
-  constructor(private token: string) {}
+export class GitHub implements GitHubClient {
+  constructor(
+    private token: string,
+    private readonly fetcher: typeof fetch = fetch,
+  ) {}
   async get(path: string, signal: AbortSignal) {
-    const r = await fetch(`https://api.github.com${path}`, {
+    const r = await this.fetcher(`https://api.github.com${path}`, {
       headers: {
         Accept: "application/vnd.github+json",
         Authorization: `Bearer ${this.token}`,
@@ -46,10 +52,26 @@ class GitHub implements GitHubClient {
     });
     if (!r.ok)
       throw new GitHubHTTPError(r.status, `GitHub API returned ${r.status}`);
-    return r.json();
+    const bytes = await readBoundedResponse(
+      r,
+      MAXIMUM_GITHUB_JSON_BYTES,
+      "GitHub API response",
+      (message) => new RejectedDelivery(message),
+    );
+    try {
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      throw new RejectedDelivery("GitHub API response invalid");
+    }
   }
-  async bytes(url: string, signal: AbortSignal) {
-    const r = await fetch(url, {
+  async bytes(url: string, signal: AbortSignal, maximumBytes: number) {
+    if (
+      !Number.isSafeInteger(maximumBytes) ||
+      maximumBytes < 1 ||
+      maximumBytes > MAXIMUM_GITHUB_DOWNLOAD_BYTES
+    )
+      throw new RejectedDelivery("GitHub download size limit is invalid");
+    const r = await this.fetcher(url, {
       headers: {
         Accept: githubDownloadAccept(url),
         Authorization: `Bearer ${this.token}`,
@@ -59,7 +81,12 @@ class GitHub implements GitHubClient {
     });
     if (!r.ok)
       throw new GitHubHTTPError(r.status, `GitHub asset returned ${r.status}`);
-    return new Uint8Array(await r.arrayBuffer());
+    return readBoundedResponse(
+      r,
+      maximumBytes,
+      "GitHub download",
+      (message) => new RejectedDelivery(message),
+    );
   }
 }
 export const runnerCreateOptions = () => ({
