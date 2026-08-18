@@ -195,15 +195,17 @@ export default async function (amp: PluginAPI) {
             registry,
             context.signal,
           );
-          await revalidateRelease(release, gh, registry, context.signal);
-          verifiedKey = `${release.repositoryID}:${release.releaseID}:${release.tag}:${release.commit}:${release.imageDigest}`;
           const result = await dispatch(
             {
               load: async () =>
                 parseState((await amp.configuration.get())[stateKey]),
               save: (s) =>
                 amp.configuration.update({ [stateKey]: s }, "workspace"),
-              claim: (key) => atomicClaim(claimsDir, key),
+              claim: async (key) => {
+                await revalidateRelease(release, gh, registry, context.signal);
+                verifiedKey = key;
+                return atomicClaim(claimsDir, key);
+              },
             },
             {
               create: async () =>

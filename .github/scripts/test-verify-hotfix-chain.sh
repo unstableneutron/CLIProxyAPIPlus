@@ -973,6 +973,8 @@ test_rejects_schema_v2_for_the_first_hotfix() {
 
 main() {
   [ -x "${VERIFIER}" ] || fail "chain verifier is missing or not executable"
+  grep -Fxq 'MAX_HOTFIX_DEPTH=3' "${VERIFIER}" \
+    || fail "chain verifier depth must match the webhook deadline-safe bound"
   for command in gh jq python3; do
     command -v "${command}" >/dev/null || fail "${command} is required"
   done

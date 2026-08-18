@@ -51,7 +51,9 @@ receipt asset, workflow run, and receipt artifact, plus the same identities for
 the accepted upstream root. Verification walks the
 chain recursively, checks every annotated tag, commit ancestry, stable release,
 asset/checksum set, receipt byte identity, workflow artifact, unchanged upstream
-state, and architecture image, and rejects cycles or chains over 32 hotfix nodes.
+state, and architecture image, and rejects cycles or chains over three hotfix nodes
+per accepted upstream root so publication and deployment admission remain within the
+bounded webhook deadline.
 Every release must contain the exact archive matrix declared by
 `.github/release-asset-contract.json`; a Go regression test derives that matrix
 from the explicit, recognized build/archive IDs, mappings, formats, and name

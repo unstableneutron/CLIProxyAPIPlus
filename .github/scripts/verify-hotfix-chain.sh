@@ -8,7 +8,7 @@ ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
 source "${SCRIPT_DIR}/hotfix-release-tag.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
-MAX_HOTFIX_DEPTH=32
+MAX_HOTFIX_DEPTH=3
 REPOSITORY_ID=1247056725
 OWNER_LOGIN=unstableneutron
 OWNER_ID=156744497

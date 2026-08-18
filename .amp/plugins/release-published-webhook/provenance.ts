@@ -20,6 +20,7 @@ const MAXIMUM_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAXIMUM_STATE_BYTES = 64_000;
 const MAXIMUM_METADATA_BYTES = 1_000_000;
 const MAXIMUM_ASSET_BYTES = 2_000_000_000;
+const MAXIMUM_HOTFIX_CHAIN_NODES = 3;
 
 const UPSTREAM_WORKFLOW = ".github/workflows/upstream-sync-v2.yml";
 const HOTFIX_WORKFLOW = ".github/workflows/hotfix-release.yml";
@@ -141,7 +142,12 @@ export interface VerifiedRelease {
   workflowRunID: number;
   workflowRunAttempt: number;
   /** Opaque inputs retained only for the immediate pre-claim resampling. */
-  revalidation: { payload: unknown; receivedAt: string; now: () => number };
+  revalidation: {
+    payload: unknown;
+    receivedAt: string;
+    now: () => number;
+    currentEvidence: string;
+  };
 }
 
 export interface ValidateReleaseOptions {
@@ -672,6 +678,11 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && Buffer.from(a).equals(Buffer.from(b));
 }
 
+interface WorkflowArtifactResult {
+  files: Map<string, Uint8Array>;
+  identity: string;
+}
+
 async function workflowArtifact(
   client: GitHubClient,
   runID: number,
@@ -682,7 +693,7 @@ async function workflowArtifact(
   current: boolean,
   expectedHeadSHA: string,
   expected?: { id: number; digest: string; name: string },
-): Promise<Map<string, Uint8Array>> {
+): Promise<WorkflowArtifactResult> {
   const response = object(await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`, signal), "workflow artifacts");
   if (!Array.isArray(response.artifacts) || !Number.isSafeInteger(response.total_count) || response.total_count !== response.artifacts.length)
     throw new RejectedDelivery("workflow artifact listing is malformed");
@@ -722,7 +733,20 @@ async function workflowArtifact(
     const independent = files.get("independently-verified-receipt.json");
     if (!independent || !equalBytes(independent, receiptBytes)) throw new RejectedDelivery("independent receipt bytes differ");
   }
-  return files;
+  return {
+    files,
+    identity: JSON.stringify({
+      id,
+      name: expectedName,
+      digest: artifactDigest,
+      size,
+      archiveURL: artifact.archive_download_url,
+      runID,
+      repositoryID: run.repository_id,
+      headRepositoryID: run.head_repository_id,
+      headSHA: run.head_sha,
+    }),
+  };
 }
 
 function classifyAssets(
@@ -1381,7 +1405,7 @@ async function validatePreviousUpstreamRelease(
   if (expected && (expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== evidenceAttempt || expected.workflow.headSHA !== previousRun.headSHA))
     throw new RejectedDelivery("recorded upstream root workflow differs");
   const previousArtifact = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "upstream", previousReceiptBytes, signal, false, previousRun.headSHA, expected?.artifact);
-  const runState = previousArtifact.get("run-state.json");
+  const runState = previousArtifact.files.get("run-state.json");
   if (!runState) throw new RejectedDelivery("historical run state is unavailable");
   validateRunState(runState, previousState.state, receipt, baseCommit, baseTag);
   await verifyRegistry(
@@ -1415,7 +1439,7 @@ async function validateHistoricalHotfix(client: GitHubClient, registry: Registry
 }
 
 async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
-  if (depth >= 32 || seen.has(expected.tag) || seen.has(expected.commit)) throw new RejectedDelivery("hotfix chain cycle or bound exceeded");
+  if (depth >= MAXIMUM_HOTFIX_CHAIN_NODES || seen.has(expected.tag) || seen.has(expected.commit)) throw new RejectedDelivery("hotfix chain cycle or bound exceeded");
   seen.add(expected.tag); seen.add(expected.commit);
   const byTag = object(await client.get(`/repos/${REPOSITORY}/releases/tags/${encodeURIComponent(expected.tag)}`, signal), "historical release");
   const id = integer(byTag.id, "historical release ID"), release = object(await client.get(`/repos/${REPOSITORY}/releases/${id}`, signal), "canonical historical release");
@@ -1452,7 +1476,7 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
       },
     );
   }
-  const files = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
+  const artifact = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = artifact.files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
   await verifyRegistry(registry, expected.tag, core.imageDigest, core.architectureImages, signal, { requireLatestParity: false });
   const previousRaw = object(receipt.previous_release, "previous release");
   if (version === 1) {
@@ -1469,13 +1493,14 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   } else throw new RejectedDelivery("hotfix receipt schema differs");
 }
 
-export async function validateRelease(
+async function validateReleaseSnapshot(
   payloadValue: unknown,
   receivedAt: string,
   client: GitHubClient,
   registry: RegistryClient,
   signal: AbortSignal,
   options: ValidateReleaseOptions = {},
+  currentFrontierOnly = false,
 ): Promise<VerifiedRelease> {
   const payload = object(payloadValue, "payload");
   if (payload.action !== "published" && payload.action !== "released")
@@ -1591,6 +1616,8 @@ export async function validateRelease(
     assets,
   );
   let workflowRunAttempt: number;
+  let workflowEvidence: string;
+  let artifactEvidence: string;
 
   if (kind === "upstream") {
     if (currentState.state.EXPECTED_FORK_TAG !== tag) {
@@ -1607,6 +1634,13 @@ export async function validateRelease(
     );
     workflowRunAttempt = workflowRun.attempt;
     const evidenceAttempt = core.workflowRunAttempt ?? workflowRunAttempt;
+    workflowEvidence = JSON.stringify({
+      runID: core.workflowRunID,
+      attempt: workflowRun.attempt,
+      evidenceAttempt,
+      headSHA: workflowRun.headSHA,
+      successful: workflowRun.successful,
+    });
     if (evidenceAttempt > workflowRunAttempt) {
       throw new RejectedDelivery("release workflow attempt differs");
     }
@@ -1641,7 +1675,8 @@ export async function validateRelease(
     const artifact = evidenceAttempt < workflowRunAttempt
       ? await historicalEvidence(readArtifact)
       : await readArtifact();
-    const runState = artifact.get("run-state.json");
+    artifactEvidence = artifact.identity;
+    const runState = artifact.files.get("run-state.json");
     if (!runState) throw new RejectedDelivery("run state artifact is missing");
     validateRunState(runState, currentState.state, receipt, commit, tag);
   } else {
@@ -1750,8 +1785,10 @@ export async function validateRelease(
         "hotfix commit is not strictly ahead of its base",
       );
     }
-    if (receipt.hotfix_schema_version === 1) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal));
-    else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
+    if (!currentFrontierOnly) {
+      if (receipt.hotfix_schema_version === 1) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal));
+      else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
+    }
     const workflowRun = await validateWorkflowRun(
       client,
       core.workflowRunID,
@@ -1765,6 +1802,13 @@ export async function validateRelease(
       },
     );
     workflowRunAttempt = workflowRun.attempt;
+    workflowEvidence = JSON.stringify({
+      runID: core.workflowRunID,
+      attempt: workflowRun.attempt,
+      evidenceAttempt: releaseWorkflowAttempt,
+      headSHA: workflowRun.headSHA,
+      successful: workflowRun.successful,
+    });
     if (releaseWorkflowAttempt > workflowRunAttempt) {
       throw new RejectedDelivery("release workflow attempt differs");
     }
@@ -1799,7 +1843,8 @@ export async function validateRelease(
     const artifact = releaseWorkflowAttempt < workflowRunAttempt
       ? await historicalEvidence(readArtifact)
       : await readArtifact();
-    const finalPlan = artifact.get("final-plan.out");
+    artifactEvidence = artifact.identity;
+    const finalPlan = artifact.files.get("final-plan.out");
     if (!finalPlan) throw new RejectedDelivery("final plan artifact is missing");
     parseFinalPlan(finalPlan, currentState.state, tag, commit);
     if (!workflowRun.successful) {
@@ -1816,6 +1861,20 @@ export async function validateRelease(
     core.architectureImages,
     signal,
   );
+  const currentEvidence = JSON.stringify({
+    tagObjectSHA: annotatedTag.tagObjectSHA,
+    assets: assets.all
+      .map(({ id, name, url, size, digest: assetDigest }) => ({
+        id,
+        name,
+        url,
+        size,
+        digest: assetDigest,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    workflow: workflowEvidence,
+    artifact: artifactEvidence,
+  });
   return {
     repository: REPOSITORY,
     repositoryID: REPOSITORY_ID,
@@ -1832,11 +1891,34 @@ export async function validateRelease(
     workflowPath: kind === "upstream" ? UPSTREAM_WORKFLOW : HOTFIX_WORKFLOW,
     workflowRunID: core.workflowRunID,
     workflowRunAttempt,
-    revalidation: { payload: structuredClone(payloadValue), receivedAt, now: options.now ?? Date.now },
+    revalidation: {
+      payload: structuredClone(payloadValue),
+      receivedAt,
+      now: options.now ?? Date.now,
+      currentEvidence,
+    },
   };
 }
 
-/** Re-sample every mutable source immediately before a durable claim. */
+export function validateRelease(
+  payloadValue: unknown,
+  receivedAt: string,
+  client: GitHubClient,
+  registry: RegistryClient,
+  signal: AbortSignal,
+  options: ValidateReleaseOptions = {},
+): Promise<VerifiedRelease> {
+  return validateReleaseSnapshot(
+    payloadValue,
+    receivedAt,
+    client,
+    registry,
+    signal,
+    options,
+  );
+}
+
+/** Re-sample the current mutable release frontier immediately before a claim. */
 export async function revalidateRelease(
   verified: VerifiedRelease,
   client: GitHubClient,
@@ -1845,11 +1927,17 @@ export async function revalidateRelease(
 ): Promise<void> {
   let current: VerifiedRelease;
   try {
-    current = await validateRelease(verified.revalidation.payload, verified.revalidation.receivedAt, client, registry, signal, { now: verified.revalidation.now });
+    current = await validateReleaseSnapshot(verified.revalidation.payload, verified.revalidation.receivedAt, client, registry, signal, { now: verified.revalidation.now }, true);
   } catch (error) {
     if (error instanceof RetryableNotReady)
       throw new RejectedDelivery("release snapshot drifted before claim");
     throw error;
+  }
+  if (
+    current.revalidation.currentEvidence !==
+    verified.revalidation.currentEvidence
+  ) {
+    throw new RejectedDelivery("release snapshot drifted before claim");
   }
   const snapshot = ({ revalidation: _ignored, ...value }: VerifiedRelease) => value;
   if (JSON.stringify(snapshot(current)) !== JSON.stringify(snapshot(verified)))

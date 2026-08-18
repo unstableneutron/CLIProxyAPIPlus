@@ -1355,6 +1355,52 @@ describe("upstream release provenance", () => {
   });
 
   test.each([
+    ["semantically equivalent tag object replacement", (fixture: ReleaseFixture) => {
+      const ref = fixture.values.get(
+        `/repos/${REPOSITORY}/git/ref/tags/${fixture.currentTag}`,
+      );
+      const original = fixture.values.get(
+        `/repos/${REPOSITORY}/git/tags/${ref.object.sha}`,
+      );
+      const replacementSHA = "e".repeat(40);
+      fixture.values.set(`/repos/${REPOSITORY}/git/tags/${replacementSHA}`, {
+        ...structuredClone(original),
+        sha: replacementSHA,
+      });
+      ref.object.sha = replacementSHA;
+    }],
+    ["semantically equivalent receipt asset replacement", (fixture: ReleaseFixture) => {
+      const content = fixture.assetBytes.get(fixture.receiptAsset.url)!;
+      fixture.receiptAsset.id += 1000;
+      fixture.receiptAsset.url = `https://api.github.com/repos/${REPOSITORY}/releases/assets/${fixture.receiptAsset.id}`;
+      fixture.assetBytes.set(fixture.receiptAsset.url, content);
+    }],
+    ["semantically equivalent workflow artifact replacement", (fixture: ReleaseFixture) => {
+      const listing = fixture.values.get(
+        `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      );
+      const artifact = listing.artifacts[0];
+      const content = fixture.assetBytes.get(artifact.archive_download_url)!;
+      artifact.id += 1000;
+      artifact.archive_download_url =
+        `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${artifact.id}/zip`;
+      fixture.assetBytes.set(artifact.archive_download_url, content);
+    }],
+  ])("final recheck rejects %s", async (_name, mutate) => {
+    const fixture = releaseFixture();
+    const verified = await validate(fixture);
+    mutate(fixture);
+    await expect(
+      revalidateRelease(
+        verified,
+        fixture.github,
+        fixture.registry.client,
+        signal,
+      ),
+    ).rejects.toThrow("snapshot drifted");
+  });
+
+  test.each([
     [
       "payload repository",
       (f: ReleaseFixture) => {
@@ -1977,6 +2023,72 @@ describe("hotfix release provenance", () => {
     expect(third.registry.calls.filter((call) => call === "latest")).toHaveLength(2);
   });
 
+  test("pre-claim recheck has constant current-frontier work at maximum depth", async () => {
+    const counts = async (fixture: ReleaseFixture) => {
+      const verified = await validate(fixture);
+      let gets = 0;
+      let downloads = 0;
+      const github: GitHubClient = {
+        get: async (path, requestSignal) => {
+          gets++;
+          return fixture.github.get(path, requestSignal);
+        },
+        bytes: async (url, requestSignal) => {
+          downloads++;
+          return fixture.github.bytes(url, requestSignal);
+        },
+      };
+      fixture.registry.calls.length = 0;
+      await revalidateRelease(
+        verified,
+        github,
+        fixture.registry.client,
+        signal,
+      );
+      return { gets, downloads, manifests: fixture.registry.calls.length };
+    };
+
+    const first = await counts(releaseFixture("hotfix"));
+    const third = await counts(
+      advanceHotfixFixture(
+        advanceHotfixFixture(releaseFixture("hotfix")),
+      ),
+    );
+    expect(third).toEqual(first);
+  });
+
+  test("maximum-depth proof and recheck leave webhook deadline headroom", async () => {
+    const fixture = advanceHotfixFixture(
+      advanceHotfixFixture(releaseFixture("hotfix")),
+    );
+    const delay = () => new Promise((resolve) => setTimeout(resolve, 100));
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        await delay();
+        return fixture.github.get(path, requestSignal);
+      },
+      bytes: async (url, requestSignal) => {
+        await delay();
+        return fixture.github.bytes(url, requestSignal);
+      },
+    };
+    const registry: RegistryClient = {
+      manifest: async (reference, requestSignal) => {
+        await delay();
+        return fixture.registry.client.manifest(reference, requestSignal);
+      },
+    };
+    const verified = await validateRelease(
+      fixture.payload,
+      receivedAt,
+      github,
+      registry,
+      signal,
+      { now },
+    );
+    await revalidateRelease(verified, github, registry, signal);
+  }, 25_000);
+
   test("accepts historical parent evidence from an earlier attempt of its successful run", async () => {
     const second = advanceHotfixFixture(releaseFixture("hotfix"));
     const parentRunID = Number(second.receipt.previous_release.workflow.run_id);
@@ -2045,7 +2157,7 @@ describe("hotfix release provenance", () => {
 
   test("rejects a hotfix chain beyond the recursion bound", async () => {
     let fixture = releaseFixture("hotfix");
-    for (let suffix = 2; suffix <= 33; suffix++) {
+    for (let suffix = 2; suffix <= 4; suffix++) {
       fixture = advanceHotfixFixture(fixture);
     }
     await expect(validate(fixture)).rejects.toThrow("bound");
