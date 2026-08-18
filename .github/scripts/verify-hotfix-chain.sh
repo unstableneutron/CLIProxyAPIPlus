@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
+ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
 MAX_HOTFIX_DEPTH=32
 REPOSITORY_ID=1247056725
 OWNER_LOGIN=unstableneutron
@@ -435,6 +436,30 @@ verify_release_and_link() {
        [ "${evidence_attempt}" -gt "${run_attempt}" ]; then
       die "hotfix workflow evidence attempt for ${tag} differs"
     fi
+    if [ "${evidence_attempt}" -lt "${run_attempt}" ]; then
+      local evidence_run_file="${node_dir}/evidence-run.json"
+      gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${evidence_attempt}" \
+        > "${evidence_run_file}"
+      jq -e \
+        --arg path "${workflow_path}" \
+        --arg commit "${commit}" \
+        --arg login "${OWNER_LOGIN}" \
+        --argjson owner_id "${OWNER_ID}" \
+        --arg repo "${GITHUB_REPOSITORY}" \
+        --argjson repo_id "${REPOSITORY_ID}" \
+        --argjson run_id "${run_id}" \
+        --argjson attempt "${evidence_attempt}" '
+          .id == $run_id and .run_attempt == $attempt and
+          .path == $path and .event == "workflow_dispatch" and
+          .head_branch == "main" and .head_sha == $commit and
+          .status == "completed" and
+          (.conclusion == "failure" or .conclusion == "cancelled" or
+            .conclusion == "timed_out") and
+          .actor.login == $login and .actor.id == $owner_id and
+          .repository.full_name == $repo and .repository.id == $repo_id
+        ' "${evidence_run_file}" >/dev/null \
+        || die "hotfix workflow evidence attempt for ${tag} was not a recoverable failure"
+    fi
     jq -e \
       --arg path "${workflow_path}" \
       --arg ref "${GITHUB_REPOSITORY}/${workflow_path}@refs/heads/main" \
@@ -494,35 +519,24 @@ verify_release_and_link() {
      [ "sha256:$(sha256sum "${artifact_zip}" | awk '{ print $1 }')" != "${artifact_digest}" ]; then
     die "workflow receipt artifact bytes for ${tag} differ"
   fi
-  local artifact_files="${node_dir}/artifact-files"
-  unzip -Z1 "${artifact_zip}" | sed 's#^.*/##' | sort > "${artifact_files}"
+  local extracted="${node_dir}/artifact-files"
   if [ "${kind}" = upstream ]; then
-    diff -u <(printf '%s\n' run-state.json upstream-sync-receipt.json | sort) "${artifact_files}" >/dev/null \
-      || die "upstream receipt artifact files for ${tag} differ"
-    local run_state_member run_state_file="${node_dir}/run-state.json"
-    run_state_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ '$NF == "run-state.json" { print }')
-    [ "$(wc -l <<< "${run_state_member}" | tr -d ' ')" -eq 1 ] \
-      || die "historical run state for ${tag} is missing or duplicated"
-    unzip -p "${artifact_zip}" "${run_state_member}" > "${run_state_file}"
-    if [ ! -s "${run_state_file}" ] || [ "$(stat -c %s "${run_state_file}")" -gt 1000000 ]; then
-      die "historical run state for ${tag} exceeds the metadata limit"
-    fi
+    python3 "${ARTIFACT_EXTRACTOR}" "${artifact_zip}" "${extracted}" \
+      run-state.json:1000000 upstream-sync-receipt.json:1000000
+    local run_state_file="${extracted}/run-state.json"
     validate_upstream_run_state "${run_state_file}" "${receipt_file}" "${commit}" "${tag}"
   else
-    diff -u <(printf '%s\n' final-plan.out hotfix-release-receipt.json independently-verified-receipt.json | sort) "${artifact_files}" >/dev/null \
-      || die "hotfix receipt artifact files for ${tag} differ"
-    cmp -s <(unzip -p "${artifact_zip}" hotfix-release-receipt.json) "${receipt_file}" \
+    python3 "${ARTIFACT_EXTRACTOR}" "${artifact_zip}" "${extracted}" \
+      final-plan.out:1000000 \
+      hotfix-release-receipt.json:1000000 \
+      independently-verified-receipt.json:1000000
+    cmp -s "${extracted}/hotfix-release-receipt.json" "${receipt_file}" \
       || die "hotfix artifact receipt bytes for ${tag} differ"
-    cmp -s <(unzip -p "${artifact_zip}" independently-verified-receipt.json) "${receipt_file}" \
+    cmp -s "${extracted}/independently-verified-receipt.json" "${receipt_file}" \
       || die "independent artifact receipt bytes for ${tag} differ"
 
-    local final_member final_plan="${node_dir}/final-plan.out"
-    final_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ '$NF == "final-plan.out" { print }')
-    [ "$(wc -l <<< "${final_member}" | tr -d ' ')" -eq 1 ] \
-      || die "historical final plan for ${tag} is missing or duplicated"
-    unzip -p "${artifact_zip}" "${final_member}" > "${final_plan}"
-    if [ ! -s "${final_plan}" ] || \
-       [ "$(tail -c 1 "${final_plan}" | od -An -t x1 | tr -d ' \n')" != 0a ]; then
+    local final_plan="${extracted}/final-plan.out"
+    if [ "$(tail -c 1 "${final_plan}" | od -An -t x1 | tr -d ' \n')" != 0a ]; then
       die "historical final plan for ${tag} is malformed"
     fi
     local plan_keys="${node_dir}/plan-keys" expected_plan_keys="${node_dir}/expected-plan-keys"
@@ -613,11 +627,7 @@ verify_release_and_link() {
       die "historical final plan identity for ${tag} differs"
     fi
   fi
-  local receipt_member
-  receipt_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ -v name="${receipt_name}" '$NF == name { print }')
-  [ "$(wc -l <<< "${receipt_member}" | tr -d ' ')" -eq 1 ] \
-    || die "artifact receipt path for ${tag} is missing or duplicated"
-  cmp -s <(unzip -p "${artifact_zip}" "${receipt_member}") "${receipt_file}" \
+  cmp -s "${extracted}/${receipt_name}" "${receipt_file}" \
     || die "artifact receipt bytes for ${tag} differ"
 
   jq -n \

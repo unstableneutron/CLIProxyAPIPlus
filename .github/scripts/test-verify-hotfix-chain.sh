@@ -413,6 +413,7 @@ case "${path}" in
   repos/*/releases/assets/13) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/hotfix-release-receipt.json" ;;
   repos/*/actions/runs/800/artifacts*) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/artifacts.json" ;;
   repos/*/actions/runs/900/artifacts*) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/artifacts.json" ;;
+  repos/*/actions/runs/900/attempts/1) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/attempt-1.json" ;;
   repos/*/actions/runs/800) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/run.json" ;;
   repos/*/actions/runs/900) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.1/run.json" ;;
   repos/*/actions/artifacts/10800/zip) cat "${STUB_ROOT}/fixtures/v7.2.131-unstableneutron.0/artifact.zip" ;;
@@ -539,20 +540,63 @@ test_workflow_legacy_preflight_and_chained_parent() {
   rm -rf "${root}"
 }
 
-test_accepts_parent_artifact_from_earlier_successfully_recovered_attempt() {
-  local root run
+test_accepts_parent_artifact_only_from_earlier_failed_attempt() {
+  local root run attempt conclusion
+  for conclusion in failure cancelled timed_out; do
+    root=$(mktemp -d)
+    setup_fixture "${root}"
+    run="${root}/fixtures/${FIRST_TAG}/run.json"
+    attempt="${root}/fixtures/${FIRST_TAG}/attempt-1.json"
+    jq --arg conclusion "${conclusion}" \
+      '.id = 900 | .run_attempt = 1 | .conclusion = $conclusion' \
+      "${run}" > "${attempt}"
+    jq '.run_attempt = 2' "${run}" > "${run}.new"
+    mv "${run}.new" "${run}"
+    run_chain \
+      "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+      "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+      "${root}/recovered-parent.json" >/dev/null
+    jq -e '.immediate_parent.workflow.run_attempt == "1"' \
+      "${root}/recovered-parent.json" >/dev/null \
+      || fail "chain did not retain the immutable parent evidence attempt"
+    rm -rf "${root}"
+  done
+
   root=$(mktemp -d)
   setup_fixture "${root}"
   run="${root}/fixtures/${FIRST_TAG}/run.json"
+  jq '.id = 900 | .run_attempt = 1' "${run}" \
+    > "${root}/fixtures/${FIRST_TAG}/attempt-1.json"
   jq '.run_attempt = 2' "${run}" > "${run}.new"
   mv "${run}.new" "${run}"
-  run_chain \
-    "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
-    "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
-    "${root}/recovered-parent.json" >/dev/null
-  jq -e '.immediate_parent.workflow.run_attempt == "1"' \
-    "${root}/recovered-parent.json" >/dev/null \
-    || fail "chain did not retain the immutable parent evidence attempt"
+  expect_second_failure "${root}" "was not a recoverable failure"
+  rm -rf "${root}"
+}
+
+test_rejects_oversized_compressed_artifact_member() {
+  local root node artifact digest size
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  node="${root}/fixtures/${FIRST_TAG}"
+  artifact="${node}/artifact.zip"
+  python3 - "${node}" "${artifact}" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+node = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2], "w", zipfile.ZIP_DEFLATED) as archive:
+    archive.write(node / "hotfix-release-receipt.json", "hotfix-release-receipt.json")
+    archive.write(node / "hotfix-release-receipt.json", "independently-verified-receipt.json")
+    archive.writestr("final-plan.out", b"x" * 1_000_001)
+PY
+  digest=$(sha256_digest "${artifact}")
+  size=$(stat -c %s "${artifact}")
+  jq --arg digest "${digest}" --argjson size "${size}" \
+    '.artifacts[0].digest = $digest | .artifacts[0].size_in_bytes = $size' \
+    "${node}/artifacts.json" > "${node}/artifacts.json.new"
+  mv "${node}/artifacts.json.new" "${node}/artifacts.json"
+  expect_second_failure "${root}" "archive member exceeds its output limit"
   rm -rf "${root}"
 }
 
@@ -745,11 +789,12 @@ test_rejects_schema_v2_at_suffix_one() {
 
 main() {
   [ -x "${VERIFIER}" ] || fail "chain verifier is missing or not executable"
-  for command in gh jq python3 unzip; do
+  for command in gh jq python3; do
     command -v "${command}" >/dev/null || fail "${command} is required"
   done
   test_workflow_legacy_preflight_and_chained_parent
-  test_accepts_parent_artifact_from_earlier_successfully_recovered_attempt
+  test_accepts_parent_artifact_only_from_earlier_failed_attempt
+  test_rejects_oversized_compressed_artifact_member
   test_accepts_planner_sanitized_source_tag_linkage
   test_rejects_noncanonical_historical_checksum_separators
   test_rejects_historical_receipt_and_planner_drift

@@ -57,10 +57,12 @@ rejected. Final-plan regeneration and the complete run-attempt artifact are
 published before the immutable release receipt. If receipt upload succeeds but
 that attempt later fails, only a later attempt of the same workflow run may adopt
 the receipt: it must reproduce its bytes and verify the exact earlier-attempt
-artifact and final plan. The final successful attempt may therefore be later
-than the immutable evidence attempt recorded by the receipt. Tags, releases,
-receipts, and canonical GHCR tags are never deleted, moved, clobbered, or
-overwritten during recovery.
+artifact and final plan, and that earlier attempt must have ended in `failure`,
+`cancelled`, or `timed_out`. Successful attempts are never recovery evidence.
+Artifact ZIP members are allowlisted and size-bounded before bounded extraction.
+The final successful attempt may therefore be later than the immutable evidence
+attempt recorded by the receipt. Tags, releases, receipts, and canonical GHCR
+tags are never deleted, moved, clobbered, or overwritten during recovery.
 
 ## Related issues
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
+
 die() {
   echo "[hotfix-finalization-evidence] $*" >&2
   exit 1
@@ -49,8 +52,8 @@ jq -e \
     .path == $path and .event == "workflow_dispatch" and
     .head_branch == "main" and .head_sha == $commit and
     .status == "completed" and
-    (.conclusion == "success" or .conclusion == "failure" or
-      .conclusion == "cancelled" or .conclusion == "timed_out") and
+    (.conclusion == "failure" or .conclusion == "cancelled" or
+      .conclusion == "timed_out") and
     .actor.login == "unstableneutron" and .actor.id == 156744497 and
     .repository.full_name == "unstableneutron/CLIProxyAPIPlus" and
     .repository.id == 1247056725
@@ -90,15 +93,16 @@ if [ "$(stat -c %s "${ARTIFACT_ZIP}")" -ne "${ARTIFACT_SIZE}" ] || \
    [ "sha256:$(sha256sum "${ARTIFACT_ZIP}" | awk '{ print $1 }')" != "${ARTIFACT_DIGEST}" ]; then
   die "receipt evidence artifact bytes differ"
 fi
-diff -u \
-  <(printf '%s\n' final-plan.out hotfix-release-receipt.json independently-verified-receipt.json | sort) \
-  <(unzip -Z1 "${ARTIFACT_ZIP}" | sed 's#^.*/##' | sort) >/dev/null \
-  || die "receipt evidence artifact file set differs"
-cmp -s <(unzip -p "${ARTIFACT_ZIP}" hotfix-release-receipt.json) "${RECEIPT}" \
+EXTRACTED=${ROOT}/artifact
+python3 "${ARTIFACT_EXTRACTOR}" "${ARTIFACT_ZIP}" "${EXTRACTED}" \
+  hotfix-release-receipt.json:1000000 \
+  independently-verified-receipt.json:1000000 \
+  final-plan.out:1000000
+cmp -s "${EXTRACTED}/hotfix-release-receipt.json" "${RECEIPT}" \
   || die "artifact receipt bytes differ"
-cmp -s <(unzip -p "${ARTIFACT_ZIP}" independently-verified-receipt.json) "${RECEIPT}" \
+cmp -s "${EXTRACTED}/independently-verified-receipt.json" "${RECEIPT}" \
   || die "independently verified artifact receipt bytes differ"
-cmp -s <(unzip -p "${ARTIFACT_ZIP}" final-plan.out) "${FINAL_PLAN}" \
+cmp -s "${EXTRACTED}/final-plan.out" "${FINAL_PLAN}" \
   || die "artifact final plan differs from deterministic regeneration"
 
 echo "[OK] adopted hotfix finalization evidence from run ${EVIDENCE_RUN_ID} attempt ${EVIDENCE_ATTEMPT}"

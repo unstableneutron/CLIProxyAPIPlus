@@ -337,7 +337,7 @@ EOF
 }
 
 test_finalization_recovers_exact_prior_attempt_evidence() {
-  local root gh receipt final_plan artifact digest size output
+  local root gh receipt final_plan artifact bomb digest size output conclusion
   root=$(mktemp -d)
   gh=${root}/gh
   receipt=${root}/hotfix-release-receipt.json
@@ -384,23 +384,64 @@ EOF
   chmod +x "${gh}"
   local commit
   commit=$(printf 'a%.0s' {1..40})
-  ATTEMPT_JSON=$(jq -cn \
-    --arg commit "${commit}" '{id:123,run_attempt:1,path:".github/workflows/hotfix-release.yml",event:"workflow_dispatch",head_branch:"main",head_sha:$commit,status:"completed",conclusion:"failure",actor:{login:"unstableneutron",id:156744497},repository:{full_name:"unstableneutron/CLIProxyAPIPlus",id:1247056725}}')
   ARTIFACTS_JSON=$(jq -cn \
     --arg digest "${digest}" \
     --argjson size "${size}" \
     --arg commit "${commit}" '{total_count:1,artifacts:[{id:456,name:"hotfix-release-receipt-123-1",digest:$digest,size_in_bytes:$size,expired:false,archive_download_url:"https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/actions/artifacts/456/zip",workflow_run:{id:123,repository_id:1247056725,head_repository_id:1247056725,head_sha:$commit}}]}')
-  export ATTEMPT_JSON ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP=${artifact}
-  GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
+  export ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP=${artifact}
+  for conclusion in failure cancelled timed_out; do
+    ATTEMPT_JSON=$(jq -cn \
+      --arg commit "${commit}" \
+      --arg conclusion "${conclusion}" \
+      '{id:123,run_attempt:1,path:".github/workflows/hotfix-release.yml",event:"workflow_dispatch",head_branch:"main",head_sha:$commit,status:"completed",conclusion:$conclusion,actor:{login:"unstableneutron",id:156744497},repository:{full_name:"unstableneutron/CLIProxyAPIPlus",id:1247056725}}')
+    export ATTEMPT_JSON
+    GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
+      PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
+        "${receipt}" "${final_plan}" > "${output}"
+    assert_contains "${output}" "adopted hotfix finalization evidence"
+  done
+  ATTEMPT_JSON=$(jq -c '.conclusion = "success"' <<< "${ATTEMPT_JSON}")
+  export ATTEMPT_JSON
+  if GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
     PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
-      "${receipt}" "${final_plan}" > "${output}"
-  assert_contains "${output}" "adopted hotfix finalization evidence"
+      "${receipt}" "${final_plan}" >/dev/null 2>&1; then
+    fail "finalization recovery accepted an earlier successful attempt"
+  fi
+  ATTEMPT_JSON=$(jq -c '.conclusion = "failure"' <<< "${ATTEMPT_JSON}")
+  export ATTEMPT_JSON
   printf 'tampered=plan\n' > "${final_plan}"
   if GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
     PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
       "${receipt}" "${final_plan}" >/dev/null 2>&1; then
     fail "finalization recovery accepted a mismatched deterministic plan"
   fi
+  printf 'deterministic=plan\n' > "${final_plan}"
+  bomb=${root}/bomb.zip
+  python3 - "${root}" "${bomb}" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+root = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2], "w", zipfile.ZIP_DEFLATED) as archive:
+    archive.write(root / "hotfix-release-receipt.json", "hotfix-release-receipt.json")
+    archive.write(root / "independently-verified-receipt.json", "independently-verified-receipt.json")
+    archive.writestr("final-plan.out", b"x" * 1_000_001)
+PY
+  digest="sha256:$(sha256sum "${bomb}" | awk '{ print $1 }')"
+  size=$(stat -c %s "${bomb}")
+  ARTIFACTS_JSON=$(jq -c \
+    --arg digest "${digest}" --argjson size "${size}" \
+    '.artifacts[0].digest = $digest | .artifacts[0].size_in_bytes = $size' \
+    <<< "${ARTIFACTS_JSON}")
+  SOURCE_ARTIFACT_ZIP=${bomb}
+  export ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP
+  if GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
+    PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
+      "${receipt}" "${final_plan}" > "${output}" 2>&1; then
+    fail "finalization recovery accepted an oversized compressed artifact member"
+  fi
+  assert_contains "${output}" "archive member exceeds its output limit"
   unset ATTEMPT_JSON ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP
   rm -rf "${root}"
 }

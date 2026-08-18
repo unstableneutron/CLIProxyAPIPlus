@@ -830,12 +830,20 @@ async function validateWorkflowRun(
     hotfix: boolean;
     allowNotReady: boolean;
     allowFailedHotfixEvidence?: boolean;
+    exactAttempt?: number;
+    requireFailedHotfixEvidence?: boolean;
   },
 ): Promise<{ attempt: number; headSHA: string; successful: boolean }> {
+  const endpoint = options.exactAttempt === undefined
+    ? `/repos/${REPOSITORY}/actions/runs/${runID}`
+    : `/repos/${REPOSITORY}/actions/runs/${runID}/attempts/${options.exactAttempt}`;
   const run = object(
-    await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}`, signal),
+    await client.get(endpoint, signal),
     "workflow run",
   );
+  if (integer(run.id, "workflow run ID") !== runID) {
+    throw new RejectedDelivery("workflow run ID differs");
+  }
   repository(run.repository, "workflow repository");
   identity(run.actor, OWNER_LOGIN, OWNER_ID, "User", "workflow actor");
   if (run.status === "queued" || run.status === "in_progress") {
@@ -867,7 +875,13 @@ async function validateWorkflowRun(
     throw new RejectedDelivery("workflow event differs");
   }
   const attempt = integer(run.run_attempt, "workflow run attempt");
-  if (attempt < 1) throw new RejectedDelivery("workflow run attempt differs");
+  if (
+    attempt < 1 ||
+    (options.exactAttempt !== undefined && attempt !== options.exactAttempt) ||
+    (options.requireFailedHotfixEvidence === true && successful)
+  ) {
+    throw new RejectedDelivery("workflow run attempt differs");
+  }
 
   const runHeadSHA = sha(run.head_sha, "workflow head SHA");
   if (options.hotfix) {
@@ -1273,6 +1287,22 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   const run = await validateWorkflowRun(client, core.workflowRunID, HOTFIX_WORKFLOW, expected.commit, signal, { hotfix: true, allowNotReady: false });
   const evidenceAttempt = decimalInteger(workflowReceipt.run_attempt, "release workflow attempt");
   if (evidenceAttempt > run.attempt || expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== evidenceAttempt || expected.workflow.headSHA !== run.headSHA) throw new RejectedDelivery("recorded parent workflow differs");
+  if (evidenceAttempt < run.attempt) {
+    await validateWorkflowRun(
+      client,
+      core.workflowRunID,
+      HOTFIX_WORKFLOW,
+      expected.commit,
+      signal,
+      {
+        hotfix: true,
+        allowNotReady: false,
+        allowFailedHotfixEvidence: true,
+        exactAttempt: evidenceAttempt,
+        requireFailedHotfixEvidence: true,
+      },
+    );
+  }
   const files = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
   await verifyRegistry(registry, expected.tag, core.imageDigest, core.architectureImages, signal, { requireLatestParity: false });
   const previousRaw = object(receipt.previous_release, "previous release");
@@ -1554,6 +1584,24 @@ export async function validateRelease(
     workflowRunAttempt = workflowRun.attempt;
     if (releaseWorkflowAttempt > workflowRunAttempt) {
       throw new RejectedDelivery("release workflow attempt differs");
+    }
+    if (releaseWorkflowAttempt < workflowRunAttempt) {
+      await historicalEvidence(() =>
+        validateWorkflowRun(
+          client,
+          core.workflowRunID,
+          HOTFIX_WORKFLOW,
+          commit,
+          signal,
+          {
+            hotfix: true,
+            allowNotReady: false,
+            allowFailedHotfixEvidence: true,
+            exactAttempt: releaseWorkflowAttempt,
+            requireFailedHotfixEvidence: true,
+          },
+        ),
+      );
     }
     const artifact = await workflowArtifact(client, core.workflowRunID, releaseWorkflowAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
     const finalPlan = artifact.get("final-plan.out");

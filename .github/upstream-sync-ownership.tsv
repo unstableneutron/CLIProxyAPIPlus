@@ -16,6 +16,7 @@ fork-owned	.github/scripts/validate-hotfix-release.sh
 fork-owned	.github/scripts/inspect-ghcr-image-state.sh
 fork-owned	.github/scripts/inspect-hotfix-publication-state.sh
 fork-owned	.github/scripts/confirm-hotfix-identities-absent.sh
+fork-owned	.github/scripts/extract-verified-actions-artifact.py
 fork-owned	.github/scripts/verify-hotfix-release.sh
 fork-owned	.github/scripts/verify-hotfix-chain.sh
 fork-owned	.github/scripts/verify-hotfix-finalization-evidence.sh

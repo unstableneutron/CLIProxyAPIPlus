@@ -469,6 +469,7 @@ function releaseFixture(
     encodedContent(stateBytes),
   );
   values.set(`/repos/${REPOSITORY}/actions/runs/${currentWorkflowID}`, {
+    id: currentWorkflowID,
     repository: structuredClone(repository),
     actor: structuredClone(owner),
     path: hotfix
@@ -570,6 +571,7 @@ function releaseFixture(
       encodedContent(stateBytes),
     );
     values.set(`/repos/${REPOSITORY}/actions/runs/${baseWorkflowID}`, {
+      id: baseWorkflowID,
       repository: structuredClone(repository),
       actor: structuredClone(owner),
       path: ".github/workflows/upstream-sync-v2.yml",
@@ -657,6 +659,25 @@ function releaseFixture(
       : undefined,
   };
   return fixture;
+}
+
+function addHotfixAttempt(
+  fixture: ReleaseFixture,
+  runID: number,
+  attempt: number,
+  conclusion: "success" | "failure" | "cancelled" | "timed_out",
+) {
+  const run = structuredClone(
+    fixture.values.get(`/repos/${REPOSITORY}/actions/runs/${runID}`),
+  );
+  run.id = runID;
+  run.run_attempt = attempt;
+  run.status = "completed";
+  run.conclusion = conclusion;
+  fixture.values.set(
+    `/repos/${REPOSITORY}/actions/runs/${runID}/attempts/${attempt}`,
+    run,
+  );
 }
 
 function fixtureReleaseLink(
@@ -849,6 +870,7 @@ function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
     encodedContent(fixture.stateBytes),
   );
   fixture.values.set(`/repos/${REPOSITORY}/actions/runs/${workflowID}`, {
+    id: workflowID,
     repository: structuredClone(repository),
     actor: structuredClone(owner),
     path: ".github/workflows/hotfix-release.yml",
@@ -1420,17 +1442,60 @@ describe("hotfix release provenance", () => {
     });
   });
 
-  test("accepts immutable receipt evidence from an earlier attempt of the same successful run", async () => {
+  test.each(["failure", "cancelled", "timed_out"] as const)("accepts immutable receipt evidence from an earlier %s attempt of the same successful run", async (conclusion) => {
     const fixture = releaseFixture("hotfix");
     fixture.values.get(
       `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
     ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, conclusion);
     const result = await validate(fixture);
     expect(result).toMatchObject({
       kind: "hotfix",
       workflowRunID: fixture.currentWorkflowID,
       workflowRunAttempt: 2,
     });
+  });
+
+  test("rejects immutable receipt evidence from an earlier successful attempt", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "success");
+    await expect(validate(fixture)).rejects.toThrow("workflow run attempt differs");
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies exact earlier-attempt HTTP %s evidence", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/attempts/1`;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
   });
 
   test("keeps exact failed-attempt hotfix evidence retryable until the same run succeeds", async () => {
@@ -1463,10 +1528,21 @@ describe("hotfix release provenance", () => {
     second.values.get(
       `/repos/${REPOSITORY}/actions/runs/${parentRunID}`,
     ).run_attempt = 2;
+    addHotfixAttempt(second, parentRunID, 1, "failure");
     await expect(validate(second)).resolves.toMatchObject({
       kind: "hotfix",
       tag: "v7.2.132-unstableneutron.2",
     });
+  });
+
+  test("rejects historical parent evidence from an earlier successful attempt", async () => {
+    const second = advanceHotfixFixture(releaseFixture("hotfix"));
+    const parentRunID = Number(second.receipt.previous_release.workflow.run_id);
+    second.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${parentRunID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(second, parentRunID, 1, "success");
+    await expect(validate(second)).rejects.toThrow("workflow run attempt differs");
   });
 
   test.each([
