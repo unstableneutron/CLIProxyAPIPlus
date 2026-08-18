@@ -84,6 +84,15 @@ type JSONObject = Record<string, unknown>;
 
 export class RejectedDelivery extends Error {}
 export class RetryableNotReady extends Error {}
+export class RegistryHTTPError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RegistryHTTPError";
+  }
+}
 export class GitHubHTTPError extends Error {
   constructor(
     readonly status: number,
@@ -1214,7 +1223,7 @@ async function historicalEvidence<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     if (
-      error instanceof GitHubHTTPError &&
+      (error instanceof GitHubHTTPError || error instanceof RegistryHTTPError) &&
       (error.status === 404 || error.status === 410)
     ) {
       throw new RejectedDelivery("historical release evidence is unavailable");

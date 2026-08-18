@@ -10,6 +10,7 @@ import {
   REPOSITORY,
   REPOSITORY_ID,
   RejectedDelivery,
+  RegistryHTTPError,
   RetryableNotReady,
   revalidateRelease,
   validateRelease,
@@ -1704,6 +1705,36 @@ describe("hotfix release provenance", () => {
           { now },
         ),
       ).rejects.toBeInstanceOf(GitHubHTTPError);
+    },
+  );
+
+  test.each([
+    ["schema-v1 root", () => releaseFixture("hotfix"), "v7.2.132-unstableneutron.0"],
+    ["schema-v2 parent", () => advanceHotfixFixture(releaseFixture("hotfix")), "v7.2.132-unstableneutron.1"],
+  ])(
+    "classifies %s historical registry HTTP failures",
+    async (_name, makeFixture, historicalTag) => {
+      for (const status of [404, 410, 429, 500]) {
+        const fixture = makeFixture();
+        const original = fixture.registry.client;
+        fixture.registry.client = {
+          manifest: (reference, requestSignal) => {
+            if (reference === historicalTag) {
+              throw new RegistryHTTPError(
+                status,
+                `registry returned ${status}`,
+              );
+            }
+            return original.manifest(reference, requestSignal);
+          },
+        };
+        const validation = validate(fixture);
+        if (status === 404 || status === 410) {
+          await expect(validation).rejects.toBeInstanceOf(RejectedDelivery);
+        } else {
+          await expect(validation).rejects.toBeInstanceOf(RegistryHTTPError);
+        }
+      }
     },
   );
 

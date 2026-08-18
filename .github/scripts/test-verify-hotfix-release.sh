@@ -242,6 +242,34 @@ test_receipt_binds_release_and_upstream_state() {
     "${root}" "checksum for" \
     "${root}/asset-output.json" "" "${root}/wrong-asset.json"
 
+  sed -i 's/  / */' "${root}/checksums.txt"
+  checksums_sha=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
+  jq --arg digest "sha256:${checksums_sha}" \
+    '(.assets[] | select(.name == "checksums.txt") | .digest) = $digest' \
+    "${root}/release-api.json" > "${root}/starred-checksum-api.json"
+  expect_failure \
+    "${root}" "checksums.txt contains a malformed line" \
+    "${root}/starred-output.json" "" "${root}/starred-checksum-api.json"
+  make_fixtures "${root}"
+
+  local separator_case
+  for separator_case in single-space tab; do
+    if [ "${separator_case}" = single-space ]; then
+      sed -i 's/  / /' "${root}/checksums.txt"
+    else
+      sed -i $'s/  /\t/' "${root}/checksums.txt"
+    fi
+    checksums_sha=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
+    jq --arg digest "sha256:${checksums_sha}" \
+      '(.assets[] | select(.name == "checksums.txt") | .digest) = $digest' \
+      "${root}/release-api.json" > "${root}/${separator_case}-checksum-api.json"
+    expect_failure \
+      "${root}" "checksums.txt contains a malformed line" \
+      "${root}/${separator_case}-output.json" "" \
+      "${root}/${separator_case}-checksum-api.json"
+    make_fixtures "${root}"
+  done
+
   jq 'del(.manifests[] | select(.platform.architecture == "arm64"))' \
     "${FIXTURES}/image-index.json" > "${root}/missing-platform.json"
   expect_failure \

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { RegistryClient } from "./provenance";
+import { RegistryHTTPError, type RegistryClient } from "./provenance";
 
 const REPOSITORY = "unstableneutron/cli-proxy-api-plus";
 export const MANIFEST_ACCEPT = [
@@ -20,7 +20,11 @@ export class PublicGhcrRegistry implements RegistryClient {
       this.token = await this.getToken(signal);
       response = await this.request(reference, signal);
     }
-    if (!response.ok) throw new Error(`registry returned ${response.status}`);
+    if (!response.ok)
+      throw new RegistryHTTPError(
+        response.status,
+        `registry returned ${response.status}`,
+      );
     const bytes = new Uint8Array(await response.arrayBuffer());
     return {
       bytes,

@@ -232,9 +232,9 @@ if [ "${CHECKSUM_DIGEST}" != "${EXPECTED_CHECKSUM_DIGEST}" ]; then
 fi
 
 CHECKSUM_ASSETS='{}'
+CHECKSUM_LINE_PATTERN='^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*\.(tar\.gz|zip))$'
 while IFS= read -r LINE || [ -n "${LINE}" ]; do
-  [ -n "${LINE}" ] || continue
-  if [[ ! "${LINE}" =~ ^([0-9a-f]{64})[[:space:]]+\*?(.+)$ ]]; then
+  if [[ ! "${LINE}" =~ ${CHECKSUM_LINE_PATTERN} ]]; then
     die "checksums.txt contains a malformed line"
   fi
   DIGEST="sha256:${BASH_REMATCH[1]}"

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { RegistryHTTPError } from "./provenance";
 import { PublicGhcrRegistry, rawDigest } from "./registry";
 
 describe("public GHCR client", () => {
@@ -44,12 +45,16 @@ describe("public GHCR client", () => {
   });
   test("propagates registry errors as network/API errors", async () => {
     const fetcher: any = async () => new Response("", { status: 500 });
-    await expect(
-      new PublicGhcrRegistry(fetcher).manifest(
+    try {
+      await new PublicGhcrRegistry(fetcher).manifest(
         "latest",
         AbortSignal.timeout(1000),
-      ),
-    ).rejects.toThrow("registry returned 500");
+      );
+      throw new Error("expected registry failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RegistryHTTPError);
+      expect((error as RegistryHTTPError).status).toBe(500);
+    }
   });
   test("computes digest over exact raw body", () =>
     expect(rawDigest(new TextEncoder().encode("x"))).not.toBe(

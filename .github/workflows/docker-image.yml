@@ -224,8 +224,17 @@ jobs:
           fi
           ARCH_TAG="${TAG}-${TAG_SUFFIX}"
           EXISTING_DIGEST=""
-          if EXISTING_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${ARCH_TAG}" 2>/dev/null)"; then
+          EXISTING_INSPECT_FILE=$(mktemp)
+          trap 'rm -f "${EXISTING_INSPECT_FILE}"' EXIT
+          IMAGE_STATE="$(.github/scripts/inspect-ghcr-image-state.sh \
+            "${IMAGE}:${ARCH_TAG}" "${EXISTING_INSPECT_FILE}")"
+          if [ "${IMAGE_STATE}" = present ]; then
+            EXISTING_INSPECT="$(cat "${EXISTING_INSPECT_FILE}")"
             EXISTING_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${EXISTING_INSPECT}")"
+            if ! [[ "${EXISTING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Could not resolve existing architecture tag ${IMAGE}:${ARCH_TAG} to one digest." >&2
+              exit 1
+            fi
           fi
           if [ -n "${EXISTING_DIGEST}" ] && [ "${EXISTING_DIGEST}" != "${ARCHITECTURE_DIGEST}" ]; then
             echo "Architecture tag ${IMAGE}:${ARCH_TAG} already resolves to ${EXISTING_DIGEST}, expected ${ARCHITECTURE_DIGEST}." >&2

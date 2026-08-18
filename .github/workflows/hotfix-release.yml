@@ -163,20 +163,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.policy.outputs.tag }}
         run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists remotely." >&2
-            exit 1
-          fi
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists." >&2
-            exit 1
-          fi
-          for REF in "${IMAGE}:${TAG}" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"; do
-            if docker buildx imagetools inspect "${REF}" >/dev/null 2>&1; then
-              echo "Image identity ${REF} already exists." >&2
-              exit 1
-            fi
-          done
+          .github/scripts/confirm-hotfix-identities-absent.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
 
       - name: Run complete repository and upstream validation
         env:
@@ -277,16 +265,8 @@ jobs:
             echo "Upstream or release state moved after validation." >&2
             exit 1
           fi
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${TAG} appeared after validation." >&2
-            exit 1
-          fi
-          for REF in "${IMAGE}:${TAG}" "${IMAGE}:${TAG}-amd64" "${IMAGE}:${TAG}-arm64"; do
-            if docker buildx imagetools inspect "${REF}" >/dev/null 2>&1; then
-              echo "Image identity ${REF} appeared after validation." >&2
-              exit 1
-            fi
-          done
+          .github/scripts/confirm-hotfix-identities-absent.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
 
       - name: Create exact annotated hotfix tag
         id: tag
