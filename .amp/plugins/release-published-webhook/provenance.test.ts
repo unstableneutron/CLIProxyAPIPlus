@@ -75,7 +75,11 @@ function fixturePlanFingerprint(
     .digest("hex");
 }
 
-function runState(receipt: Record<string,any>, commit:string, tag:string, plusTag="v7.2.127-3", originalTag="v7.2.132") { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:originalTag,commit:"2".repeat(40)},plus:{tag:plusTag,tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit,plusTag,originalTag),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
+function runState(receipt: Record<string,any>, commit:string, tag:string, plusTag="v7.2.127-3", originalTag="v7.2.132") {
+  const release: Record<string, unknown> = {url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images};
+  if (receipt.schema_version === 3) release.asset_identities = receipt.release_asset_identities;
+  return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:originalTag,commit:"2".repeat(40)},plus:{tag:plusTag,tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit,plusTag,originalTag),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release}));
+}
 
 function finalPlan(tag: string, commit: string, plusTag = "v7.2.127-3", originalTag = "v7.2.132") {
   const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
@@ -696,6 +700,129 @@ function releaseFixture(
   return fixture;
 }
 
+function refreshUpstreamSchema3Evidence(fixture: ReleaseFixture): void {
+  const content = bytes(JSON.stringify(fixture.receipt));
+  const releasePaths = [
+    `/repos/${REPOSITORY}/releases/${fixture.canonical.id}`,
+    `/repos/${REPOSITORY}/releases/tags/${fixture.currentTag}`,
+  ];
+  for (const path of releasePaths) {
+    const release = fixture.values.get(path);
+    const asset = release.assets.find(
+      (candidate: any) => candidate.name === "upstream-sync-receipt.json",
+    );
+    asset.size = content.length;
+    asset.digest = sha256(content);
+  }
+  fixture.receiptAsset.size = content.length;
+  fixture.receiptAsset.digest = sha256(content);
+  fixture.assetBytes.set(fixture.receiptAsset.url, content);
+
+  const run = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+  );
+  const zip = storedZip({
+    "upstream-sync-receipt.json": content,
+    "run-state.json": runState(
+      fixture.receipt,
+      fixture.currentCommit,
+      fixture.currentTag,
+      fixture.plusTag,
+      fixture.originalTag,
+    ),
+  });
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  artifact.name = `upstream-sync-receipt-${fixture.currentWorkflowID}-1`;
+  artifact.workflow_run.head_sha = run.head_sha;
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
+function upgradeCurrentUpstreamToSchema3(fixture: ReleaseFixture): void {
+  if (fixture.receipt.receipt_type) throw new Error("fixture is not upstream");
+  const identities = Object.fromEntries(
+    fixture.canonical.assets
+      .filter((asset: any) => asset.name !== "upstream-sync-receipt.json")
+      .map((asset: any) => [
+        asset.name,
+        { id: asset.id, size: asset.size, digest: asset.digest },
+      ]),
+  );
+  fixture.receipt.schema_version = 3;
+  fixture.receipt.release_asset_identities = identities;
+  fixture.receipt.release_workflow = {
+    path: ".github/workflows/upstream-sync-v2.yml",
+    ref: `${REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main`,
+    commit: fixture.currentCommit,
+    run_id: String(fixture.currentWorkflowID),
+    run_attempt: "1",
+  };
+  refreshUpstreamSchema3Evidence(fixture);
+}
+
+function upgradeBaseUpstreamToSchema3(fixture: ReleaseFixture): void {
+  if (!fixture.baseReceipt || !fixture.baseRelease || !fixture.baseReceiptAsset) {
+    throw new Error("fixture has no upstream base");
+  }
+  const identities = Object.fromEntries(
+    fixture.baseRelease.assets
+      .filter((asset: any) => asset.name !== "upstream-sync-receipt.json")
+      .map((asset: any) => [
+        asset.name,
+        { id: asset.id, size: asset.size, digest: asset.digest },
+      ]),
+  );
+  fixture.baseReceipt.schema_version = 3;
+  fixture.baseReceipt.release_asset_identities = identities;
+  fixture.baseReceipt.release_workflow = {
+    path: ".github/workflows/upstream-sync-v2.yml",
+    ref: `${REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main`,
+    commit: fixture.baseCommit,
+    run_id: "800",
+    run_attempt: "1",
+  };
+
+  const content = bytes(JSON.stringify(fixture.baseReceipt));
+  for (const path of [
+    `/repos/${REPOSITORY}/releases/100`,
+    `/repos/${REPOSITORY}/releases/tags/${fixture.baseTag}`,
+  ]) {
+    const release = fixture.values.get(path);
+    const asset = release.assets.find(
+      (candidate: any) => candidate.name === "upstream-sync-receipt.json",
+    );
+    asset.size = content.length;
+    asset.digest = sha256(content);
+  }
+  fixture.baseReceiptAsset.size = content.length;
+  fixture.baseReceiptAsset.digest = sha256(content);
+  fixture.assetBytes.set(fixture.baseReceiptAsset.url, content);
+  const run = fixture.values.get(`/repos/${REPOSITORY}/actions/runs/800`);
+  const zip = storedZip({
+    "upstream-sync-receipt.json": content,
+    "run-state.json": runState(
+      fixture.baseReceipt,
+      fixture.baseCommit!,
+      fixture.baseTag!,
+      fixture.plusTag,
+      fixture.originalTag,
+    ),
+  });
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/800/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  artifact.name = "upstream-sync-receipt-800-1";
+  artifact.workflow_run.head_sha = run.head_sha;
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
 function addHotfixAttempt(
   fixture: ReleaseFixture,
   runID: number,
@@ -1059,6 +1186,109 @@ describe("upstream release provenance", () => {
       workflowRunID: fixture.currentWorkflowID,
       workflowRunAttempt: 1,
     });
+  });
+
+  test("accepts an exact schema-3 upstream receipt with immutable asset identities", async () => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    await expect(validate(fixture)).resolves.toMatchObject({
+      kind: "upstream",
+      workflowRunID: fixture.currentWorkflowID,
+      workflowRunAttempt: 1,
+    });
+  });
+
+  test.each(["failure", "cancelled", "timed_out"] as const)(
+    "accepts schema-3 upstream evidence from an earlier %s attempt",
+    async (conclusion) => {
+      const fixture = releaseFixture();
+      upgradeCurrentUpstreamToSchema3(fixture);
+      fixture.values.get(
+        `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+      ).run_attempt = 2;
+      addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, conclusion);
+      await expect(validate(fixture)).resolves.toMatchObject({
+        kind: "upstream",
+        workflowRunAttempt: 2,
+      });
+    },
+  );
+
+  test("rejects schema-3 upstream evidence from an earlier successful attempt", async () => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "success");
+    await expect(validate(fixture)).rejects.toThrow("workflow run attempt differs");
+  });
+
+  test.each([
+    ["asset ID", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].id++;
+    }],
+    ["asset size", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].size++;
+    }],
+    ["asset digest", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].digest = `sha256:${"f".repeat(64)}`;
+    }],
+    ["workflow path", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.path = ".github/workflows/hotfix-release.yml";
+    }],
+    ["workflow ref", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.ref += "-wrong";
+    }],
+    ["workflow commit", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.commit = "f".repeat(40);
+    }],
+    ["workflow run", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.run_id = "999";
+    }],
+    ["workflow attempt", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.run_attempt = "2";
+    }],
+  ])("rejects schema-3 upstream %s drift", async (_name, mutate) => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    mutate(fixture);
+    refreshUpstreamSchema3Evidence(fixture);
+    await expect(validate(fixture)).rejects.toThrow();
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies schema-3 prior-attempt HTTP %s evidence", async (status, errorClass) => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/attempts/1`;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        return fixture.github.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => fixture.github.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
   });
 
   test("accepts a prerelease-derived nonzero upstream tag", async () => {
@@ -1514,6 +1744,29 @@ describe("hotfix release provenance", () => {
       workflowRunID: fixture.currentWorkflowID,
     });
   });
+
+  test("accepts legacy and chained hotfixes anchored to a schema-3 upstream root", async () => {
+    const first = releaseFixture("hotfix");
+    upgradeBaseUpstreamToSchema3(first);
+    await expect(validate(first)).resolves.toMatchObject({ kind: "hotfix" });
+
+    const second = advanceHotfixFixture(first);
+    await expect(validate(second)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.2",
+    });
+  });
+
+  test.each(["failure", "cancelled", "timed_out"] as const)(
+    "accepts a schema-3 upstream root from an earlier %s attempt",
+    async (conclusion) => {
+      const fixture = releaseFixture("hotfix");
+      upgradeBaseUpstreamToSchema3(fixture);
+      fixture.values.get(`/repos/${REPOSITORY}/actions/runs/800`).run_attempt = 2;
+      addHotfixAttempt(fixture, 800, 1, conclusion);
+      await expect(validate(fixture)).resolves.toMatchObject({ kind: "hotfix" });
+    },
+  );
 
   test("accepts nonzero upstream root -> schema-v1 hotfix -> schema-v2 hotfix", async () => {
     const first = releaseFixture("hotfix", "v7.2.127-3", { rootSuffix: 4 });

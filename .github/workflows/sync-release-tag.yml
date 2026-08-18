@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: reject-recover-release-tag-${{ inputs.tag }}
+  group: release-publication
   cancel-in-progress: false
 
 env:

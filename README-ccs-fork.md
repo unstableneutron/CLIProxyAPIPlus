@@ -27,7 +27,12 @@ The retired workflow is retained at `.github/workflows-disabled/upstream-sync.ym
 
 ## Releases
 
-`release.yaml` builds via goreleaser on tag push. Binary name `cli-proxy-api-plus`, archives `CLIProxyAPIPlus_<ver>_<os>_<arch>.*`. CCS CLI's `BACKEND_CONFIG.plus.repo` points here, so tagging a release (e.g., `v6.9.19-ccs.1`) publishes binaries CCS users pick up automatically.
+The guarded upstream-sync and hotfix workflows are the only release-producing
+entry points. Their reusable binary and image publishers have no direct dispatch
+surface, and all root publication workflows share one non-cancelling concurrency
+domain. Binary name `cli-proxy-api-plus`, archives
+`CLIProxyAPIPlus_<ver>_<os>_<arch>.*`. CCS CLI's `BACKEND_CONFIG.plus.repo`
+points here, so guarded releases publish binaries CCS users pick up automatically.
 
 ### Chained hotfix policy
 
@@ -57,13 +62,32 @@ only permitted receipt kind, so upstream and hotfix receipts cannot be mixed.
 Gaps, stale main, reused identities, missing historical evidence, drafts,
 prereleases, and mismatches stop publication fail closed.
 
+New accepted upstream roots use receipt schema 3. In addition to the image and
+planner identities, it binds every non-receipt release asset's immutable GitHub
+asset ID, byte size, and SHA-256 digest, plus the exact upstream workflow run and
+evidence attempt. `checksums.txt` must cover the complete archive set and match
+those API identities. A later successful rerun may authenticate an immutable
+receipt/run-state artifact from an earlier attempt of the same run only when the
+earlier attempt ended in `failure`, `cancelled`, or `timed_out`. Legacy schema-2
+upstream roots and schema-1 first-hotfix receipts remain explicitly supported for
+existing releases; new upstream roots are not emitted with those schemas. Shell
+publication/chain verification and release-webhook admission enforce the same
+schema, byte bounds, attempt recovery, and run-state contract.
+
 Publication is restartable only by exact evidence. Before the first side effect,
 all candidate identities must be absent. After an interruption, the same policy
 may adopt an existing annotated tag only when its object, peeled SHA, bot tagger,
 message, current main, chain, and fresh planner state match exactly; release and
-GHCR identities are classified independently and conflicting partial state is
-rejected. Final-plan regeneration and the complete run-attempt artifact are
-published before the immutable release receipt. If receipt upload succeeds but
+GHCR identities are classified independently. GoReleaser builds the exact asset
+matrix without publishing it; the assets, checksums, and a deterministic manifest
+are first stored as one immutable Actions artifact. Release mutation then creates
+a draft bound to that artifact ID and digest, validates every already-uploaded
+asset against the manifest, uploads only absent names, and publishes only after a
+complete recheck. A rerun can resume a matching partial draft from the original
+artifact, but conflicting drafts and all incomplete public releases are rejected;
+no asset is clobbered or deleted. Final-plan regeneration and the complete
+run-attempt artifact are published before the immutable release receipt. If
+receipt upload succeeds but
 that attempt later fails, only a later attempt of the same workflow run may adopt
 the receipt: it must reproduce its bytes and verify the exact earlier-attempt
 artifact and final plan, and that earlier attempt must have ended in `failure`,

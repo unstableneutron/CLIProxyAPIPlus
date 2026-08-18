@@ -24,6 +24,40 @@ assert_contains() {
 make_stubs() {
   local root=$1
   mkdir -p "${root}/bin"
+  local expected_assets api_assets='[]' id=1000 name digest size
+  # shellcheck disable=SC1091 # SCRIPT_DIR is resolved at runtime.
+  expected_assets=$(source "${SCRIPT_DIR}/release-assets.sh"; expected_release_assets_json "${TAG}")
+  : > "${root}/checksums.txt"
+  while IFS= read -r name; do
+    id=$((id + 1))
+    if [ "${name}" = checksums.txt ]; then
+      continue
+    fi
+    digest=$(printf '%s' "${name}" | sha256sum | awk '{ print $1 }')
+    printf '%s  %s\n' "${digest}" "${name}" >> "${root}/checksums.txt"
+  done < <(jq -r '.[]' <<< "${expected_assets}")
+  while IFS= read -r name; do
+    id=$((id + 1))
+    if [ "${name}" = checksums.txt ]; then
+      size=$(stat -c %s "${root}/checksums.txt")
+      digest=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
+    else
+      size=1
+      digest=$(printf '%s' "${name}" | sha256sum | awk '{ print $1 }')
+    fi
+    api_assets=$(jq -c \
+      --arg name "${name}" \
+      --arg digest "sha256:${digest}" \
+      --argjson id "${id}" \
+      --argjson size "${size}" \
+      '. + [{
+        id: $id, name: $name, size: $size, digest: $digest,
+        state: "uploaded",
+        url: ("https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/assets/" + ($id | tostring)),
+        uploader: {login: "github-actions[bot]", id: 41898282, type: "Bot"}
+      }]' <<< "${api_assets}")
+  done < <(jq -r '.[]' <<< "${expected_assets}")
+  jq -n --argjson assets "${api_assets}" '{assets: $assets}' > "${root}/release-api.json"
   cat > "${root}/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -37,8 +71,20 @@ case "${1:-}:${2:-}" in
   api:*compare/*)
     printf '%s\n' "${STUB_COMPARE_STATUS}"
     ;;
+  api:*releases/tags/*)
+    cat "${STUB_RELEASE_API_JSON}"
+    ;;
   release:view)
     cat "${STUB_RELEASE_JSON}"
+    ;;
+  release:download)
+    output=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --dir ]; then output=$2; shift 2; else shift; fi
+    done
+    [ -n "${output}" ] || exit 2
+    mkdir -p "${output}"
+    cp "${STUB_CHECKSUM_FILE}" "${output}/checksums.txt"
     ;;
   *)
     echo "unexpected gh arguments: $*" >&2
@@ -81,9 +127,13 @@ run_verifier() {
   PATH="${root}/bin:${PATH}" \
     GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
     GITHUB_RUN_ID=123456789 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_WORKFLOW_REF=unstableneutron/CLIProxyAPIPlus/.github/workflows/upstream-sync-v2.yml@refs/heads/main \
     STUB_MAIN_COMMIT="${main_commit}" \
     STUB_TAG_COMMIT="${tag_commit}" \
     STUB_RELEASE_JSON="${release_json}" \
+    STUB_RELEASE_API_JSON="${root}/release-api.json" \
+    STUB_CHECKSUM_FILE="${root}/checksums.txt" \
     STUB_IMAGE_INDEX_JSON="${image_json}" \
     STUB_LATEST_INDEX_JSON="${latest_json}" \
     STUB_AMD64_IMAGE_JSON="${amd64_image_json}" \
@@ -155,7 +205,7 @@ test_writes_receipt_after_success() {
     --arg fingerprint "${FINGERPRINT}" \
     --arg sync_id "${SYNC_ID}" \
     --arg tag "${TAG}" \
-    '.schema_version == 2 and
+    '.schema_version == 3 and
      .main_commit == $commit and
      .tag_commit == $commit and
      .plan_fingerprint == $fingerprint and
@@ -165,7 +215,19 @@ test_writes_receipt_after_success() {
      .platforms == ["linux/amd64", "linux/arm64"] and
      .architecture_images["linux/amd64"].digest == "sha256:1111111111111111111111111111111111111111111111111111111111111111" and
      .architecture_images["linux/arm64"].digest == "sha256:2222222222222222222222222222222222222222222222222222222222222222" and
-     .workflow_run_id == "123456789"' \
+     .workflow_run_id == "123456789" and
+     .release_workflow == {
+       path: ".github/workflows/upstream-sync-v2.yml",
+       ref: "unstableneutron/CLIProxyAPIPlus/.github/workflows/upstream-sync-v2.yml@refs/heads/main",
+       commit: $commit,
+       run_id: "123456789",
+       run_attempt: "1"
+     } and
+     (.release_asset_identities | keys) == .release_assets and
+     all(.release_asset_identities[];
+       keys == ["digest", "id", "size"] and
+       (.id | type) == "number" and (.size | type) == "number" and
+       (.digest | test("^sha256:[0-9a-f]{64}$")))' \
     "${receipt}" >/dev/null || fail "receipt did not contain the verified identity"
   rm -rf "${root}"
 }

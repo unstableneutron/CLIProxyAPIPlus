@@ -176,7 +176,7 @@ json_exact_keys() {
 
 validate_upstream_run_state() {
   local run_state=$1 receipt_file=$2 commit=$3 tag=$4
-  local expected_final_fingerprint
+  local expected_final_fingerprint release_keys expected_release
   expected_final_fingerprint=$(
     printf '%s\n' \
       "base_fork_commit=${commit}" \
@@ -190,6 +190,28 @@ validate_upstream_run_state() {
       "expected_fork_tag=${tag}" \
       | git hash-object --stdin
   )
+  if [ "$(jq -r '.schema_version' "${receipt_file}")" = 3 ]; then
+    release_keys='["architecture_images", "asset_identities", "assets", "image", "image_digest", "platforms", "url"]'
+    expected_release=$(jq -c '{
+      url: .release_url,
+      assets: .release_assets,
+      image: .image,
+      image_digest: .image_digest,
+      platforms: .platforms,
+      architecture_images: .architecture_images,
+      asset_identities: .release_asset_identities
+    }' "${receipt_file}")
+  else
+    release_keys='["architecture_images", "assets", "image", "image_digest", "platforms", "url"]'
+    expected_release=$(jq -c '{
+      url: .release_url,
+      assets: .release_assets,
+      image: .image,
+      image_digest: .image_digest,
+      platforms: .platforms,
+      architecture_images: .architecture_images
+    }' "${receipt_file}")
+  fi
   jq -e \
     --arg base_fork_commit "$(state_value BASE_FORK_COMMIT)" \
     --arg original_tag "$(state_value ORIGINAL_TAG)" \
@@ -205,7 +227,8 @@ validate_upstream_run_state() {
     --arg expected_final_fingerprint "${expected_final_fingerprint}" \
     --arg commit "${commit}" \
     --arg tag "${tag}" \
-    --slurpfile receipt "${receipt_file}" '
+    --argjson release_keys "${release_keys}" \
+    --argjson expected_release "${expected_release}" '
       (keys | sort) == (["candidate", "final_plan", "promotion", "release", "repair", "runtime_smoke", "schema_version", "state", "target", "vn3_deployed"] | sort) and
       (.target | keys | sort) == (["base_fork_commit", "blocked", "expected_fork_tag", "models_commit", "original", "plan_fingerprint", "plus", "sync_id", "target_drift"] | sort) and
       (.target.original | keys | sort) == (["commit", "tag"] | sort) and
@@ -214,7 +237,7 @@ validate_upstream_run_state() {
       (.repair | keys | sort) == (["imported", "pr", "sha"] | sort) and
       (.final_plan | keys | sort) == (["blocked", "has_changes", "plan_fingerprint", "status", "target_drift"] | sort) and
       (.promotion | keys | sort) == (["commit", "tag"] | sort) and
-      (.release | keys | sort) == (["architecture_images", "assets", "image", "image_digest", "platforms", "url"] | sort) and
+      (.release | keys | sort) == ($release_keys | sort) and
       .schema_version == 1 and .state == "released" and
       .target.base_fork_commit == $base_fork_commit and
       .target.original == {tag: $original_tag, commit: $original_commit} and
@@ -230,14 +253,7 @@ validate_upstream_run_state() {
       .final_plan.has_changes == false and .final_plan.target_drift == false and .final_plan.blocked == false and
       .runtime_smoke == "not_run" and .vn3_deployed == false and
       .promotion == {commit: $commit, tag: $tag} and
-      .release == {
-        url: $receipt[0].release_url,
-        assets: $receipt[0].release_assets,
-        image: $receipt[0].image,
-        image_digest: $receipt[0].image_digest,
-        platforms: $receipt[0].platforms,
-        architecture_images: $receipt[0].architecture_images
-      }
+      .release == $expected_release
     ' "${run_state}" >/dev/null \
     || die "historical run state for ${tag} differs"
 }
@@ -393,7 +409,27 @@ verify_release_and_link() {
   run_id=$(jq -r '.workflow_run_id // empty' "${receipt_file}")
   [[ "${run_id}" =~ ^[1-9][0-9]*$ ]] || die "receipt for ${tag} has an invalid workflow run ID"
   local regenerated="${node_dir}/regenerated.json"
-  GITHUB_RUN_ID="${run_id}" "${UPSTREAM_VERIFIER}" \
+  local core_schema
+  jq -e '
+      (.schema_version | type) == "number" and
+      (.schema_version | floor) == .schema_version
+    ' "${receipt_file}" >/dev/null \
+    || die "receipt for ${tag} core schema must be an integer"
+  core_schema=$(jq -r '.schema_version // empty' "${receipt_file}")
+  case "${core_schema}" in
+    1|2|3) ;;
+    *) die "receipt for ${tag} has an unsupported core schema" ;;
+  esac
+  local regenerate_attempt=1
+  local regenerate_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main"
+  if [ "${core_schema}" = 3 ]; then
+    regenerate_attempt=$(jq -r '.release_workflow.run_attempt // empty' "${receipt_file}")
+    regenerate_workflow_ref=$(jq -r '.release_workflow.ref // empty' "${receipt_file}")
+  fi
+  GITHUB_RUN_ID="${run_id}" \
+  GITHUB_RUN_ATTEMPT="${regenerate_attempt}" \
+  GITHUB_WORKFLOW_REF="${regenerate_workflow_ref}" \
+    "${UPSTREAM_VERIFIER}" \
     --tag "${tag}" \
     --expected-commit "${commit}" \
     --expected-sync-id "${EXPECTED_SYNC_ID}" \
@@ -403,11 +439,17 @@ verify_release_and_link() {
     --require-architecture-tags true \
     --require-latest-parity false \
     --allowed-receipt-name "${receipt_name}" \
+    --receipt-schema-version "${core_schema}" \
     --receipt "${regenerated}" >/dev/null
-  diff -u \
-    <(jq -S '{schema_version,sync_id,plan_fingerprint,main_commit,tag,tag_commit,release_url,release_assets,image,image_digest,platforms,workflow_run_id,architecture_images}' "${receipt_file}") \
-    <(jq -S . "${regenerated}") >/dev/null \
-    || die "release ${tag} core receipt does not regenerate independently"
+  if [ "${kind}" = upstream ]; then
+    diff -u <(jq -S . "${receipt_file}") <(jq -S . "${regenerated}") >/dev/null \
+      || die "release ${tag} core receipt does not regenerate independently"
+  else
+    diff -u \
+      <(jq -S '{schema_version,sync_id,plan_fingerprint,main_commit,tag,tag_commit,release_url,release_assets,image,image_digest,platforms,workflow_run_id,architecture_images}' "${receipt_file}") \
+      <(jq -S . "${regenerated}") >/dev/null \
+      || die "release ${tag} core receipt does not regenerate independently"
+  fi
 
   local run_file="${node_dir}/run.json"
   gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "${run_file}"
@@ -416,8 +458,9 @@ verify_release_and_link() {
     --arg login "${OWNER_LOGIN}" \
     --argjson owner_id "${OWNER_ID}" \
     --arg repo "${GITHUB_REPOSITORY}" \
-    --argjson repo_id "${REPOSITORY_ID}" '
-      .path == $path and .head_branch == "main" and .status == "completed" and
+    --argjson repo_id "${REPOSITORY_ID}" \
+    --argjson run_id "${run_id}" '
+      .id == $run_id and .path == $path and .head_branch == "main" and .status == "completed" and
       .conclusion == "success" and .actor.login == $login and .actor.id == $owner_id and
       .repository.full_name == $repo and .repository.id == $repo_id and
       (.run_attempt | type) == "number" and (.run_attempt | floor) == .run_attempt and
@@ -484,6 +527,50 @@ verify_release_and_link() {
       identical|ahead) ;;
       *) die "upstream workflow head for ${tag} is not an ancestor of its release" ;;
     esac
+    if [ "${core_schema}" = 3 ]; then
+      evidence_attempt=$(jq -r '.release_workflow.run_attempt // empty' "${receipt_file}")
+      if [[ ! "${evidence_attempt}" =~ ^[1-9][0-9]*$ ]] || \
+         [ "${evidence_attempt}" -gt "${run_attempt}" ]; then
+        die "upstream workflow evidence attempt for ${tag} differs"
+      fi
+      if [ "${evidence_attempt}" -lt "${run_attempt}" ]; then
+        local upstream_evidence_run_file="${node_dir}/upstream-evidence-run.json"
+        gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${evidence_attempt}" \
+          > "${upstream_evidence_run_file}"
+        jq -e \
+          --arg path "${workflow_path}" \
+          --arg event "$(jq -r '.event' "${run_file}")" \
+          --arg head "${run_head}" \
+          --arg login "${OWNER_LOGIN}" \
+          --argjson owner_id "${OWNER_ID}" \
+          --arg repo "${GITHUB_REPOSITORY}" \
+          --argjson repo_id "${REPOSITORY_ID}" \
+          --argjson run_id "${run_id}" \
+          --argjson attempt "${evidence_attempt}" '
+            .id == $run_id and .run_attempt == $attempt and
+            .path == $path and .event == $event and
+            .head_branch == "main" and .head_sha == $head and
+            .status == "completed" and
+            (.conclusion == "failure" or .conclusion == "cancelled" or
+              .conclusion == "timed_out") and
+            .actor.login == $login and .actor.id == $owner_id and
+            .repository.full_name == $repo and .repository.id == $repo_id
+          ' "${upstream_evidence_run_file}" >/dev/null \
+          || die "upstream workflow evidence attempt for ${tag} was not a recoverable failure"
+      fi
+      jq -e \
+        --arg path "${workflow_path}" \
+        --arg ref "${GITHUB_REPOSITORY}/${workflow_path}@refs/heads/main" \
+        --arg commit "${commit}" \
+        --arg run_id "${run_id}" \
+        --arg attempt "${evidence_attempt}" '
+          .release_workflow == {
+            path: $path, ref: $ref, commit: $commit,
+            run_id: $run_id, run_attempt: $attempt
+          }
+        ' "${receipt_file}" >/dev/null \
+        || die "upstream workflow receipt for ${tag} differs"
+    fi
   fi
 
   local artifact_prefix=${kind}
@@ -706,9 +793,15 @@ validate_chain() {
   if [ "${kind}" = upstream ]; then
     [ "${tag}" = "${ROOT_TAG}" ] \
       || die "hotfix receipt chain terminated at unexpected root ${tag}"
-    json_exact_keys "${receipt_file}" \
-      'keys == (["architecture_images","image","image_digest","main_commit","plan_fingerprint","platforms","release_assets","release_url","schema_version","sync_id","tag","tag_commit","workflow_run_id"] | sort)' \
-      "accepted upstream root receipt"
+    if [ "$(jq -r '.schema_version' "${receipt_file}")" = 3 ]; then
+      json_exact_keys "${receipt_file}" \
+        'keys == (["architecture_images","image","image_digest","main_commit","plan_fingerprint","platforms","release_asset_identities","release_assets","release_url","release_workflow","schema_version","sync_id","tag","tag_commit","workflow_run_id"] | sort)' \
+        "accepted upstream root receipt"
+    else
+      json_exact_keys "${receipt_file}" \
+        'keys == (["architecture_images","image","image_digest","main_commit","plan_fingerprint","platforms","release_assets","release_url","schema_version","sync_id","tag","tag_commit","workflow_run_id"] | sort)' \
+        "accepted upstream root receipt"
+    fi
     cp "${output}" "${ROOT_LINK}"
     return
   fi

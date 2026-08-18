@@ -47,7 +47,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: upstream-sync-v2
+  group: release-publication
   cancel-in-progress: false
 
 env:
@@ -236,6 +236,11 @@ jobs:
           }
           STATE_SYNC_ID="$(state_value SYNC_ID)"
           STATE_FINGERPRINT="$(state_value PLAN_FINGERPRINT)"
+          STATE_ORIGINAL_TAG="$(state_value ORIGINAL_TAG)"
+          STATE_PLUS_TAG="$(state_value PLUS_TAG)"
+          STATE_ORIGINAL_REPOSITORY="$(state_value ORIGINAL_REPOSITORY)"
+          STATE_PLUS_REPOSITORY="$(state_value PLUS_REPOSITORY)"
+          STATE_MODELS_REPOSITORY="$(state_value MODELS_REPOSITORY)"
           STATE_ORIGINAL_COMMIT="$(state_value ORIGINAL_COMMIT)"
           STATE_PLUS_TAG_COMMIT="$(state_value PLUS_TAG_COMMIT)"
           STATE_PLUS_HEAD_COMMIT="$(state_value PLUS_HEAD_COMMIT)"
@@ -244,6 +249,11 @@ jobs:
           if [ "${STATE_EXIT}" -ne 0 ] || \
              [ -z "${STATE_SYNC_ID}" ] || \
              [ -z "${STATE_FINGERPRINT}" ] || \
+             [ -z "${STATE_ORIGINAL_TAG}" ] || \
+             [ -z "${STATE_PLUS_TAG}" ] || \
+             [ -z "${STATE_ORIGINAL_REPOSITORY}" ] || \
+             [ -z "${STATE_PLUS_REPOSITORY}" ] || \
+             [ -z "${STATE_MODELS_REPOSITORY}" ] || \
              [ -z "${STATE_ORIGINAL_COMMIT}" ] || \
              [ -z "${STATE_PLUS_TAG_COMMIT}" ] || \
              [ -z "${STATE_PLUS_HEAD_COMMIT}" ] || \
@@ -257,7 +267,90 @@ jobs:
             echo "Represented release lacks v2 state or a supported release receipt." >&2
             exit 1
           fi
-          if [ "${STATE_ORIGINAL_COMMIT}" != "${PLAN_ORIGINAL_COMMIT}" ] || \
+          PLAN_FILE="${SYNC_WORK_DIR}/plan.out"
+          plan_value() {
+            awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
+          }
+          PLAN_KEYS=$(mktemp)
+          EXPECTED_PLAN_KEYS=$(mktemp)
+          if ! awk -F= '
+            !/^[a-z][a-z0-9_]*=/ { exit 1 }
+            seen[$1]++ { exit 1 }
+            { print $1 }
+          ' "${PLAN_FILE}" | sort > "${PLAN_KEYS}"; then
+            echo "Represented planner output syntax differs." >&2
+            exit 1
+          fi
+          printf '%s\n' \
+            original_tag plus_tag pre_sync_head base_fork_commit original_repository \
+            plus_repository models_repository original_head plus_tag_head plus_head \
+            models_commit plus_head_included plus_head_already_represented \
+            plus_head_delta_paths unsafe_plus_head_delta_paths blocked block_reason \
+            fork_tag_prefix latest_fork_tag latest_fork_models_commit latest_fork_suffix \
+            next_fork_tag expected_fork_tag safe_sync_id plan_fingerprint candidate_branch \
+            snapshot_namespace original_snapshot_ref plus_tag_snapshot_ref \
+            plus_head_snapshot_ref models_snapshot_ref target_drift target_drift_summary \
+            has_changes | sort > "${EXPECTED_PLAN_KEYS}"
+          if ! cmp -s "${PLAN_KEYS}" "${EXPECTED_PLAN_KEYS}"; then
+            echo "Represented planner output fields differ." >&2
+            exit 1
+          fi
+          # shellcheck source=/dev/null
+          source .github/scripts/hotfix-release-tag.sh
+          parse_fork_release_tag "${EXPECTED_FORK_TAG}" \
+            || { echo "Represented release tag is invalid." >&2; exit 1; }
+          TAG_PREFIX=${FORK_TAG_PREFIX}
+          TAG_SUFFIX=${FORK_TAG_SUFFIX}
+          EXPECTED_PLAN_FINGERPRINT=$(
+            printf '%s\n' \
+              "base_fork_commit=${TAG_COMMIT}" \
+              "original_tag=${STATE_ORIGINAL_TAG}" \
+              "original_commit=${STATE_ORIGINAL_COMMIT}" \
+              "plus_tag=${STATE_PLUS_TAG}" \
+              "plus_tag_commit=${STATE_PLUS_TAG_COMMIT}" \
+              "plus_head_commit=${STATE_PLUS_HEAD_COMMIT}" \
+              "plus_head_included=${STATE_PLUS_HEAD_INCLUDED}" \
+              "models_commit=${STATE_MODELS_COMMIT}" \
+              "expected_fork_tag=${EXPECTED_FORK_TAG}" \
+              | git hash-object --stdin
+          )
+          EXPECTED_NAMESPACE="refs/upstream-sync/${EXPECTED_PLAN_FINGERPRINT}"
+          EXPECTED_CANDIDATE="upstream-sync/$(printf '%s' "${STATE_SYNC_ID}" | tr -c 'A-Za-z0-9._-' '-')-${EXPECTED_PLAN_FINGERPRINT:0:12}"
+          if [ "$(plan_value "${PLAN_FILE}" original_tag)" != "${STATE_ORIGINAL_TAG}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_tag)" != "${STATE_PLUS_TAG}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" pre_sync_head)" != "${TAG_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" base_fork_commit)" != "${TAG_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" original_repository)" != "${STATE_ORIGINAL_REPOSITORY}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_repository)" != "${STATE_PLUS_REPOSITORY}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" models_repository)" != "${STATE_MODELS_REPOSITORY}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" original_head)" != "${PLAN_ORIGINAL_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_tag_head)" != "${PLAN_PLUS_TAG_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_head)" != "${PLAN_PLUS_HEAD_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" models_commit)" != "${PLAN_MODELS_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_head_included)" != "${PLAN_PLUS_HEAD_INCLUDED}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_head_already_represented)" != true ] || \
+             [ -n "$(plan_value "${PLAN_FILE}" plus_head_delta_paths)" ] || \
+             [ -n "$(plan_value "${PLAN_FILE}" unsafe_plus_head_delta_paths)" ] || \
+             [ "$(plan_value "${PLAN_FILE}" blocked)" != false ] || \
+             [ -n "$(plan_value "${PLAN_FILE}" block_reason)" ] || \
+             [ "$(plan_value "${PLAN_FILE}" fork_tag_prefix)" != "${TAG_PREFIX}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" latest_fork_tag)" != "${EXPECTED_FORK_TAG}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" latest_fork_models_commit)" != "${PLAN_MODELS_COMMIT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" latest_fork_suffix)" != "${TAG_SUFFIX}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" next_fork_tag)" != "${TAG_PREFIX}.$((TAG_SUFFIX + 1))" ] || \
+             [ "$(plan_value "${PLAN_FILE}" expected_fork_tag)" != "${EXPECTED_FORK_TAG}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" safe_sync_id)" != "${STATE_SYNC_ID}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plan_fingerprint)" != "${EXPECTED_PLAN_FINGERPRINT}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" candidate_branch)" != "${EXPECTED_CANDIDATE}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" snapshot_namespace)" != "${EXPECTED_NAMESPACE}" ] || \
+             [ "$(plan_value "${PLAN_FILE}" original_snapshot_ref)" != "${EXPECTED_NAMESPACE}/original" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_tag_snapshot_ref)" != "${EXPECTED_NAMESPACE}/plus-tag" ] || \
+             [ "$(plan_value "${PLAN_FILE}" plus_head_snapshot_ref)" != "${EXPECTED_NAMESPACE}/plus-head" ] || \
+             [ "$(plan_value "${PLAN_FILE}" models_snapshot_ref)" != "${EXPECTED_NAMESPACE}/models" ] || \
+             [ "$(plan_value "${PLAN_FILE}" target_drift)" != false ] || \
+             [ -n "$(plan_value "${PLAN_FILE}" target_drift_summary)" ] || \
+             [ "$(plan_value "${PLAN_FILE}" has_changes)" != false ] || \
+             [ "${STATE_ORIGINAL_COMMIT}" != "${PLAN_ORIGINAL_COMMIT}" ] || \
              [ "${STATE_PLUS_TAG_COMMIT}" != "${PLAN_PLUS_TAG_COMMIT}" ] || \
              [ "${STATE_PLUS_HEAD_COMMIT}" != "${PLAN_PLUS_HEAD_COMMIT}" ] || \
              [ "${STATE_PLUS_HEAD_INCLUDED}" != "${PLAN_PLUS_HEAD_INCLUDED}" ] || \
@@ -299,11 +392,22 @@ jobs:
               <(jq -S . "${RECEIPT_DIR}/verified-receipt.json")
           else
             REQUIRE_ARCHITECTURE_TAGS=false
-            if jq -e '(.schema_version // 1) >= 2' \
-              "${RECEIPT_DIR}/upstream-sync-receipt.json" >/dev/null; then
+            UPSTREAM_RECEIPT="${RECEIPT_DIR}/upstream-sync-receipt.json"
+            RECEIPT_SCHEMA="$(jq -er '.schema_version | select(type == "number" and floor == .)' "${UPSTREAM_RECEIPT}")"
+            if [ "${RECEIPT_SCHEMA}" -ge 2 ]; then
               REQUIRE_ARCHITECTURE_TAGS=true
             fi
-            .github/scripts/verify-upstream-release.sh \
+            RECEIPT_RUN_ID="$(jq -r '.workflow_run_id // empty' "${UPSTREAM_RECEIPT}")"
+            RECEIPT_RUN_ATTEMPT=1
+            RECEIPT_WORKFLOW_REF="${GITHUB_REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main"
+            if [ "${RECEIPT_SCHEMA}" -eq 3 ]; then
+              RECEIPT_RUN_ATTEMPT="$(jq -r '.release_workflow.run_attempt // empty' "${UPSTREAM_RECEIPT}")"
+              RECEIPT_WORKFLOW_REF="$(jq -r '.release_workflow.ref // empty' "${UPSTREAM_RECEIPT}")"
+            fi
+            GITHUB_RUN_ID="${RECEIPT_RUN_ID}" \
+            GITHUB_RUN_ATTEMPT="${RECEIPT_RUN_ATTEMPT}" \
+            GITHUB_WORKFLOW_REF="${RECEIPT_WORKFLOW_REF}" \
+              .github/scripts/verify-upstream-release.sh \
               --tag "${EXPECTED_FORK_TAG}" \
               --expected-commit "${TAG_COMMIT}" \
               --expected-sync-id "${STATE_SYNC_ID}" \
@@ -312,10 +416,10 @@ jobs:
               --main-policy descendant \
               --require-architecture-tags "${REQUIRE_ARCHITECTURE_TAGS}" \
               --require-latest-parity true \
+              --receipt-schema-version "${RECEIPT_SCHEMA}" \
               --receipt "${RECEIPT_DIR}/verified-receipt.json"
-            diff -u \
-              <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/upstream-sync-receipt.json") \
-              <(jq -S 'del(.workflow_run_id)' "${RECEIPT_DIR}/verified-receipt.json")
+            diff -u <(jq -S . "${UPSTREAM_RECEIPT}") \
+              <(jq -S . "${RECEIPT_DIR}/verified-receipt.json")
           fi
           echo "Verified existing release receipt for ${EXPECTED_FORK_TAG}." >> "${GITHUB_STEP_SUMMARY}"
 
@@ -830,7 +934,9 @@ jobs:
                 image_digest: $release.image_digest,
                 platforms: $release.platforms,
                 architecture_images: ($release.architecture_images // {})
-              } |
+              } + if ($release | has("release_asset_identities")) then {
+                asset_identities: $release.release_asset_identities
+              } else {} end |
               .final_plan = {
                 status: "clean-noop",
                 plan_fingerprint: $final_fingerprint,

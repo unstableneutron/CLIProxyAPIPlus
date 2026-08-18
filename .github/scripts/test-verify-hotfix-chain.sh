@@ -242,6 +242,7 @@ write_root_fixture() {
   jq -n \
     --arg head "${commit}" '
       {
+        id: 800,
         path: ".github/workflows/upstream-sync-v2.yml",
         head_branch: "main",
         head_sha: $head,
@@ -366,6 +367,7 @@ write_first_fixture() {
   jq -n \
     --arg head "${commit}" '
       {
+        id: 900,
         path: ".github/workflows/hotfix-release.yml",
         head_branch: "main",
         head_sha: $head,
@@ -391,6 +393,36 @@ rebuild_root_artifact() {
   write_artifact "${root}" "${ROOT_TAG}" upstream 800 "$(cat "${root}/root.commit")" upstream-sync-receipt.json 10800
 }
 
+upgrade_root_to_schema3() {
+  local root=$1
+  local node="${root}/fixtures/${ROOT_TAG}" receipt="${root}/fixtures/${ROOT_TAG}/upstream-sync-receipt.json"
+  local identities
+  identities=$(jq -c '[.assets[] |
+      select(.name != "upstream-sync-receipt.json") |
+      {key: .name, value: {id: .id, size: .size, digest: .digest}}] | from_entries' \
+    "${node}/release.json")
+  jq \
+    --arg commit "$(cat "${root}/root.commit")" \
+    --argjson identities "${identities}" '
+      .schema_version = 3 |
+      .release_asset_identities = $identities |
+      .release_workflow = {
+        path: ".github/workflows/upstream-sync-v2.yml",
+        ref: "unstableneutron/CLIProxyAPIPlus/.github/workflows/upstream-sync-v2.yml@refs/heads/main",
+        commit: $commit,
+        run_id: "800",
+        run_attempt: "1"
+      }
+    ' "${receipt}" > "${receipt}.new"
+  mv "${receipt}.new" "${receipt}"
+  jq --argjson identities "${identities}" \
+    '.release.asset_identities = $identities' \
+    "${node}/run-state.json" > "${node}/run-state.json.new"
+  mv "${node}/run-state.json.new" "${node}/run-state.json"
+  write_release "${root}" "${ROOT_TAG}" 100 1 2 3 upstream-sync-receipt.json
+  rebuild_root_artifact "${root}"
+}
+
 make_stubs() {
   local root=$1
   mkdir -p "${root}/bin"
@@ -401,6 +433,17 @@ if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   tag=$3
   jq '{url: .html_url, isDraft: .draft, isPrerelease: .prerelease, assets: [.assets[] | {name}]}' \
     "${STUB_ROOT}/fixtures/${tag}/release.json"
+  exit
+fi
+if [ "${1:-}" = release ] && [ "${2:-}" = download ]; then
+  tag=$3
+  output=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --dir ]; then output=$2; shift 2; else shift; fi
+  done
+  [ -n "${output}" ] || exit 2
+  mkdir -p "${output}"
+  cp "${STUB_ROOT}/fixtures/${tag}/checksums.txt" "${output}/checksums.txt"
   exit
 fi
 [ "${1:-}" = api ] || { echo "unexpected gh arguments: $*" >&2; exit 2; }
@@ -433,6 +476,7 @@ case "${path}" in
   repos/*/releases/assets/13) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/hotfix-release-receipt.json" ;;
   repos/*/actions/runs/800/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/artifacts.json" ;;
   repos/*/actions/runs/900/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/artifacts.json" ;;
+  repos/*/actions/runs/800/attempts/1) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/attempt-1.json" ;;
   repos/*/actions/runs/900/attempts/1) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/attempt-1.json" ;;
   repos/*/actions/runs/800) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/run.json" ;;
   repos/*/actions/runs/900) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/run.json" ;;
@@ -630,6 +674,69 @@ test_accepts_parent_artifact_only_from_earlier_failed_attempt() {
   mv "${run}.new" "${run}"
   expect_second_failure "${root}" "was not a recoverable failure"
   rm -rf "${root}"
+}
+
+test_accepts_schema3_root_and_earlier_failed_evidence_attempt() {
+  local root run attempt conclusion
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  upgrade_root_to_schema3 "${root}"
+  run_chain \
+    "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+    "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+    "${root}/schema3-chain.json" >/dev/null
+  jq -e '.accepted_upstream_root.workflow.run_attempt == "1"' \
+    "${root}/schema3-chain.json" >/dev/null \
+    || fail "schema-3 root did not retain its workflow attempt"
+  rm -rf "${root}"
+
+  for conclusion in failure cancelled timed_out; do
+    root=$(mktemp -d)
+    setup_fixture "${root}"
+    upgrade_root_to_schema3 "${root}"
+    run="${root}/fixtures/${ROOT_TAG}/run.json"
+    attempt="${root}/fixtures/${ROOT_TAG}/attempt-1.json"
+    jq --arg conclusion "${conclusion}" \
+      '.run_attempt = 1 | .conclusion = $conclusion' "${run}" > "${attempt}"
+    jq '.run_attempt = 2' "${run}" > "${run}.new"
+    mv "${run}.new" "${run}"
+    run_chain \
+      "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+      "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+      "${root}/schema3-recovery.json" >/dev/null
+    rm -rf "${root}"
+  done
+}
+
+test_rejects_schema3_root_identity_drift() {
+  local root node receipt mutation
+  for mutation in asset_id asset_size asset_digest workflow_attempt run_state schema_type; do
+    root=$(mktemp -d)
+    setup_fixture "${root}"
+    upgrade_root_to_schema3 "${root}"
+    node="${root}/fixtures/${ROOT_TAG}"
+    receipt="${node}/upstream-sync-receipt.json"
+    case "${mutation}" in
+      asset_id) jq '(.release_asset_identities | keys[0]) as $key | .release_asset_identities[$key].id += 1' "${receipt}" > "${receipt}.new" ;;
+      asset_size) jq '(.release_asset_identities | keys[0]) as $key | .release_asset_identities[$key].size += 1' "${receipt}" > "${receipt}.new" ;;
+      asset_digest) jq '(.release_asset_identities | keys[0]) as $key | .release_asset_identities[$key].digest = ("sha256:" + ("f" * 64))' "${receipt}" > "${receipt}.new" ;;
+      workflow_attempt) jq '.release_workflow.run_attempt = "2"' "${receipt}" > "${receipt}.new" ;;
+      schema_type) jq '.schema_version = "3"' "${receipt}" > "${receipt}.new" ;;
+      run_state)
+        jq 'del(.release.asset_identities)' "${node}/run-state.json" > "${node}/run-state.json.new"
+        mv "${node}/run-state.json.new" "${node}/run-state.json"
+        rebuild_root_artifact "${root}"
+        expect_second_failure "${root}" ""
+        rm -rf "${root}"
+        continue
+        ;;
+    esac
+    mv "${receipt}.new" "${receipt}"
+    write_release "${root}" "${ROOT_TAG}" 100 1 2 3 upstream-sync-receipt.json
+    rebuild_root_artifact "${root}"
+    expect_second_failure "${root}" ""
+    rm -rf "${root}"
+  done
 }
 
 test_rejects_oversized_compressed_artifact_member() {
@@ -872,6 +979,8 @@ main() {
   test_workflow_legacy_preflight_and_chained_parent
   test_accepts_nonzero_and_prerelease_root_chains
   test_accepts_parent_artifact_only_from_earlier_failed_attempt
+  test_accepts_schema3_root_and_earlier_failed_evidence_attempt
+  test_rejects_schema3_root_identity_drift
   test_rejects_oversized_compressed_artifact_member
   test_accepts_planner_sanitized_source_tag_linkage
   test_rejects_root_line_not_derived_from_source_tag

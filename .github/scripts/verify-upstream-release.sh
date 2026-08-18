@@ -20,6 +20,7 @@ REQUIRE_LATEST_PARITY=""
 REQUIRE_ARCHITECTURE_TAGS=false
 RECEIPT=""
 ALLOWED_RECEIPT_NAME=upstream-sync-receipt.json
+RECEIPT_SCHEMA_VERSION=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -73,6 +74,11 @@ while [ "$#" -gt 0 ]; do
       ALLOWED_RECEIPT_NAME=$2
       shift 2
       ;;
+    --receipt-schema-version)
+      [ "$#" -ge 2 ] || die "--receipt-schema-version requires a value"
+      RECEIPT_SCHEMA_VERSION=$2
+      shift 2
+      ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -99,6 +105,10 @@ esac
 case "${ALLOWED_RECEIPT_NAME}" in
   upstream-sync-receipt.json|hotfix-release-receipt.json) ;;
   *) die "--allowed-receipt-name must identify an upstream or hotfix receipt" ;;
+esac
+case "${RECEIPT_SCHEMA_VERSION:-auto}" in
+  auto|1|2|3) ;;
+  *) die "--receipt-schema-version must be 1, 2, or 3" ;;
 esac
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
@@ -175,11 +185,14 @@ for ARCH in amd64 arm64; do
   fi
 done
 
-RECEIPT_SCHEMA_VERSION=1
 ARCHITECTURE_IMAGES='{}'
 RECEIPT_PLATFORMS='["linux/amd64","linux/arm64"]'
 if [ "${REQUIRE_ARCHITECTURE_TAGS}" = true ]; then
-  RECEIPT_SCHEMA_VERSION=2
+  if [ -z "${RECEIPT_SCHEMA_VERSION}" ]; then
+    RECEIPT_SCHEMA_VERSION=3
+  fi
+  [ "${RECEIPT_SCHEMA_VERSION}" -ge 2 ] \
+    || die "receipt schema 1 cannot bind architecture tags"
   ARCHITECTURE_ROWS=()
   while IFS= read -r ROW; do
     ARCHITECTURE_ROWS+=("${ROW}")
@@ -221,6 +234,12 @@ if [ "${REQUIRE_ARCHITECTURE_TAGS}" = true ]; then
       <<< "${ARCHITECTURE_IMAGES}")
   done
   RECEIPT_PLATFORMS=$(jq -c 'keys' <<< "${ARCHITECTURE_IMAGES}")
+else
+  if [ -z "${RECEIPT_SCHEMA_VERSION}" ]; then
+    RECEIPT_SCHEMA_VERSION=1
+  fi
+  [ "${RECEIPT_SCHEMA_VERSION}" -eq 1 ] \
+    || die "receipt schemas 2 and 3 require architecture tags"
 fi
 
 if [ "${REQUIRE_LATEST_PARITY}" = true ]; then
@@ -231,6 +250,107 @@ if [ "${REQUIRE_LATEST_PARITY}" = true ]; then
   if [ "${LATEST_DIGEST}" != "${IMAGE_DIGEST}" ]; then
     die "latest digest ${LATEST_DIGEST} does not match ${TAG} digest ${IMAGE_DIGEST}"
   fi
+fi
+
+RELEASE_ASSET_IDENTITIES='{}'
+RELEASE_WORKFLOW='{}'
+if [ "${RECEIPT_SCHEMA_VERSION}" -eq 3 ]; then
+  : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required for receipt schema 3}"
+  : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required for receipt schema 3}"
+  : "${GITHUB_WORKFLOW_REF:?GITHUB_WORKFLOW_REF is required for receipt schema 3}"
+  [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]] \
+    || die "GITHUB_RUN_ID must be a positive decimal integer"
+  [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] \
+    || die "GITHUB_RUN_ATTEMPT must be a positive decimal integer"
+  if [ "${#GITHUB_RUN_ID}" -gt 16 ] || \
+     { [ "${#GITHUB_RUN_ID}" -eq 16 ] && [ "${GITHUB_RUN_ID}" -gt 9007199254740991 ]; }; then
+    die "GITHUB_RUN_ID exceeds the safe integer bound"
+  fi
+  if [ "${#GITHUB_RUN_ATTEMPT}" -gt 16 ] || \
+     { [ "${#GITHUB_RUN_ATTEMPT}" -eq 16 ] && [ "${GITHUB_RUN_ATTEMPT}" -gt 9007199254740991 ]; }; then
+    die "GITHUB_RUN_ATTEMPT exceeds the safe integer bound"
+  fi
+  EXPECTED_WORKFLOW_REF="${GITHUB_REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main"
+  [ "${GITHUB_WORKFLOW_REF}" = "${EXPECTED_WORKFLOW_REF}" ] \
+    || die "upstream release workflow ref differs"
+
+  RELEASE_API=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+  RELEASE_ASSET_IDENTITIES=$(jq -ce \
+    --arg repo "${GITHUB_REPOSITORY}" \
+    --argjson expected "${EXPECTED_RELEASE_ASSETS}" '
+      [.assets[] |
+        select(.name != "upstream-sync-receipt.json" and .name != "hotfix-release-receipt.json") |
+        .name as $name |
+        if ($name | type) != "string" or ($expected | index($name)) == null or
+           (.id | type) != "number" or (.id | floor) != .id or .id <= 0 or .id > 9007199254740991 or
+           (.size | type) != "number" or (.size | floor) != .size or .size <= 0 or .size > 2000000000 or
+           .state != "uploaded" or
+           .url != ("https://api.github.com/repos/" + $repo + "/releases/assets/" + (.id | tostring)) or
+           .uploader.login != "github-actions[bot]" or .uploader.id != 41898282 or .uploader.type != "Bot" or
+           (.digest | type) != "string" or (.digest | test("^sha256:[0-9a-f]{64}$") | not)
+        then error("release asset identity differs")
+        else {key: .name, value: {id: .id, size: .size, digest: .digest}}
+        end
+      ] |
+      if length == ($expected | length) and length == ([.[].key] | unique | length)
+      then from_entries
+      else error("release asset identity set differs")
+      end
+    ' <<< "${RELEASE_API}") \
+    || die "release asset identities are incomplete or invalid"
+  if ! jq -e --argjson expected "${EXPECTED_RELEASE_ASSETS}" \
+    'keys == $expected' <<< "${RELEASE_ASSET_IDENTITIES}" >/dev/null; then
+    die "release asset identity set differs from the release contract"
+  fi
+
+  CHECKSUM_DIR=$(mktemp -d)
+  trap 'rm -rf "${CHECKSUM_DIR}"' EXIT
+  gh release download "${TAG}" \
+    --repo "${GITHUB_REPOSITORY}" \
+    --pattern checksums.txt \
+    --dir "${CHECKSUM_DIR}"
+  CHECKSUM_FILE="${CHECKSUM_DIR}/checksums.txt"
+  [ -f "${CHECKSUM_FILE}" ] || die "could not download checksums.txt"
+  [ "$(stat -c %s "${CHECKSUM_FILE}")" -eq \
+    "$(jq -r '."checksums.txt".size' <<< "${RELEASE_ASSET_IDENTITIES}")" ] \
+    || die "checksums.txt bytes differ from the release asset size"
+  [ "sha256:$(sha256sum "${CHECKSUM_FILE}" | awk '{ print $1 }')" = \
+    "$(jq -r '."checksums.txt".digest' <<< "${RELEASE_ASSET_IDENTITIES}")" ] \
+    || die "checksums.txt bytes differ from the release asset digest"
+  SEEN_CHECKSUMS=$(mktemp)
+  : > "${SEEN_CHECKSUMS}"
+  while IFS= read -r checksum_line || [ -n "${checksum_line}" ]; do
+    [[ "${checksum_line}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9._+-]+)$ ]] \
+      || die "checksums.txt contains a malformed line"
+    CHECKSUM_DIGEST="sha256:${BASH_REMATCH[1]}"
+    CHECKSUM_NAME=${BASH_REMATCH[2]}
+    [ "${CHECKSUM_NAME}" != checksums.txt ] \
+      || die "checksums.txt must not contain itself"
+    grep -Fxq "${CHECKSUM_NAME}" "${SEEN_CHECKSUMS}" \
+      && die "checksums.txt contains duplicate entries"
+    echo "${CHECKSUM_NAME}" >> "${SEEN_CHECKSUMS}"
+    [ "$(jq -r --arg name "${CHECKSUM_NAME}" '.[$name].digest // empty' \
+      <<< "${RELEASE_ASSET_IDENTITIES}")" = "${CHECKSUM_DIGEST}" ] \
+      || die "checksum for ${CHECKSUM_NAME} differs from its release asset digest"
+  done < "${CHECKSUM_FILE}"
+  [ "$(wc -l < "${SEEN_CHECKSUMS}" | tr -d ' ')" -eq \
+    "$(jq 'length - 1' <<< "${EXPECTED_RELEASE_ASSETS}")" ] \
+    || die "checksums.txt does not cover every archive"
+  rm -rf "${CHECKSUM_DIR}"
+  trap - EXIT
+
+  RELEASE_WORKFLOW=$(jq -cn \
+    --arg path .github/workflows/upstream-sync-v2.yml \
+    --arg ref "${GITHUB_WORKFLOW_REF}" \
+    --arg commit "${EXPECTED_COMMIT}" \
+    --arg run_id "${GITHUB_RUN_ID}" \
+    --arg run_attempt "${GITHUB_RUN_ATTEMPT}" '{
+      path: $path,
+      ref: $ref,
+      commit: $commit,
+      run_id: $run_id,
+      run_attempt: $run_attempt
+    }')
 fi
 
 mkdir -p "$(dirname -- "${RECEIPT}")"
@@ -248,6 +368,8 @@ jq -n \
   --arg image "${IMAGE_REF}" \
   --arg image_digest "${IMAGE_DIGEST}" \
   --argjson architecture_images "${ARCHITECTURE_IMAGES}" \
+  --argjson release_asset_identities "${RELEASE_ASSET_IDENTITIES}" \
+  --argjson release_workflow "${RELEASE_WORKFLOW}" \
   --argjson platforms "${RECEIPT_PLATFORMS}" \
   --arg workflow_run_id "${GITHUB_RUN_ID:-local}" \
   '{
@@ -265,6 +387,9 @@ jq -n \
     workflow_run_id: $workflow_run_id
   } + if $schema_version >= 2 then {
     architecture_images: $architecture_images
+  } else {} end + if $schema_version >= 3 then {
+    release_asset_identities: $release_asset_identities,
+    release_workflow: $release_workflow
   } else {} end' > "${RECEIPT_TEMP}"
 mv "${RECEIPT_TEMP}" "${RECEIPT}"
 trap - EXIT

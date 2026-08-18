@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+
 ORIGIN_REMOTE=${ORIGIN_REMOTE:-origin}
 ORIGINAL_REMOTE=${ORIGINAL_REMOTE:-original-upstream}
 PLUS_REMOTE=${PLUS_REMOTE:-plus-upstream}
@@ -140,19 +144,41 @@ candidate_branch_for_plan() {
 
 fork_tag_prefix_for_original_tag() {
   local original_tag=$1
-  if [[ "${original_tag}" == *-* ]]; then
-    printf '%s.unstableneutron' "${original_tag}"
-  else
-    printf '%s-unstableneutron' "${original_tag}"
-  fi
+  fork_tag_prefix_for_source_tag "${original_tag}" \
+    || die "invalid original release tag ${original_tag}"
+  # shellcheck disable=SC2153 # Set by fork_tag_prefix_for_source_tag in hotfix-release-tag.sh.
+  printf '%s\n' "${FORK_TAG_PREFIX}"
 }
 
 latest_fork_tag_for_prefix() {
   local prefix=$1
-  git ls-remote --tags --refs "${ORIGIN_REMOTE}" "${prefix}.[0-9]*" \
-    | awk '{ sub("refs/tags/", "", $2); print $2 }' \
-    | sort -V \
-    | tail -n 1 || true
+  local remote_refs tag latest="" latest_suffix=-1 first_suffix=-1 tag_count=0
+  local -A seen_suffixes=()
+  remote_refs=$(git ls-remote --tags --refs "${ORIGIN_REMOTE}" "${prefix}.*") \
+    || die "could not inspect existing fork release suffixes"
+  while read -r _object ref; do
+    [ -n "${ref:-}" ] || continue
+    tag=${ref#refs/tags/}
+    if ! parse_fork_release_tag "${tag}" || [ "${FORK_TAG_PREFIX}" != "${prefix}" ]; then
+      die "reserved release namespace contains malformed tag ${tag}"
+    fi
+    [ -z "${seen_suffixes[${FORK_TAG_SUFFIX}]+x}" ] \
+      || die "reserved release namespace contains duplicate suffix ${FORK_TAG_SUFFIX}"
+    seen_suffixes[${FORK_TAG_SUFFIX}]=1
+    tag_count=$((tag_count + 1))
+    if [ "${first_suffix}" -lt 0 ] || [ "${FORK_TAG_SUFFIX}" -lt "${first_suffix}" ]; then
+      first_suffix=${FORK_TAG_SUFFIX}
+    fi
+    if [ "${FORK_TAG_SUFFIX}" -gt "${latest_suffix}" ]; then
+      latest=${tag}
+      latest_suffix=${FORK_TAG_SUFFIX}
+    fi
+  done <<< "${remote_refs}"
+  if [ "${tag_count}" -gt 0 ] && \
+     [ $((latest_suffix - first_suffix + 1)) -ne "${tag_count}" ]; then
+    die "reserved release namespace contains a suffix gap"
+  fi
+  printf '%s\n' "${latest}"
 }
 
 is_plus_owned_path() {
@@ -540,6 +566,7 @@ cmd_plan() {
   models_commit=$(git rev-parse "$(snapshot_ref "${planning_key}" models)^{commit}")
 
   local fork_tag_prefix latest_fork_tag latest_fork_suffix next_fork_suffix next_fork_tag
+  local suffix_exhausted=false
   fork_tag_prefix=$(fork_tag_prefix_for_original_tag "${original_tag}")
   latest_fork_tag=$(latest_fork_tag_for_prefix "${fork_tag_prefix}")
   latest_fork_suffix=""
@@ -547,11 +574,18 @@ cmd_plan() {
     latest_fork_suffix=${latest_fork_tag#"${fork_tag_prefix}."}
   fi
   if [ -n "${latest_fork_suffix}" ]; then
-    next_fork_suffix=$((latest_fork_suffix + 1))
+    if [ "${latest_fork_suffix}" -ge 9007199254740990 ]; then
+      next_fork_suffix=""
+      next_fork_tag=""
+      suffix_exhausted=true
+    else
+      next_fork_suffix=$((latest_fork_suffix + 1))
+      next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
+    fi
   else
     next_fork_suffix=0
+    next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
   fi
-  next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
 
   local latest_fork_commit="" latest_fork_models_commit=""
   if [ -n "${latest_fork_tag}" ]; then
@@ -594,6 +628,10 @@ cmd_plan() {
       && [ "${latest_fork_models_commit}" = "${models_commit}" ]; then
       has_changes=false
     fi
+  fi
+  if [ "${suffix_exhausted}" = true ]; then
+    blocked=true
+    block_reason=suffix-exhausted
   fi
 
   local safe_sync_id

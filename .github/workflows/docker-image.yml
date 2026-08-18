@@ -34,29 +34,6 @@ on:
       platforms_json:
         description: JSON array of required published platforms
         value: ${{ jobs.publish.outputs.platforms_json }}
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing fork tag to publish
-        required: true
-        type: string
-      expected_commit:
-        description: Expected peeled tag commit; empty resolves from the tag
-        required: false
-        default: ''
-        type: string
-      publish_latest:
-        description: Also move latest; true preserves legacy direct dispatch behavior
-        required: false
-        default: true
-        type: boolean
-      mode:
-        description: Build platform images, publish the canonical manifest, or do both
-        required: true
-        default: full
-        type: choice
-        options: [full, build, publish]
-
 permissions:
   contents: read
   packages: write
@@ -132,9 +109,10 @@ jobs:
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
           EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
-          if [ -z "${EXPECTED_COMMIT}" ]; then
-            EXPECTED_COMMIT="${TAG_COMMIT}"
-          fi
+          [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Expected commit must be an exact lowercase 40-character SHA." >&2
+            exit 1
+          }
           if [ "$(git rev-parse HEAD)" != "${EXPECTED_COMMIT}" ]; then
             echo "Checkout does not match expected commit ${EXPECTED_COMMIT}." >&2
             exit 1

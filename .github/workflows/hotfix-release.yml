@@ -29,7 +29,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: hotfix-release
+  group: release-publication
   cancel-in-progress: false
 
 env:
@@ -230,6 +230,7 @@ jobs:
           .github/scripts/test-hotfix-release.sh
           .github/scripts/test-verify-hotfix-chain.sh
           .github/scripts/test-verify-hotfix-release.sh
+          .github/scripts/test-publish-staged-release.sh
           .github/scripts/upstream-sync.sh check-invariants
           .github/scripts/upstream-sync.sh check-symbol-survival "${BASE_COMMIT}"
           shellcheck .github/scripts/*.sh
