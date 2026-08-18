@@ -826,8 +826,12 @@ async function validateWorkflowRun(
   workflowPath: string,
   commit: string,
   signal: AbortSignal,
-  options: { hotfix: boolean; allowNotReady: boolean },
-): Promise<{ attempt: number; headSHA: string }> {
+  options: {
+    hotfix: boolean;
+    allowNotReady: boolean;
+    allowFailedHotfixEvidence?: boolean;
+  },
+): Promise<{ attempt: number; headSHA: string; successful: boolean }> {
   const run = object(
     await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}`, signal),
     "workflow run",
@@ -839,11 +843,18 @@ async function validateWorkflowRun(
       throw new RetryableNotReady("release workflow is not complete");
     throw new RejectedDelivery("release workflow is incomplete");
   }
+  const successful = run.conclusion === "success";
+  const recoverableHotfixFailure =
+    options.hotfix &&
+    options.allowFailedHotfixEvidence === true &&
+    ["failure", "cancelled", "timed_out"].includes(
+      string(run.conclusion, "workflow conclusion"),
+    );
   if (
     run.path !== workflowPath ||
     run.head_branch !== "main" ||
     run.status !== "completed" ||
-    run.conclusion !== "success"
+    (!successful && !recoverableHotfixFailure)
   ) {
     throw new RejectedDelivery("workflow run identity differs");
   }
@@ -874,7 +885,7 @@ async function validateWorkflowRun(
       throw new RejectedDelivery("workflow head is not an ancestor");
     }
   }
-  return { attempt, headSHA: runHeadSHA };
+  return { attempt, headSHA: runHeadSHA, successful };
 }
 
 function parseManifest(manifest: RegistryManifest, field: string): JSONObject {
@@ -1260,8 +1271,9 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   const assetDigests = object(receipt.release_asset_digests, "release asset digests"), wanted = Object.fromEntries(assets.nonReceipt.map(a => [a.name, a.digest])); exactKeys(assetDigests, Object.keys(wanted), "release asset digests"); if (Object.entries(wanted).some(([name, value]) => assetDigests[name] !== value)) throw new RejectedDelivery("release asset digests differ");
   const workflowReceipt = object(receipt.release_workflow, "release workflow receipt"); exactKeys(workflowReceipt, ["path", "ref", "commit", "run_id", "run_attempt"], "release workflow receipt"); if (workflowReceipt.path !== HOTFIX_WORKFLOW || workflowReceipt.ref !== `${REPOSITORY}/${HOTFIX_WORKFLOW}@refs/heads/main` || workflowReceipt.commit !== expected.commit || decimalInteger(workflowReceipt.run_id, "release workflow run ID") !== core.workflowRunID) throw new RejectedDelivery("release workflow receipt differs");
   const run = await validateWorkflowRun(client, core.workflowRunID, HOTFIX_WORKFLOW, expected.commit, signal, { hotfix: true, allowNotReady: false });
-  if (decimalInteger(workflowReceipt.run_attempt, "release workflow attempt") !== run.attempt || expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== run.attempt || expected.workflow.headSHA !== run.headSHA) throw new RejectedDelivery("recorded parent workflow differs");
-  const files = await workflowArtifact(client, core.workflowRunID, run.attempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
+  const evidenceAttempt = decimalInteger(workflowReceipt.run_attempt, "release workflow attempt");
+  if (evidenceAttempt > run.attempt || expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== evidenceAttempt || expected.workflow.headSHA !== run.headSHA) throw new RejectedDelivery("recorded parent workflow differs");
+  const files = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
   await verifyRegistry(registry, expected.tag, core.imageDigest, core.architectureImages, signal, { requireLatestParity: false });
   const previousRaw = object(receipt.previous_release, "previous release");
   if (version === 1) {
@@ -1533,16 +1545,25 @@ export async function validateRelease(
       HOTFIX_WORKFLOW,
       commit,
       signal,
-      { hotfix: true, allowNotReady: true },
+      {
+        hotfix: true,
+        allowNotReady: true,
+        allowFailedHotfixEvidence: true,
+      },
     );
     workflowRunAttempt = workflowRun.attempt;
-    if (workflowRunAttempt !== releaseWorkflowAttempt) {
+    if (releaseWorkflowAttempt > workflowRunAttempt) {
       throw new RejectedDelivery("release workflow attempt differs");
     }
-    const artifact = await workflowArtifact(client, core.workflowRunID, workflowRunAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
+    const artifact = await workflowArtifact(client, core.workflowRunID, releaseWorkflowAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
     const finalPlan = artifact.get("final-plan.out");
     if (!finalPlan) throw new RejectedDelivery("final plan artifact is missing");
     parseFinalPlan(finalPlan, currentState.state, tag, commit);
+    if (!workflowRun.successful) {
+      throw new RetryableNotReady(
+        "hotfix finalization awaits a successful rerun",
+      );
+    }
   }
 
   const architectures = await verifyRegistry(

@@ -1420,6 +1420,27 @@ describe("hotfix release provenance", () => {
     });
   });
 
+  test("accepts immutable receipt evidence from an earlier attempt of the same successful run", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    const result = await validate(fixture);
+    expect(result).toMatchObject({
+      kind: "hotfix",
+      workflowRunID: fixture.currentWorkflowID,
+      workflowRunAttempt: 2,
+    });
+  });
+
+  test("keeps exact failed-attempt hotfix evidence retryable until the same run succeeds", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).conclusion = "failure";
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
   test("accepts consecutive schema-v2 hotfix chains through legacy suffix .1", async () => {
     const second = advanceHotfixFixture(releaseFixture("hotfix"));
     await expect(validate(second)).resolves.toMatchObject({
@@ -1436,12 +1457,25 @@ describe("hotfix release provenance", () => {
     expect(third.registry.calls.filter((call) => call === "latest")).toHaveLength(2);
   });
 
+  test("accepts historical parent evidence from an earlier attempt of its successful run", async () => {
+    const second = advanceHotfixFixture(releaseFixture("hotfix"));
+    const parentRunID = Number(second.receipt.previous_release.workflow.run_id);
+    second.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${parentRunID}`,
+    ).run_attempt = 2;
+    await expect(validate(second)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.2",
+    });
+  });
+
   test.each([
     ["receipt digest", (link: any) => (link.receipt.digest = `sha256:${"f".repeat(64)}`)],
     ["receipt asset", (link: any) => (link.receipt.asset_id = "99999")],
     ["artifact digest", (link: any) => (link.artifact.digest = `sha256:${"f".repeat(64)}`)],
     ["artifact ID", (link: any) => (link.artifact.id = "99999")],
     ["workflow run", (link: any) => (link.workflow.run_id = "99999")],
+    ["workflow attempt", (link: any) => (link.workflow.run_attempt = "2")],
     ["workflow head", (link: any) => (link.workflow.head_sha = "f".repeat(40))],
   ])("rejects recorded parent %s drift", async (_name, mutate) => {
     const fixture = advanceHotfixFixture(releaseFixture("hotfix"));

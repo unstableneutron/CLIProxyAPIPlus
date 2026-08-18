@@ -13,8 +13,14 @@ fork-owned	.github/scripts/render-upstream-sync-report.sh
 fork-owned	.github/scripts/verify-upstream-release.sh
 fork-owned	.github/scripts/test-verify-upstream-release.sh
 fork-owned	.github/scripts/validate-hotfix-release.sh
+fork-owned	.github/scripts/inspect-ghcr-image-state.sh
+fork-owned	.github/scripts/inspect-hotfix-publication-state.sh
+fork-owned	.github/scripts/confirm-hotfix-identities-absent.sh
 fork-owned	.github/scripts/verify-hotfix-release.sh
+fork-owned	.github/scripts/verify-hotfix-chain.sh
+fork-owned	.github/scripts/verify-hotfix-finalization-evidence.sh
 fork-owned	.github/scripts/test-hotfix-release.sh
+fork-owned	.github/scripts/test-verify-hotfix-chain.sh
 fork-owned	.github/scripts/test-verify-hotfix-release.sh
 fork-owned	.github/scripts/testdata/upstream-release/
 fork-owned	.github/upstream-sync-dropped-symbols.tsv

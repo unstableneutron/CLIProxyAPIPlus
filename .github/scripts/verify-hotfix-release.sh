@@ -104,6 +104,39 @@ esac
 [ -n "${RECEIPT}" ] || die "--receipt is required"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
+WORKFLOW_RUN_ID=${GITHUB_RUN_ID:-local}
+WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
+if [ -n "${ATTACHED_RECEIPT}" ]; then
+  [ -f "${ATTACHED_RECEIPT}" ] \
+    || die "attached receipt does not exist: ${ATTACHED_RECEIPT}"
+  jq -e . "${ATTACHED_RECEIPT}" >/dev/null 2>&1 \
+    || die "attached hotfix receipt is not valid JSON"
+  ATTACHED_RUN_ID=$(jq -er \
+    '.workflow_run_id | select(type == "string" and test("^([1-9][0-9]*|local)$"))' \
+    "${ATTACHED_RECEIPT}") || die "attached hotfix receipt has an invalid run ID"
+  ATTACHED_RUN_ATTEMPT=$(jq -er \
+    '.release_workflow.run_attempt | select(type == "string" and test("^([1-9][0-9]*|local)$"))' \
+    "${ATTACHED_RECEIPT}") || die "attached hotfix receipt has an invalid run attempt"
+  [ "$(jq -r '.release_workflow.run_id // empty' "${ATTACHED_RECEIPT}")" = "${ATTACHED_RUN_ID}" ] \
+    || die "attached hotfix receipt has inconsistent workflow run IDs"
+  if [ "${WORKFLOW_RUN_ID}" = local ] || [ "${WORKFLOW_RUN_ATTEMPT}" = local ]; then
+    if [ "${ATTACHED_RUN_ID}" != local ] || [ "${ATTACHED_RUN_ATTEMPT}" != local ]; then
+      die "local attached receipt provenance differs"
+    fi
+  else
+    if [[ ! "${WORKFLOW_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || \
+       [[ ! "${WORKFLOW_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]; then
+      die "current workflow provenance is invalid"
+    fi
+    if [ "${ATTACHED_RUN_ID}" != "${WORKFLOW_RUN_ID}" ] || \
+       [ "${ATTACHED_RUN_ATTEMPT}" -gt "${WORKFLOW_RUN_ATTEMPT}" ]; then
+      die "attached receipt is not from this workflow run"
+    fi
+  fi
+  WORKFLOW_RUN_ID=${ATTACHED_RUN_ID}
+  WORKFLOW_RUN_ATTEMPT=${ATTACHED_RUN_ATTEMPT}
+fi
+
 HEAD_COMMIT=$(git rev-parse 'HEAD^{commit}')
 if [ "${MAIN_POLICY}" = exact ]; then
   if [ "${HEAD_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
@@ -184,7 +217,7 @@ elif [ "${BASE_TAG}" != "${STATE_RECORDED_TAG}" ]; then
   die "legacy suffix .1 must directly follow the accepted upstream root"
 fi
 
-"${UPSTREAM_VERIFIER}" \
+GITHUB_RUN_ID="${WORKFLOW_RUN_ID}" "${UPSTREAM_VERIFIER}" \
   --tag "${TAG}" \
   --expected-commit "${EXPECTED_COMMIT}" \
   --expected-sync-id "${EXPECTED_SYNC_ID}" \
@@ -263,8 +296,6 @@ fi
 
 WORKFLOW_PATH=.github/workflows/hotfix-release.yml
 WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-${WORKFLOW_PATH}@local}
-WORKFLOW_RUN_ID=${GITHUB_RUN_ID:-local}
-WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
 mkdir -p "$(dirname -- "${RECEIPT}")"
 RECEIPT_TEMP=$(mktemp "${RECEIPT}.tmp.XXXXXX")
 trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
@@ -306,10 +337,6 @@ jq \
     } else {} end
   ' "${CORE_RECEIPT}" > "${RECEIPT_TEMP}"
 if [ -n "${ATTACHED_RECEIPT}" ]; then
-  [ -f "${ATTACHED_RECEIPT}" ] \
-    || die "attached receipt does not exist: ${ATTACHED_RECEIPT}"
-  jq -e . "${ATTACHED_RECEIPT}" >/dev/null 2>&1 \
-    || die "attached hotfix receipt is not valid JSON"
   if ! diff -u \
     <(jq -S . "${ATTACHED_RECEIPT}") \
     <(jq -S . "${RECEIPT_TEMP}"); then

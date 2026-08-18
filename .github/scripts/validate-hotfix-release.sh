@@ -10,6 +10,7 @@ TAG=""
 EXPECTED_COMMIT=""
 BASE_TAG=""
 EXPECTED_BASE_COMMIT=""
+EXISTING_TAG_POLICY=absent
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -33,6 +34,11 @@ while [ "$#" -gt 0 ]; do
       EXPECTED_BASE_COMMIT=$2
       shift 2
       ;;
+    --existing-tag-policy)
+      [ "$#" -ge 2 ] || die "--existing-tag-policy requires a value"
+      EXISTING_TAG_POLICY=$2
+      shift 2
+      ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -45,6 +51,10 @@ done
   || die "--tag must be a fork release tag"
 [[ "${BASE_TAG}" =~ ^v[0-9][0-9A-Za-z.+-]*unstableneutron\.[0-9]+$ ]] \
   || die "--base-tag must be a fork release tag"
+case "${EXISTING_TAG_POLICY}" in
+  absent|exact) ;;
+  *) die "--existing-tag-policy must be absent or exact" ;;
+esac
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "run inside the repository"
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
@@ -85,21 +95,67 @@ fi
 if [ "${TAG}" != "${EXPECTED_TAG}" ]; then
   die "hotfix tag must be the next suffix ${EXPECTED_TAG}, got ${TAG}"
 fi
-if git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1; then
-  die "hotfix tag ${TAG} already exists"
-fi
+TAG_STATE=absent
+REMOTE_TAG=$(mktemp)
+trap 'rm -f "${REMOTE_TAG}"' EXIT
+set +e
+git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > "${REMOTE_TAG}"
+REMOTE_TAG_STATUS=$?
+set -e
+case "${REMOTE_TAG_STATUS}" in
+  0)
+    TAG_STATE=exact
+    if [ "${EXISTING_TAG_POLICY}" != exact ]; then
+      die "hotfix tag ${TAG} already exists"
+    fi
+    [ "$(wc -l < "${REMOTE_TAG}" | tr -d ' ')" -eq 1 ] \
+      || die "remote hotfix tag ${TAG} has an ambiguous identity"
+    git rev-parse --verify "refs/tags/${TAG}^{commit}" >/dev/null 2>&1 \
+      || die "remote hotfix tag ${TAG} is not fetched"
+    [ "$(git cat-file -t "refs/tags/${TAG}")" = tag ] \
+      || die "existing hotfix tag ${TAG} is not annotated"
+    [ "$(git rev-parse "refs/tags/${TAG}^{}")" = "${EXPECTED_COMMIT}" ] \
+      || die "existing hotfix tag ${TAG} does not peel to ${EXPECTED_COMMIT}"
+    [ "$(awk '{ print $1; exit }' "${REMOTE_TAG}")" = "$(git rev-parse "refs/tags/${TAG}")" ] \
+      || die "local and remote hotfix tag objects differ"
+    REMOTE_PEELED=$(git ls-remote --tags origin "refs/tags/${TAG}^{}")
+    if [ "$(wc -l <<< "${REMOTE_PEELED}" | tr -d ' ')" -ne 1 ] || \
+       [ "$(awk '{ print $1; exit }' <<< "${REMOTE_PEELED}")" != "${EXPECTED_COMMIT}" ]; then
+      die "remote hotfix tag ${TAG} does not peel to ${EXPECTED_COMMIT}"
+    fi
+    [ "$(git for-each-ref --format='%(taggername)' "refs/tags/${TAG}")" = \
+      'cliproxy-hotfix-release[bot]' ] \
+      || die "existing hotfix tag ${TAG} has an unexpected tagger"
+    TAGGER_EMAIL=$(git for-each-ref --format='%(taggeremail)' "refs/tags/${TAG}" | sed -E 's/^<|>$//g')
+    [ "${TAGGER_EMAIL}" = 'cliproxy-hotfix-release@users.noreply.github.com' ] \
+      || die "existing hotfix tag ${TAG} has an unexpected tagger email"
+    [ "$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}")" = \
+      "Hotfix release ${TAG} after ${BASE_TAG}" ] \
+      || die "existing hotfix tag ${TAG} has an unexpected message"
+    ;;
+  2)
+    if git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+      die "local hotfix tag ${TAG} exists without the remote identity"
+    fi
+    ;;
+  *) die "could not determine whether remote hotfix tag ${TAG} exists" ;;
+esac
 
 LATEST_TAG="$({
   git tag --merged refs/remotes/origin/main --list 'v*-unstableneutron.*'
   git tag --merged refs/remotes/origin/main --list 'v*.unstableneutron.*'
 } | sort -Vu | tail -n 1)"
-if [ "${LATEST_TAG}" != "${BASE_TAG}" ]; then
-  die "base tag ${BASE_TAG} is not the latest accepted tag ${LATEST_TAG}"
+EXPECTED_LATEST_TAG=${BASE_TAG}
+if [ "${TAG_STATE}" = exact ]; then
+  EXPECTED_LATEST_TAG=${TAG}
+fi
+if [ "${LATEST_TAG}" != "${EXPECTED_LATEST_TAG}" ]; then
+  die "expected latest accepted tag ${EXPECTED_LATEST_TAG}, got ${LATEST_TAG}"
 fi
 
 BASE_STATE=$(mktemp)
 EXPECTED_STATE=$(mktemp)
-trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}"' EXIT
+trap 'rm -f "${REMOTE_TAG}" "${BASE_STATE}" "${EXPECTED_STATE}"' EXIT
 git show "${BASE_COMMIT}:.ccs-fork-upstream.env" > "${BASE_STATE}" \
   || die "base release does not contain upstream-sync state"
 git show "${EXPECTED_COMMIT}:.ccs-fork-upstream.env" > "${EXPECTED_STATE}" \
@@ -147,6 +203,7 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "sync_id=${SYNC_ID}"
     echo "plan_fingerprint=${PLAN_FINGERPRINT}"
     echo "upstream_state_sha256=${STATE_SHA256}"
+    echo "tag_state=${TAG_STATE}"
   } >> "${GITHUB_OUTPUT}"
 fi
 

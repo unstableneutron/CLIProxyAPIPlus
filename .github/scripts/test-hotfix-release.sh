@@ -5,6 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 POLICY="${SCRIPT_DIR}/validate-hotfix-release.sh"
 GHCR_IMAGE_STATE="${SCRIPT_DIR}/inspect-ghcr-image-state.sh"
 IDENTITY_ABSENCE_CHECK="${SCRIPT_DIR}/confirm-hotfix-identities-absent.sh"
+PUBLICATION_STATE_CHECK="${SCRIPT_DIR}/inspect-hotfix-publication-state.sh"
+FINALIZATION_EVIDENCE_CHECK="${SCRIPT_DIR}/verify-hotfix-finalization-evidence.sh"
 WORKFLOW="${SCRIPT_DIR}/../workflows/hotfix-release.yml"
 DOCKER_WORKFLOW="${SCRIPT_DIR}/../workflows/docker-image.yml"
 RECOVERY_WORKFLOW="${SCRIPT_DIR}/../workflows/sync-release-tag.yml"
@@ -76,13 +78,15 @@ run_policy() {
   local expected_commit=$4
   local base_tag=$5
   local base_commit=$6
+  local existing_tag_policy=${7:-absent}
   (
     cd "${repo}"
     GITHUB_OUTPUT="${output}" "${POLICY}" \
       --tag "${tag}" \
       --expected-commit "${expected_commit}" \
       --base-tag "${base_tag}" \
-      --expected-base-commit "${base_commit}"
+      --expected-base-commit "${base_commit}" \
+      --existing-tag-policy "${existing_tag_policy}"
   )
 }
 
@@ -143,7 +147,7 @@ test_policy_accepts_only_exact_next_release() {
 
   run_git -C "${repo}" tag -a "${HOTFIX_TAG}" -m reused
   expect_policy_failure \
-    "${repo}" "hotfix tag ${HOTFIX_TAG} already exists" \
+    "${repo}" "local hotfix tag ${HOTFIX_TAG} exists without the remote identity" \
     "${HOTFIX_TAG}" "${hotfix_commit}" "${BASE_TAG}" "${base_commit}"
   run_git -C "${repo}" tag -d "${HOTFIX_TAG}" >/dev/null
 
@@ -157,6 +161,38 @@ test_policy_accepts_only_exact_next_release() {
     "${repo}" "changed .ccs-fork-upstream.env" \
     "${HOTFIX_TAG}" "${changed_commit}" "${BASE_TAG}" "${base_commit}"
 
+  rm -rf "${root}"
+}
+
+test_policy_adopts_only_exact_pushed_tag_after_side_effect_failure() {
+  local root
+  root=$(mktemp -d)
+  setup_policy_repo "${root}"
+  local repo=${root}/repo base_commit hotfix_commit output
+  base_commit=$(run_git -C "${repo}" rev-parse "${BASE_TAG}^{}")
+  hotfix_commit=$(run_git -C "${repo}" rev-parse HEAD)
+  run_git -C "${repo}" config user.name 'cliproxy-hotfix-release[bot]'
+  run_git -C "${repo}" config user.email 'cliproxy-hotfix-release@users.noreply.github.com'
+  GIT_COMMITTER_NAME='cliproxy-hotfix-release[bot]' \
+    GIT_COMMITTER_EMAIL=cliproxy-hotfix-release@users.noreply.github.com \
+    run_git -C "${repo}" tag -a "${HOTFIX_TAG}" \
+      -m "Hotfix release ${HOTFIX_TAG} after ${BASE_TAG}"
+  run_git -C "${repo}" push -q origin "refs/tags/${HOTFIX_TAG}"
+  output=${root}/recovered.out
+  run_policy \
+    "${repo}" "${output}" "${HOTFIX_TAG}" "${hotfix_commit}" \
+    "${BASE_TAG}" "${base_commit}" exact >/dev/null
+  [ "$(output_value "${output}" tag_state)" = exact ] \
+    || fail "pushed exact tag was not classified as resumable"
+
+  run_git -C "${repo}" tag -d "${HOTFIX_TAG}" >/dev/null
+  GIT_COMMITTER_NAME='cliproxy-hotfix-release[bot]' \
+    GIT_COMMITTER_EMAIL=cliproxy-hotfix-release@users.noreply.github.com \
+    run_git -C "${repo}" tag -a "${HOTFIX_TAG}" -m "wrong message"
+  run_git -C "${repo}" push -q --force origin "refs/tags/${HOTFIX_TAG}"
+  expect_policy_failure \
+    "${repo}" "unexpected message" \
+    "${HOTFIX_TAG}" "${hotfix_commit}" "${BASE_TAG}" "${base_commit}" exact
   rm -rf "${root}"
 }
 
@@ -210,7 +246,9 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "Verify complete previous release chain"
   assert_contains "${WORKFLOW}" "verify-hotfix-chain.sh"
   assert_contains "${WORKFLOW}" "test-verify-hotfix-chain.sh"
-  assert_contains "${WORKFLOW}" "Reject reused or partially published identity"
+  assert_contains "${WORKFLOW}" "Classify absent or exact resumable publication state"
+  assert_contains "${WORKFLOW}" ".github/scripts/inspect-hotfix-publication-state.sh"
+  assert_contains "${WORKFLOW}" ".github/scripts/verify-hotfix-finalization-evidence.sh"
   assert_contains "${WORKFLOW}" ".github/scripts/confirm-hotfix-identities-absent.sh"
   assert_not_contains "${WORKFLOW}" 'if docker buildx imagetools inspect'
   assert_contains "${DOCKER_WORKFLOW}" "inspect_image_state()"
@@ -218,11 +256,22 @@ test_workflow_contract_is_fail_closed() {
   assert_not_contains "${DOCKER_WORKFLOW}" '2>/dev/null)"; then'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${WORKFLOW}" 'git push origin "refs/tags/${TAG}"'
+  assert_contains "${WORKFLOW}" "Adopting independently verified existing tag"
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/release.yaml"
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/docker-image.yml"
   assert_contains "${WORKFLOW}" "verify-hotfix-release.sh"
   assert_contains "${WORKFLOW}" "hotfix-release-receipt.json"
   assert_contains "${WORKFLOW}" "--attached-receipt"
+  assert_contains "${WORKFLOW}" "Publish or adopt immutable hotfix receipt"
+  local artifact_line receipt_upload_line
+  # shellcheck disable=SC2016 # GitHub expression is asserted literally.
+  artifact_line=$(grep -nF 'name: hotfix-release-receipt-${{ github.run_id }}-${{ github.run_attempt }}' \
+    "${WORKFLOW}" | tail -n 1 | cut -d: -f1)
+  # shellcheck disable=SC2016 # Workflow shell expression is asserted literally.
+  receipt_upload_line=$(grep -nF 'gh release upload "${TAG}" hotfix-release-receipt.json' \
+    "${WORKFLOW}" | tail -n 1 | cut -d: -f1)
+  [ "${artifact_line}" -lt "${receipt_upload_line}" ] \
+    || fail "receipt must publish only after its complete Actions artifact"
   assert_contains "${WORKFLOW}" "Require final fetched no-op plan"
   # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
   assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" has_changes'
@@ -240,6 +289,120 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${RECOVERY_WORKFLOW}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
   assert_contains "${UPSTREAM_WORKFLOW}" "hotfix-release-receipt.json"
   assert_contains "${UPSTREAM_WORKFLOW}" "verify-hotfix-release.sh"
+}
+
+test_publication_state_requires_correlated_identities() {
+  local root gh docker output
+  root=$(mktemp -d)
+  gh=${root}/gh
+  docker=${root}/docker
+  output=${root}/output
+  cat > "${gh}" <<'EOF'
+#!/usr/bin/env bash
+if [ "${PUBLICATION_RELEASE_STATE:?}" = absent ]; then
+  printf 'HTTP/2.0 404 Not Found\n'
+  exit 1
+fi
+exit 99
+EOF
+  cat > "${docker}" <<'EOF'
+#!/usr/bin/env bash
+ref=${*: -1}
+case "${PUBLICATION_IMAGE_STATE:?}:${ref}" in
+  absent:*) echo "ERROR: ${ref}: not found" >&2; exit 1 ;;
+  partial:*amd64) echo 'Name: test'; exit 0 ;;
+  partial:*) echo "ERROR: ${ref}: not found" >&2; exit 1 ;;
+  *) exit 99 ;;
+esac
+EOF
+  chmod +x "${gh}" "${docker}"
+  GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=absent \
+    PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
+      test owner/repository ghcr.io/example/image absent >/dev/null
+  [ "$(output_value "${output}" publication_state)" = absent ] \
+    || fail "fully absent publication was not classified as absent"
+
+  : > "${output}"
+  GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=partial \
+    PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
+      test owner/repository ghcr.io/example/image exact >/dev/null
+  [ "$(output_value "${output}" publication_state)" = publishing ] \
+    || fail "exact-tag partial architecture publication was not resumable"
+  if GITHUB_OUTPUT=${output} PUBLICATION_RELEASE_STATE=absent PUBLICATION_IMAGE_STATE=partial \
+    PATH="${root}:${PATH}" "${PUBLICATION_STATE_CHECK}" \
+      test owner/repository ghcr.io/example/image absent >/dev/null 2>&1; then
+    fail "publication state accepted image identities without an exact tag"
+  fi
+  rm -rf "${root}"
+}
+
+test_finalization_recovers_exact_prior_attempt_evidence() {
+  local root gh receipt final_plan artifact digest size output
+  root=$(mktemp -d)
+  gh=${root}/gh
+  receipt=${root}/hotfix-release-receipt.json
+  final_plan=${root}/final-plan.out
+  artifact=${root}/artifact.zip
+  output=${root}/output
+  cat > "${receipt}" <<EOF
+{"workflow_run_id":"123","release_workflow":{"commit":"$(printf 'a%.0s' {1..40})","run_id":"123","run_attempt":"1"}}
+EOF
+  printf 'deterministic=plan\n' > "${final_plan}"
+  cp "${receipt}" "${root}/independently-verified-receipt.json"
+  python3 - "${root}" "${artifact}" <<'PY'
+import os
+import sys
+import zipfile
+
+root, artifact = sys.argv[1:]
+with zipfile.ZipFile(artifact, "w", zipfile.ZIP_STORED) as archive:
+    for name in (
+        "hotfix-release-receipt.json",
+        "independently-verified-receipt.json",
+        "final-plan.out",
+    ):
+        archive.write(os.path.join(root, name), name)
+PY
+  digest="sha256:$(sha256sum "${artifact}" | awk '{ print $1 }')"
+  size=$(stat -c %s "${artifact}")
+  cat > "${gh}" <<'EOF'
+#!/usr/bin/env bash
+endpoint=${*: -1}
+case "${endpoint}" in
+  */actions/runs/123/attempts/1)
+    printf '%s\n' "${ATTEMPT_JSON}"
+    ;;
+  */actions/runs/123/artifacts?per_page=100)
+    printf '%s\n' "${ARTIFACTS_JSON}"
+    ;;
+  */actions/artifacts/456/zip)
+    cat "${SOURCE_ARTIFACT_ZIP}"
+    ;;
+  *) echo "unexpected endpoint ${endpoint}" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "${gh}"
+  local commit
+  commit=$(printf 'a%.0s' {1..40})
+  ATTEMPT_JSON=$(jq -cn \
+    --arg commit "${commit}" '{id:123,run_attempt:1,path:".github/workflows/hotfix-release.yml",event:"workflow_dispatch",head_branch:"main",head_sha:$commit,status:"completed",conclusion:"failure",actor:{login:"unstableneutron",id:156744497},repository:{full_name:"unstableneutron/CLIProxyAPIPlus",id:1247056725}}')
+  ARTIFACTS_JSON=$(jq -cn \
+    --arg digest "${digest}" \
+    --argjson size "${size}" \
+    --arg commit "${commit}" '{total_count:1,artifacts:[{id:456,name:"hotfix-release-receipt-123-1",digest:$digest,size_in_bytes:$size,expired:false,archive_download_url:"https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/actions/artifacts/456/zip",workflow_run:{id:123,repository_id:1247056725,head_repository_id:1247056725,head_sha:$commit}}]}')
+  export ATTEMPT_JSON ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP=${artifact}
+  GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
+    PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
+      "${receipt}" "${final_plan}" > "${output}"
+  assert_contains "${output}" "adopted hotfix finalization evidence"
+  printf 'tampered=plan\n' > "${final_plan}"
+  if GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=2 \
+    PATH="${root}:${PATH}" "${FINALIZATION_EVIDENCE_CHECK}" \
+      "${receipt}" "${final_plan}" >/dev/null 2>&1; then
+    fail "finalization recovery accepted a mismatched deterministic plan"
+  fi
+  unset ATTEMPT_JSON ARTIFACTS_JSON SOURCE_ARTIFACT_ZIP
+  rm -rf "${root}"
 }
 
 test_ghcr_image_state_is_fail_closed() {
@@ -354,9 +517,14 @@ main() {
   [ -x "${POLICY}" ] || fail "policy script is missing or not executable"
   [ -x "${GHCR_IMAGE_STATE}" ] || fail "GHCR image state checker is missing or not executable"
   [ -x "${IDENTITY_ABSENCE_CHECK}" ] || fail "candidate identity checker is missing or not executable"
+  [ -x "${PUBLICATION_STATE_CHECK}" ] || fail "publication state checker is missing or not executable"
+  [ -x "${FINALIZATION_EVIDENCE_CHECK}" ] || fail "finalization evidence checker is missing or not executable"
   test_policy_accepts_only_exact_next_release
+  test_policy_adopts_only_exact_pushed_tag_after_side_effect_failure
   test_policy_accepts_consecutive_chained_suffixes
   test_workflow_contract_is_fail_closed
+  test_publication_state_requires_correlated_identities
+  test_finalization_recovers_exact_prior_attempt_evidence
   test_ghcr_image_state_is_fail_closed
   test_candidate_identity_absence_is_fail_closed
   echo "[OK] hotfix release policy tests passed"

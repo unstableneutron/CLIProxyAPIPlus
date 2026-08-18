@@ -326,10 +326,6 @@ jobs:
         run: |
           IMAGE="${GHCR_REGISTRY}/${GHCR_IMAGE_NAME}"
           IMAGE="${IMAGE,,}"
-          TAG_ARGS=(-t "${IMAGE}:${TAG}")
-          if [ "${PUBLISH_LATEST}" = true ]; then
-            TAG_ARGS+=(-t "${IMAGE}:latest")
-          fi
           SOURCES=()
           PLATFORMS=()
           EXPECTED_ARCHITECTURE_DIGESTS=()
@@ -361,7 +357,34 @@ jobs:
             echo "Docker source count does not match the declared target matrix." >&2
             exit 1
           fi
-          docker buildx imagetools create "${TAG_ARGS[@]}" "${SOURCES[@]}"
+          inspect_image_state() {
+            local reference=$1 present_output=$2 output output_lines
+            output=$(mktemp)
+            if docker buildx imagetools inspect "${reference}" > "${output}" 2>&1; then
+              cp "${output}" "${present_output}"
+              rm -f "${output}"
+              echo present
+              return 0
+            fi
+            output_lines=$(awk 'END { print NR }' "${output}")
+            if [ "${output_lines}" -eq 1 ] && grep -Eiq \
+              '^ERROR: .*(: 404 Not Found|: not found|: manifest unknown(: manifest unknown)?|: no such manifest)$' \
+              "${output}"; then
+              rm -f "${output}"
+              echo absent
+              return 0
+            fi
+            echo "Could not determine whether image identity ${reference} exists:" >&2
+            cat "${output}" >&2
+            rm -f "${output}"
+            return 1
+          }
+          EXISTING_CANONICAL=$(mktemp)
+          trap 'rm -f "${EXISTING_CANONICAL}"' EXIT
+          CANONICAL_STATE="$(inspect_image_state "${IMAGE}:${TAG}" "${EXISTING_CANONICAL}")"
+          if [ "${CANONICAL_STATE}" = absent ]; then
+            docker buildx imagetools create --tag "${IMAGE}:${TAG}" "${SOURCES[@]}"
+          fi
           IMAGE_INDEX="$(docker buildx imagetools inspect \
             "${IMAGE}:${TAG}" \
             --format '{{json .Manifest}}')"
@@ -399,6 +422,9 @@ jobs:
             fi
           done
           if [ "${PUBLISH_LATEST}" = true ]; then
+            docker buildx imagetools create \
+              --tag "${IMAGE}:latest" \
+              "${IMAGE}@${IMAGE_DIGEST}"
             LATEST_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:latest")"
             LATEST_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${LATEST_INSPECT}")"
             if [ "${LATEST_DIGEST}" != "${IMAGE_DIGEST}" ]; then

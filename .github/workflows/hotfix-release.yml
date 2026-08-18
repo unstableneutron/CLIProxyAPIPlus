@@ -51,6 +51,8 @@ jobs:
       plan_fingerprint: ${{ steps.policy.outputs.plan_fingerprint }}
       sync_id: ${{ steps.policy.outputs.sync_id }}
       tag: ${{ steps.policy.outputs.tag }}
+      tag_state: ${{ steps.policy.outputs.tag_state }}
+      receipt_state: ${{ steps.publication.outputs.receipt_state }}
       upstream_state_sha256: ${{ steps.policy.outputs.upstream_state_sha256 }}
     steps:
       # actions/checkout v7.0.0
@@ -109,7 +111,8 @@ jobs:
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
             --base-tag "${BASE_TAG}" \
-            --expected-base-commit "${EXPECTED_BASE_COMMIT}"
+            --expected-base-commit "${EXPECTED_BASE_COMMIT}" \
+            --existing-tag-policy exact
 
       - name: Require fresh represented upstream state
         env:
@@ -125,13 +128,25 @@ jobs:
           plan_value() {
             awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
           }
+          TAG_STATE=${{ steps.policy.outputs.tag_state }}
+          if [ "${TAG_STATE}" = absent ]; then
+            EXPECTED_LATEST_TAG=${BASE_TAG}
+            EXPECTED_EXPECTED_TAG=${BASE_TAG}
+            EXPECTED_NEXT_TAG=${TAG}
+          else
+            EXPECTED_LATEST_TAG=${TAG}
+            EXPECTED_EXPECTED_TAG=${TAG}
+            TAG_PREFIX=${TAG%.*}
+            TAG_SUFFIX=$((10#${TAG##*.}))
+            EXPECTED_NEXT_TAG="${TAG_PREFIX}.$((TAG_SUFFIX + 1))"
+          fi
           if [ "$(plan_value "${PLAN}" pre_sync_head)" != "${EXPECTED_COMMIT}" ] || \
              [ "$(plan_value "${PLAN}" has_changes)" != false ] || \
              [ "$(plan_value "${PLAN}" target_drift)" != false ] || \
              [ "$(plan_value "${PLAN}" blocked)" != false ] || \
-             [ "$(plan_value "${PLAN}" latest_fork_tag)" != "${BASE_TAG}" ] || \
-             [ "$(plan_value "${PLAN}" expected_fork_tag)" != "${BASE_TAG}" ] || \
-             [ "$(plan_value "${PLAN}" next_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${PLAN}" latest_fork_tag)" != "${EXPECTED_LATEST_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" expected_fork_tag)" != "${EXPECTED_EXPECTED_TAG}" ] || \
+             [ "$(plan_value "${PLAN}" next_fork_tag)" != "${EXPECTED_NEXT_TAG}" ] || \
              [ "$(plan_value "${PLAN}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
              [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
             echo "Fresh planner does not preserve the exact accepted upstream state and next release slot." >&2
@@ -158,13 +173,46 @@ jobs:
             --image "${IMAGE}" \
             --output "${HOTFIX_WORK_DIR}/verified-chain.json"
 
-      - name: Reject reused or partially published identity
+      - name: Classify absent or exact resumable publication state
+        id: publication
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.policy.outputs.tag }}
+          TAG_STATE: ${{ steps.policy.outputs.tag_state }}
         run: |
-          .github/scripts/confirm-hotfix-identities-absent.sh \
-            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
+          STEP_OUTPUT=${GITHUB_OUTPUT}
+          PUBLICATION_OUTPUT=$(mktemp)
+          trap 'rm -f "${PUBLICATION_OUTPUT}"' EXIT
+          GITHUB_OUTPUT=${PUBLICATION_OUTPUT} .github/scripts/inspect-hotfix-publication-state.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" "${TAG_STATE}"
+          cat "${PUBLICATION_OUTPUT}" >> "${STEP_OUTPUT}"
+          if [ "${TAG_STATE}" = absent ]; then
+            .github/scripts/confirm-hotfix-identities-absent.sh \
+              "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
+          fi
+          RECEIPT_STATE=$(awk -F= '$1 == "receipt_state" { print $2; exit }' "${PUBLICATION_OUTPUT}")
+          if [ "${RECEIPT_STATE}" = exact ]; then
+            mkdir -p "${HOTFIX_WORK_DIR}/attached-receipt"
+            gh release download "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern hotfix-release-receipt.json \
+              --dir "${HOTFIX_WORK_DIR}/attached-receipt"
+            .github/scripts/verify-hotfix-release.sh \
+              --tag "${TAG}" \
+              --expected-commit "${{ steps.policy.outputs.expected_commit }}" \
+              --base-tag "${{ steps.policy.outputs.base_tag }}" \
+              --expected-base-commit "${{ steps.policy.outputs.base_commit }}" \
+              --expected-sync-id "${{ steps.policy.outputs.sync_id }}" \
+              --expected-plan-fingerprint "${{ steps.policy.outputs.plan_fingerprint }}" \
+              --image "${IMAGE}" \
+              --main-policy exact \
+              --require-latest-parity true \
+              --attached-receipt "${HOTFIX_WORK_DIR}/attached-receipt/hotfix-release-receipt.json" \
+              --receipt "${HOTFIX_WORK_DIR}/recovered-receipt.json"
+            .github/scripts/verify-hotfix-finalization-evidence.sh \
+              "${HOTFIX_WORK_DIR}/attached-receipt/hotfix-release-receipt.json" \
+              "${HOTFIX_WORK_DIR}/plan.out"
+          fi
 
       - name: Run complete repository and upstream validation
         env:
@@ -223,6 +271,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Revalidate exact identity and source freshness
+        id: revalidate
         env:
           BASE_COMMIT: ${{ needs.validate.outputs.base_commit }}
           BASE_TAG: ${{ needs.validate.outputs.base_tag }}
@@ -235,11 +284,18 @@ jobs:
           git fetch --quiet --force origin main --tags
           git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
           git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
-          .github/scripts/validate-hotfix-release.sh \
+          POLICY_OUTPUT=$(mktemp)
+          FINAL_PREFLIGHT=$(mktemp)
+          PUBLICATION_OUTPUT=$(mktemp)
+          trap 'rm -f "${POLICY_OUTPUT}" "${FINAL_PREFLIGHT}" "${PUBLICATION_OUTPUT}"' EXIT
+          GITHUB_OUTPUT=${POLICY_OUTPUT} .github/scripts/validate-hotfix-release.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
             --base-tag "${BASE_TAG}" \
-            --expected-base-commit "${BASE_COMMIT}"
+            --expected-base-commit "${BASE_COMMIT}" \
+            --existing-tag-policy exact
+          TAG_STATE=$(awk -F= '$1 == "tag_state" { print $2; exit }' "${POLICY_OUTPUT}")
+          echo "tag_state=${TAG_STATE}" >> "${GITHUB_OUTPUT}"
           .github/scripts/verify-hotfix-chain.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
@@ -249,24 +305,35 @@ jobs:
             --expected-plan-fingerprint "${EXPECTED_FINGERPRINT}" \
             --image "${IMAGE}" \
             --output /tmp/revalidated-hotfix-chain.json
-          FINAL_PREFLIGHT=$(mktemp)
-          trap 'rm -f "${FINAL_PREFLIGHT}"' EXIT
           GITHUB_OUTPUT="${FINAL_PREFLIGHT}" .github/scripts/upstream-sync.sh plan
           plan_value() {
             awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
           }
+          if [ "${TAG_STATE}" = absent ]; then
+            EXPECTED_LATEST_TAG=${BASE_TAG}
+            EXPECTED_NEXT_TAG=${TAG}
+          else
+            EXPECTED_LATEST_TAG=${TAG}
+            TAG_PREFIX=${TAG%.*}
+            TAG_SUFFIX=$((10#${TAG##*.}))
+            EXPECTED_NEXT_TAG="${TAG_PREFIX}.$((TAG_SUFFIX + 1))"
+          fi
           if [ "$(plan_value "${FINAL_PREFLIGHT}" has_changes)" != false ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" target_drift)" != false ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" blocked)" != false ] || \
-             [ "$(plan_value "${FINAL_PREFLIGHT}" latest_fork_tag)" != "${BASE_TAG}" ] || \
-             [ "$(plan_value "${FINAL_PREFLIGHT}" next_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" latest_fork_tag)" != "${EXPECTED_LATEST_TAG}" ] || \
+             [ "$(plan_value "${FINAL_PREFLIGHT}" next_fork_tag)" != "${EXPECTED_NEXT_TAG}" ] || \
              [ "$(plan_value "${FINAL_PREFLIGHT}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
              [ "$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' .ccs-fork-upstream.env)" != "${EXPECTED_FINGERPRINT}" ]; then
             echo "Upstream or release state moved after validation." >&2
             exit 1
           fi
-          .github/scripts/confirm-hotfix-identities-absent.sh \
-            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
+          GITHUB_OUTPUT=${PUBLICATION_OUTPUT} .github/scripts/inspect-hotfix-publication-state.sh \
+            "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}" "${TAG_STATE}"
+          if [ "${TAG_STATE}" = absent ]; then
+            .github/scripts/confirm-hotfix-identities-absent.sh \
+              "${TAG}" "${GITHUB_REPOSITORY}" "${IMAGE}"
+          fi
 
       - name: Create exact annotated hotfix tag
         id: tag
@@ -275,11 +342,15 @@ jobs:
           EXPECTED_COMMIT: ${{ needs.validate.outputs.expected_commit }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          git config user.name "cliproxy-hotfix-release[bot]"
-          git config user.email "cliproxy-hotfix-release@users.noreply.github.com"
-          git tag -a "${TAG}" "${EXPECTED_COMMIT}" \
-            -m "Hotfix release ${TAG} after ${BASE_TAG}"
-          git push origin "refs/tags/${TAG}"
+          if [ "${{ steps.revalidate.outputs.tag_state }}" = absent ]; then
+            git config user.name "cliproxy-hotfix-release[bot]"
+            git config user.email "cliproxy-hotfix-release@users.noreply.github.com"
+            git tag -a "${TAG}" "${EXPECTED_COMMIT}" \
+              -m "Hotfix release ${TAG} after ${BASE_TAG}"
+            git push origin "refs/tags/${TAG}"
+          else
+            echo "Adopting independently verified existing tag ${TAG}."
+          fi
           REMOTE_TAG_COMMIT="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{ print $1; exit }')"
           git fetch --quiet origin main
           if [ "${REMOTE_TAG_COMMIT}" != "${EXPECTED_COMMIT}" ] || \
@@ -347,6 +418,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify hotfix release, assets, checksums, and image
+        id: receipt
         env:
           BASE_COMMIT: ${{ needs.tag.outputs.base_commit }}
           BASE_TAG: ${{ needs.tag.outputs.base_tag }}
@@ -357,6 +429,24 @@ jobs:
           SYNC_ID: ${{ needs.tag.outputs.sync_id }}
           TAG: ${{ needs.tag.outputs.tag }}
         run: |
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          RECEIPT_COUNT=$(grep -Fxc hotfix-release-receipt.json <<< "${ASSETS}" || true)
+          if [ "${RECEIPT_COUNT}" -gt 1 ] || \
+             grep -Fx upstream-sync-receipt.json <<< "${ASSETS}" >/dev/null; then
+            echo "Hotfix release has a duplicate or semantically wrong receipt." >&2
+            exit 1
+          fi
+          ATTACHED_ARGS=()
+          RECEIPT_STATE=absent
+          if [ "${RECEIPT_COUNT}" -eq 1 ]; then
+            RECEIPT_STATE=exact
+            mkdir attached-receipt
+            gh release download "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern hotfix-release-receipt.json \
+              --dir attached-receipt
+            ATTACHED_ARGS=(--attached-receipt attached-receipt/hotfix-release-receipt.json)
+          fi
           .github/scripts/verify-hotfix-release.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
@@ -367,13 +457,15 @@ jobs:
             --image "${IMAGE}" \
             --main-policy exact \
             --require-latest-parity true \
+            "${ATTACHED_ARGS[@]}" \
             --receipt hotfix-release-receipt.json
           if [ "$(jq -r '.image_digest' hotfix-release-receipt.json)" != "${EXPECTED_IMAGE_DIGEST}" ]; then
             echo "Verified image digest does not match publisher output ${EXPECTED_IMAGE_DIGEST}." >&2
             exit 1
           fi
+          echo "state=${RECEIPT_STATE}" >> "${GITHUB_OUTPUT}"
 
-      - name: Attach and independently regenerate hotfix receipt
+      - name: Independently regenerate hotfix receipt
         env:
           BASE_COMMIT: ${{ needs.tag.outputs.base_commit }}
           BASE_TAG: ${{ needs.tag.outputs.base_tag }}
@@ -383,13 +475,6 @@ jobs:
           SYNC_ID: ${{ needs.tag.outputs.sync_id }}
           TAG: ${{ needs.tag.outputs.tag }}
         run: |
-          gh release upload "${TAG}" hotfix-release-receipt.json \
-            --repo "${GITHUB_REPOSITORY}"
-          mkdir attached-receipt
-          gh release download "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern hotfix-release-receipt.json \
-            --dir attached-receipt
           .github/scripts/verify-hotfix-release.sh \
             --tag "${TAG}" \
             --expected-commit "${EXPECTED_COMMIT}" \
@@ -400,12 +485,12 @@ jobs:
             --image "${IMAGE}" \
             --main-policy exact \
             --require-latest-parity true \
-            --attached-receipt attached-receipt/hotfix-release-receipt.json \
+            --attached-receipt hotfix-release-receipt.json \
             --receipt independently-verified-receipt.json
           ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
-          if [ "$(grep -Fxc hotfix-release-receipt.json <<< "${ASSETS}")" -ne 1 ] || \
+          if [ "$(grep -Fxc hotfix-release-receipt.json <<< "${ASSETS}" || true)" -gt 1 ] || \
              grep -Fx upstream-sync-receipt.json <<< "${ASSETS}" >/dev/null; then
-            echo "Hotfix release has a missing, duplicate, or semantically wrong receipt." >&2
+            echo "Hotfix release has a duplicate or semantically wrong receipt." >&2
             exit 1
           fi
 
@@ -512,8 +597,16 @@ jobs:
             exit 1
           fi
 
+      - name: Verify adopted receipt finalization evidence
+        if: steps.receipt.outputs.state == 'exact'
+        run: |
+          .github/scripts/verify-hotfix-finalization-evidence.sh \
+            attached-receipt/hotfix-release-receipt.json \
+            final-plan.out
+
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.receipt.outputs.state == 'absent'
         with:
           name: hotfix-release-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -522,3 +615,28 @@ jobs:
             final-plan.out
           if-no-files-found: error
           retention-days: 90
+
+      - name: Publish or adopt immutable hotfix receipt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECEIPT_STATE: ${{ steps.receipt.outputs.state }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          if [ "${RECEIPT_STATE}" = absent ]; then
+            ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+            if grep -Fx hotfix-release-receipt.json <<< "${ASSETS}" >/dev/null; then
+              echo "Receipt identity appeared after finalization preflight." >&2
+              exit 1
+            fi
+            gh release upload "${TAG}" hotfix-release-receipt.json \
+              --repo "${GITHUB_REPOSITORY}"
+            mkdir published-receipt
+            gh release download "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern hotfix-release-receipt.json \
+              --dir published-receipt
+            cmp -s hotfix-release-receipt.json published-receipt/hotfix-release-receipt.json \
+              || { echo "Published receipt bytes differ." >&2; exit 1; }
+          else
+            echo "Adopted the exact immutable receipt and finalization artifact from the earlier attempt."
+          fi

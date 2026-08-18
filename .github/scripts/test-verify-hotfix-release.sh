@@ -143,6 +143,7 @@ run_verifier() {
   local attached_receipt=${3:-}
   local release_api=${4:-${root}/release-api.json}
   local image_index=${5:-${FIXTURES}/image-index.json}
+  local current_attempt=${6:-1}
   local base_commit hotfix_commit
   base_commit=$(run_git -C "${root}/repo" rev-parse "${BASE_TAG}^{}")
   hotfix_commit=$(run_git -C "${root}/repo" rev-parse "${TAG}^{}")
@@ -155,7 +156,7 @@ run_verifier() {
     PATH="${root}/bin:${PATH}" \
       GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
       GITHUB_RUN_ID=123456789 \
-      GITHUB_RUN_ATTEMPT=1 \
+      GITHUB_RUN_ATTEMPT="${current_attempt}" \
       GITHUB_WORKFLOW_REF=unstableneutron/CLIProxyAPIPlus/.github/workflows/hotfix-release.yml@refs/heads/main \
       STUB_BASE_COMMIT="${base_commit}" \
       STUB_HOTFIX_COMMIT="${hotfix_commit}" \
@@ -225,6 +226,17 @@ test_receipt_binds_release_and_upstream_state() {
   run_verifier "${root}" "${root}/verified.json" "${receipt}" >/dev/null
   cmp -s "${receipt}" "${root}/verified.json" \
     || fail "attached receipt verification changed a valid receipt"
+  run_verifier \
+    "${root}" "${root}/recovered.json" "${receipt}" \
+    "${root}/release-api.json" "${FIXTURES}/image-index.json" 2 >/dev/null
+  cmp -s "${receipt}" "${root}/recovered.json" \
+    || fail "later attempt did not preserve immutable receipt provenance"
+
+  jq '.workflow_run_id = "987654321" | .release_workflow.run_id = "987654321"' \
+    "${receipt}" > "${root}/wrong-run.json"
+  expect_failure \
+    "${root}" "attached receipt is not from this workflow run" \
+    "${root}/wrong-run-output.json" "${root}/wrong-run.json"
 
   printf '{not json\n' > "${root}/malformed.json"
   expect_failure \

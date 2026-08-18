@@ -539,6 +539,23 @@ test_workflow_legacy_preflight_and_chained_parent() {
   rm -rf "${root}"
 }
 
+test_accepts_parent_artifact_from_earlier_successfully_recovered_attempt() {
+  local root run
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  run="${root}/fixtures/${FIRST_TAG}/run.json"
+  jq '.run_attempt = 2' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  run_chain \
+    "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+    "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+    "${root}/recovered-parent.json" >/dev/null
+  jq -e '.immediate_parent.workflow.run_attempt == "1"' \
+    "${root}/recovered-parent.json" >/dev/null \
+    || fail "chain did not retain the immutable parent evidence attempt"
+  rm -rf "${root}"
+}
+
 test_accepts_planner_sanitized_source_tag_linkage() (
   local root
   PLUS_SOURCE_TAG=v7.2.127+meta
@@ -732,6 +749,7 @@ main() {
     command -v "${command}" >/dev/null || fail "${command} is required"
   done
   test_workflow_legacy_preflight_and_chained_parent
+  test_accepts_parent_artifact_from_earlier_successfully_recovered_attempt
   test_accepts_planner_sanitized_source_tag_linkage
   test_rejects_noncanonical_historical_checksum_separators
   test_rejects_historical_receipt_and_planner_drift

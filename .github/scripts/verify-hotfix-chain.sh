@@ -388,7 +388,7 @@ verify_release_and_link() {
   [ "$(wc -l < "${seen_checksums}" | tr -d ' ')" -eq "$(jq '[.assets[] | select(.name | test("^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\\.(tar\\.gz|zip)$"))] | length' "${release_file}")" ] \
     || die "checksums.txt for ${tag} does not cover every archive"
 
-  local receipt_file="${node_dir}/${receipt_name}" run_id run_attempt run_head
+  local receipt_file="${node_dir}/${receipt_name}" run_id run_attempt evidence_attempt run_head
   run_id=$(jq -r '.workflow_run_id // empty' "${receipt_file}")
   [[ "${run_id}" =~ ^[1-9][0-9]*$ ]] || die "receipt for ${tag} has an invalid workflow run ID"
   local regenerated="${node_dir}/regenerated.json"
@@ -425,16 +425,22 @@ verify_release_and_link() {
     || die "workflow run for ${tag} has an unexpected identity"
   run_attempt=$(jq -r '.run_attempt' "${run_file}")
   run_head=$(jq -r '.head_sha' "${run_file}")
+  evidence_attempt=${run_attempt}
   if [ "${kind}" = hotfix ]; then
     if [ "$(jq -r '.event' "${run_file}")" != workflow_dispatch ] || [ "${run_head}" != "${commit}" ]; then
       die "hotfix workflow for ${tag} is not pinned to its commit"
+    fi
+    evidence_attempt=$(jq -r '.release_workflow.run_attempt // empty' "${receipt_file}")
+    if [[ ! "${evidence_attempt}" =~ ^[1-9][0-9]*$ ]] || \
+       [ "${evidence_attempt}" -gt "${run_attempt}" ]; then
+      die "hotfix workflow evidence attempt for ${tag} differs"
     fi
     jq -e \
       --arg path "${workflow_path}" \
       --arg ref "${GITHUB_REPOSITORY}/${workflow_path}@refs/heads/main" \
       --arg commit "${commit}" \
       --arg run_id "${run_id}" \
-      --arg attempt "${run_attempt}" '
+      --arg attempt "${evidence_attempt}" '
         .release_workflow == {
           path: $path, ref: $ref, commit: $commit,
           run_id: $run_id, run_attempt: $attempt
@@ -457,7 +463,7 @@ verify_release_and_link() {
   local artifact_prefix=${kind}
   [ "${kind}" = upstream ] && artifact_prefix=upstream-sync
   [ "${kind}" = hotfix ] && artifact_prefix=hotfix-release
-  local artifact_name="${artifact_prefix}-receipt-${run_id}-${run_attempt}"
+  local artifact_name="${artifact_prefix}-receipt-${run_id}-${evidence_attempt}"
   local artifacts_file="${node_dir}/artifacts.json"
   gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" > "${artifacts_file}"
   jq -e '.total_count == (.artifacts | length)' "${artifacts_file}" >/dev/null \
@@ -622,7 +628,7 @@ verify_release_and_link() {
     --arg receipt_digest "${receipt_digest}" \
     --arg workflow_path "${workflow_path}" \
     --arg run_id "${run_id}" \
-    --arg run_attempt "${run_attempt}" \
+    --arg run_attempt "${evidence_attempt}" \
     --arg run_head "${run_head}" \
     --arg artifact_id "${artifact_id}" \
     --arg artifact_name "${artifact_name}" \

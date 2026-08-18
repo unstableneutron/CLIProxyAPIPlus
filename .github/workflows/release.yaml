@@ -104,11 +104,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          RESPONSE=$(mktemp)
+          trap 'rm -f "${RESPONSE}"' EXIT
+          if gh api --include "/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > "${RESPONSE}" 2>&1; then
             echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+          mapfile -t HTTP_STATUSES < <(sed -nE 's/^HTTP\/[0-9.]+ ([0-9]{3})( .*)?\r?$/\1/p' "${RESPONSE}")
+          if [ "${#HTTP_STATUSES[@]}" -eq 1 ] && [ "${HTTP_STATUSES[0]}" = 404 ]; then
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "Could not determine whether release ${TAG} exists:" >&2
+          cat "${RESPONSE}" >&2
+          exit 1
 
       # goreleaser/goreleaser-action v7.2.3
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
@@ -130,7 +139,24 @@ jobs:
           TAG: ${{ inputs.tag }}
           EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
         run: |
-          RELEASE_JSON="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json url,assets)"
+          RELEASE_JSON="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          if ! jq -e \
+            --arg tag "${TAG}" \
+            --arg repo "${GITHUB_REPOSITORY}" '
+              .tag_name == $tag and .draft == false and .prerelease == false and
+              .target_commitish == "main" and
+              .html_url == ("https://github.com/" + $repo + "/releases/tag/" + $tag) and
+              .author.login == "github-actions[bot]" and .author.id == 41898282 and
+              (.assets | type) == "array" and
+              ([.assets[].name] | length) == ([.assets[].name] | unique | length) and
+              all(.assets[];
+                (.id | type) == "number" and (.id | floor) == .id and .id > 0 and
+                .state == "uploaded" and
+                (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$")))
+            ' <<< "${RELEASE_JSON}" >/dev/null; then
+            echo "Release ${TAG} has an incomplete or conflicting identity." >&2
+            exit 1
+          fi
           ASSET_NAMES_JSON="$(jq -c '[.assets[].name]' <<< "${RELEASE_JSON}")"
           if ! jq -e 'index("checksums.txt") != null' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
             echo "Release ${TAG} is missing checksums.txt." >&2
@@ -145,7 +171,7 @@ jobs:
             exit 1
           fi
           {
-            echo "release_url=$(jq -r '.url' <<< "${RELEASE_JSON}")"
+            echo "release_url=$(jq -r '.html_url' <<< "${RELEASE_JSON}")"
             echo "asset_names_json=${ASSET_NAMES_JSON}"
             echo "release_commit=${EXPECTED_COMMIT}"
           } >> "${GITHUB_OUTPUT}"

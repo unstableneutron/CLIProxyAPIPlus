@@ -48,6 +48,20 @@ state, and architecture image, and rejects cycles or chains over 32 hotfix nodes
 Gaps, stale main, reused identities, missing historical evidence, drafts,
 prereleases, and mismatches stop publication fail closed.
 
+Publication is restartable only by exact evidence. Before the first side effect,
+all candidate identities must be absent. After an interruption, the same policy
+may adopt an existing annotated tag only when its object, peeled SHA, bot tagger,
+message, current main, chain, and fresh planner state match exactly; release and
+GHCR identities are classified independently and conflicting partial state is
+rejected. Final-plan regeneration and the complete run-attempt artifact are
+published before the immutable release receipt. If receipt upload succeeds but
+that attempt later fails, only a later attempt of the same workflow run may adopt
+the receipt: it must reproduce its bytes and verify the exact earlier-attempt
+artifact and final plan. The final successful attempt may therefore be later
+than the immutable evidence attempt recorded by the receipt. Tags, releases,
+receipts, and canonical GHCR tags are never deleted, moved, clobbered, or
+overwritten during recovery.
+
 ## Related issues
 
 - CCS CLI #1062 — runtime degrades `backend: plus → original` until this fork's releases are wired up in `BACKEND_CONFIG.plus.repo`.
