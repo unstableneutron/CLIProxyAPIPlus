@@ -1,9 +1,9 @@
 import type { VerifiedRelease } from "./provenance";
-import { REPOSITORY_ID } from "./provenance";
+import { isReleaseTag, REPOSITORY_ID } from "./provenance";
 import { createHash } from "node:crypto";
 const THREAD_ID = /^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GITHUB_DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const RELEASE_KEY = new RegExp(`^${REPOSITORY_ID}:[1-9][0-9]*:v[0-9]+\\.[0-9]+\\.[0-9]+-unstableneutron\\.[0-9]+:[0-9a-f]{40}:sha256:[0-9a-f]{64}$`);
+const RELEASE_KEY = new RegExp(`^${REPOSITORY_ID}:[1-9][0-9]*:([^:]+):[0-9a-f]{40}:sha256:[0-9a-f]{64}$`);
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export type Status =
   | "claimed"
@@ -29,6 +29,8 @@ export interface State {
 export interface Store {
   load(): Promise<State>;
   save(s: State): Promise<void>;
+  /** Revalidates the mutable release frontier before an external side effect. */
+  recheck(): Promise<void>;
   /** Atomically and permanently claims an immutable release key. */
   claim(key: string): Promise<boolean>;
 }
@@ -40,6 +42,10 @@ export interface Thread {
 export interface Spawner {
   create(): Promise<Thread>;
   get(id: string): Thread;
+}
+function validReleaseKey(key: string): boolean {
+  const match = RELEASE_KEY.exec(key);
+  return match !== null && isReleaseTag(match[1]);
 }
 export const emptyState = (): State => ({
   schemaVersion: 1,
@@ -79,7 +85,7 @@ export function parseState(v: unknown): State {
     if (
       keys.some((k) => !allowed.includes(k)) ||
       required.some((k) => !keys.includes(k)) ||
-      !RELEASE_KEY.test(key) ||
+      !validReleaseKey(key) ||
       value.key !== key ||
       typeof value.ampEventID !== "string" ||
       !value.ampEventID ||
@@ -150,9 +156,11 @@ export async function notifyIssue(
   thread: Thread,
   code: string,
   key: string,
+  beforeAppend: () => Promise<void> = async () => {},
 ): Promise<boolean> {
   const marker = issueMarker(code, key);
   if (await thread.hasMarker(marker)) return false;
+  await beforeAppend();
   await thread.append(
     `${marker}\nDeployment dispatch requires operator review. See sanitized workspace state and plugin logs; no release content or credentials are included.`,
   );
@@ -168,6 +176,7 @@ export async function dispatch(
   now = () => new Date().toISOString(),
 ) {
   const key = releaseKey(r);
+  if (!validReleaseKey(key)) throw new Error("verified release key malformed");
   let s = await store.load();
   for (const [map, id] of [
     [s.ampEvents, ampID],
@@ -177,29 +186,48 @@ export async function dispatch(
       return { outcome: "blocked" as const, issue: "identity-rebind", releaseKey: key };
   const old = s.releases[key];
   if (old) {
+    const bindingsChanged =
+      s.ampEvents[ampID] !== key || s.githubDeliveries[deliveryID] !== key;
     s.ampEvents[ampID] = key;
     s.githubDeliveries[deliveryID] = key;
-    await store.save(s);
     if (
       (old.status === "thread-created" || old.status === "append-failed") &&
       old.threadID
     ) {
       const t = spawner.get(old.threadID);
+      let markerExists: boolean;
       try {
-        if (!(await t.hasMarker(`- Amp event: ${old.ampEventID}`)))
-          await t.append(prompt(r, old.ampEventID, source));
-        old.status = "dispatched";
-        old.error = undefined;
-        old.updatedAt = now();
-        await store.save(s);
-        return { outcome: "dispatched" as const, threadID: t.id };
+        markerExists = await t.hasMarker(`- Amp event: ${old.ampEventID}`);
       } catch (e) {
         old.status = "append-failed";
         old.error = "thread-append-failed";
         old.updatedAt = now();
+        await store.recheck();
         await store.save(s);
         throw new Error("thread-append-failed");
       }
+      if (!markerExists) {
+        await store.recheck();
+        try {
+          await t.append(prompt(r, old.ampEventID, source));
+        } catch (e) {
+          old.status = "append-failed";
+          old.error = "thread-append-failed";
+          old.updatedAt = now();
+          await store.save(s);
+          throw new Error("thread-append-failed");
+        }
+      }
+      old.status = "dispatched";
+      old.error = undefined;
+      old.updatedAt = now();
+      await store.recheck();
+      await store.save(s);
+      return { outcome: "dispatched" as const, threadID: t.id };
+    }
+    if (bindingsChanged) {
+      await store.recheck();
+      await store.save(s);
     }
     return {
       outcome:
@@ -211,6 +239,7 @@ export async function dispatch(
       releaseKey: key,
     };
   }
+  await store.recheck();
   if (!(await store.claim(key))) {
     return { outcome: "blocked" as const, issue: "existing-claim", releaseKey: key };
   }
@@ -251,6 +280,7 @@ export async function dispatch(
     updatedAt: now(),
   });
   await store.save(s);
+  await store.recheck();
   try {
     await t.append(prompt(r, ampID, source));
   } catch (e) {

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { admitWebhook, verifyGitHubSignature } from "./admission";
+import {
+  admitWebhook,
+  MAXIMUM_WEBHOOK_BYTES,
+  verifyGitHubSignature,
+} from "./admission";
 
 const secret = "s".repeat(32),
   id = "123e4567-e89b-42d3-a456-426614174000";
@@ -39,6 +43,23 @@ describe("webhook admission", () => {
     expect(
       verifyGitHubSignature(encode("{}"), "sha256=" + "0".repeat(64), "short"),
     ).toBeFalse());
+  test("rejects an oversized release payload before HMAC", () => {
+    const b = new Uint8Array(MAXIMUM_WEBHOOK_BYTES + 1);
+    expect(
+      verifyGitHubSignature(b, "sha256=" + "0".repeat(64), secret),
+    ).toBeFalse();
+    expect(() =>
+      admitWebhook(
+        {
+          "x-github-event": "release",
+          "x-github-delivery": id,
+          "x-hub-signature-256": "sha256=" + "0".repeat(64),
+        },
+        b,
+        secret,
+      ),
+    ).toThrow("request body too large");
+  });
   test("ignores non-release before HMAC", () =>
     expect(
       admitWebhook({ "x-github-event": "push" }, encode("bad"), "short"),

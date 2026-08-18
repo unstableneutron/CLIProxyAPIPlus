@@ -98,8 +98,10 @@ function harness() {
   let state: State = emptyState(),
     creates = 0,
     appends = 0,
+    rechecks = 0,
     marker = false,
-    claimed = false;
+    claimed = false,
+    recheck = async () => {};
   const thread = {
     id: tid,
     append: async () => {
@@ -109,9 +111,13 @@ function harness() {
   };
   return {
     store: {
-      load: async () => structuredClone(state),
+      load: async () => parseState(structuredClone(state)),
       save: async (s: State) => {
-        state = structuredClone(s);
+        state = parseState(structuredClone(s));
+      },
+      recheck: async () => {
+        rechecks++;
+        await recheck();
       },
       claim: async () => {
         if (claimed) return false;
@@ -127,7 +133,11 @@ function harness() {
       get: () => thread,
     },
     counts: () => ({ creates, appends }),
+    rechecks: () => rechecks,
     state: () => state,
+    setRecheck: (next: () => Promise<void>) => {
+      recheck = next;
+    },
     setMarker: () => {
       marker = true;
     },
@@ -154,20 +164,43 @@ describe("durable dispatch", () => {
   });
   test("issue callback is sanitized and marker-deduplicated", async () => {
     const messages: string[] = [];
+    const order: string[] = [];
     const thread = {
       id: tid,
       append: async (message: string) => {
+        order.push("append");
         messages.push(message);
       },
       hasMarker: async (marker: string) =>
         messages.some((message) => message.includes(marker)),
     };
     const key = releaseKey(r);
-    expect(await notifyIssue(thread, "creation-uncertain", key)).toBe(true);
+    expect(
+      await notifyIssue(thread, "creation-uncertain", key, async () => {
+        order.push("recheck");
+      }),
+    ).toBe(true);
     expect(await notifyIssue(thread, "creation-uncertain", key)).toBe(false);
     expect(await notifyIssue(thread, "creation-uncertain", releaseKey({ ...r, releaseID: 4 }))).toBe(true);
     expect(messages).toHaveLength(2);
+    expect(order.slice(0, 2)).toEqual(["recheck", "append"]);
     expect(messages[0]).not.toContain(r.tag);
+  });
+  test("issue callback rejects mutable drift before append", async () => {
+    let appends = 0;
+    await expect(
+      notifyIssue(
+        {
+          id: tid,
+          append: async () => { appends++; },
+          hasMarker: async () => false,
+        },
+        "identity-rebind",
+        releaseKey(r),
+        async () => { throw new Error("frontier drift"); },
+      ),
+    ).rejects.toThrow("frontier drift");
+    expect(appends).toBe(0);
   });
   test("runner options are exact and create a fresh thread", () =>
     expect([HIGH_AGENT_MODE, runnerCreateOptions()]).toEqual([
@@ -181,6 +214,43 @@ describe("durable dispatch", () => {
     ).toBe("dispatched");
     expect(h.counts()).toEqual({ creates: 1, appends: 1 });
   });
+  test("prerelease-derived tags survive save, reload, and duplicate delivery", async () => {
+    const h = harness();
+    const prerelease = {
+      ...r,
+      tag: "v1.2.3-rc.1.unstableneutron.4",
+    };
+    expect(
+      (await dispatch(h.store, h.spawner, prerelease, "amp-1", gh1, tid)).outcome,
+    ).toBe("dispatched");
+    expect(parseState(h.state())).toEqual(h.state());
+    expect(
+      (await dispatch(h.store, h.spawner, prerelease, "amp-2", gh2, tid)).outcome,
+    ).toBe("duplicate");
+    expect(h.counts()).toEqual({ creates: 1, appends: 1 });
+  });
+  test("rejects an invalid release key before claim or thread side effects", async () => {
+    let loads = 0, claims = 0, creates = 0;
+    await expect(
+      dispatch(
+        {
+          load: async () => { loads++; return emptyState(); },
+          save: async () => {},
+          recheck: async () => {},
+          claim: async () => { claims++; return true; },
+        },
+        {
+          create: async () => { creates++; throw new Error("must not create"); },
+          get: () => { throw new Error("must not get"); },
+        },
+        { ...r, tag: "v1.2.3-unstableneutron.9007199254740991" },
+        "amp-1",
+        gh1,
+        tid,
+      ),
+    ).rejects.toThrow("verified release key malformed");
+    expect({ loads, claims, creates }).toEqual({ loads: 0, claims: 0, creates: 0 });
+  });
   test("atomic claim permits only one concurrent create", async () => {
     let state: State = emptyState(), claimed = false, arrivals = 0;
     let releaseBarrier!: () => void;
@@ -189,6 +259,7 @@ describe("durable dispatch", () => {
     const store = {
       load: async () => structuredClone(state),
       save: async (s: State) => { state = structuredClone(s); },
+      recheck: async () => {},
       claim: async () => {
         arrivals++;
         if (arrivals === 2) releaseBarrier();
@@ -295,6 +366,29 @@ describe("durable dispatch", () => {
     h.setMarker();
     await dispatch(h.store, h.spawner, r, "amp-1", gh1, tid);
     expect(h.counts().appends).toBe(1);
+  });
+  test("recovery rejects mutable drift before appending a deployment prompt", async () => {
+    const h = harness();
+    await dispatch(h.store, h.spawner, r, "amp-1", gh1, tid);
+    const key = releaseKey(r);
+    h.state().releases[key].status = "thread-created";
+    h.setRecheck(async () => { throw new Error("frontier drift"); });
+    await expect(
+      dispatch(h.store, h.spawner, r, "amp-1", gh1, tid),
+    ).rejects.toThrow("frontier drift");
+    expect(h.counts()).toEqual({ creates: 1, appends: 1 });
+    expect(h.state().releases[key].status).toBe("thread-created");
+  });
+  test("new dispatch rechecks again after thread creation and before append", async () => {
+    const h = harness();
+    h.setRecheck(async () => {
+      if (h.rechecks() === 2) throw new Error("frontier drift");
+    });
+    await expect(
+      dispatch(h.store, h.spawner, r, "amp-1", gh1, tid),
+    ).rejects.toThrow("frontier drift");
+    expect(h.counts()).toEqual({ creates: 1, appends: 0 });
+    expect(h.state().releases[releaseKey(r)].status).toBe("thread-created");
   });
   test("deep parser rejects dangling maps and bad status", () => {
     expect(() =>

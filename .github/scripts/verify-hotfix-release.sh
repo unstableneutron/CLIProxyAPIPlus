@@ -3,6 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
+CHAIN_VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/release-assets.sh"
 
 die() {
   echo "[hotfix-release-verifier] $*" >&2
@@ -103,6 +108,39 @@ esac
 [ -n "${RECEIPT}" ] || die "--receipt is required"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
+WORKFLOW_RUN_ID=${GITHUB_RUN_ID:-local}
+WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
+if [ -n "${ATTACHED_RECEIPT}" ]; then
+  [ -f "${ATTACHED_RECEIPT}" ] \
+    || die "attached receipt does not exist: ${ATTACHED_RECEIPT}"
+  jq -e . "${ATTACHED_RECEIPT}" >/dev/null 2>&1 \
+    || die "attached hotfix receipt is not valid JSON"
+  ATTACHED_RUN_ID=$(jq -er \
+    '.workflow_run_id | select(type == "string" and test("^([1-9][0-9]*|local)$"))' \
+    "${ATTACHED_RECEIPT}") || die "attached hotfix receipt has an invalid run ID"
+  ATTACHED_RUN_ATTEMPT=$(jq -er \
+    '.release_workflow.run_attempt | select(type == "string" and test("^([1-9][0-9]*|local)$"))' \
+    "${ATTACHED_RECEIPT}") || die "attached hotfix receipt has an invalid run attempt"
+  [ "$(jq -r '.release_workflow.run_id // empty' "${ATTACHED_RECEIPT}")" = "${ATTACHED_RUN_ID}" ] \
+    || die "attached hotfix receipt has inconsistent workflow run IDs"
+  if [ "${WORKFLOW_RUN_ID}" = local ] || [ "${WORKFLOW_RUN_ATTEMPT}" = local ]; then
+    if [ "${ATTACHED_RUN_ID}" != local ] || [ "${ATTACHED_RUN_ATTEMPT}" != local ]; then
+      die "local attached receipt provenance differs"
+    fi
+  else
+    if [[ ! "${WORKFLOW_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || \
+       [[ ! "${WORKFLOW_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]; then
+      die "current workflow provenance is invalid"
+    fi
+    if [ "${ATTACHED_RUN_ID}" != "${WORKFLOW_RUN_ID}" ] || \
+       [ "${ATTACHED_RUN_ATTEMPT}" -gt "${WORKFLOW_RUN_ATTEMPT}" ]; then
+      die "attached receipt is not from this workflow run"
+    fi
+  fi
+  WORKFLOW_RUN_ID=${ATTACHED_RUN_ID}
+  WORKFLOW_RUN_ATTEMPT=${ATTACHED_RUN_ATTEMPT}
+fi
+
 HEAD_COMMIT=$(git rev-parse 'HEAD^{commit}')
 if [ "${MAIN_POLICY}" = exact ]; then
   if [ "${HEAD_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
@@ -143,14 +181,49 @@ fi
 STATE_SYNC_ID=$(awk -F= '$1 == "SYNC_ID" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_FINGERPRINT=$(awk -F= '$1 == "PLAN_FINGERPRINT" { print $2; exit }' "${EXPECTED_STATE}")
 STATE_RECORDED_TAG=$(awk -F= '$1 == "EXPECTED_FORK_TAG" { print $2; exit }' "${EXPECTED_STATE}")
+STATE_ORIGINAL_TAG=$(awk -F= '$1 == "ORIGINAL_TAG" { print $2; exit }' "${EXPECTED_STATE}")
+parse_fork_release_tag "${TAG}" || die "hotfix tag has an invalid release suffix"
+HOTFIX_PREFIX=${FORK_TAG_PREFIX}
+HOTFIX_SUFFIX=${FORK_TAG_SUFFIX}
+parse_fork_release_tag "${BASE_TAG}" || die "base tag has an invalid release suffix"
+BASE_PREFIX=${FORK_TAG_PREFIX}
+BASE_SUFFIX=${FORK_TAG_SUFFIX}
+if [ "${HOTFIX_PREFIX}" != "${BASE_PREFIX}" ] || \
+   [ "${HOTFIX_SUFFIX}" -ne $((BASE_SUFFIX + 1)) ]; then
+  die "hotfix tag is not the consecutive successor of its base tag"
+fi
+parse_fork_release_tag "${STATE_RECORDED_TAG}" \
+  || die "hotfix upstream-sync state records an invalid accepted root"
+ROOT_PREFIX=${FORK_TAG_PREFIX}
+ROOT_SUFFIX=${FORK_TAG_SUFFIX}
+fork_tag_prefix_for_source_tag "${STATE_ORIGINAL_TAG}" \
+  || die "hotfix upstream-sync state records an invalid source tag"
+SOURCE_PREFIX=${FORK_TAG_PREFIX}
 if [ "${STATE_SYNC_ID}" != "${EXPECTED_SYNC_ID}" ] || \
    [ "${STATE_FINGERPRINT}" != "${EXPECTED_PLAN_FINGERPRINT}" ] || \
-   [ "${STATE_RECORDED_TAG}" != "${BASE_TAG}" ]; then
+   [ "${ROOT_PREFIX}" != "${HOTFIX_PREFIX}" ] || \
+   [ "${ROOT_PREFIX}" != "${SOURCE_PREFIX}" ] || \
+   [ "${ROOT_SUFFIX}" -gt "${BASE_SUFFIX}" ]; then
   die "hotfix upstream-sync state does not match the accepted base release"
 fi
 STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
 
-"${UPSTREAM_VERIFIER}" \
+CHAIN_RECEIPT=$(mktemp)
+printf '{}\n' > "${CHAIN_RECEIPT}"
+if [ "${BASE_TAG}" != "${STATE_RECORDED_TAG}" ]; then
+  trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
+  "${CHAIN_VERIFIER}" \
+    --tag "${TAG}" \
+    --expected-commit "${EXPECTED_COMMIT}" \
+    --parent-tag "${BASE_TAG}" \
+    --expected-parent-commit "${EXPECTED_BASE_COMMIT}" \
+    --expected-sync-id "${EXPECTED_SYNC_ID}" \
+    --expected-plan-fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
+    --image "${IMAGE}" \
+    --output "${CHAIN_RECEIPT}"
+fi
+
+GITHUB_RUN_ID="${WORKFLOW_RUN_ID}" "${UPSTREAM_VERIFIER}" \
   --tag "${TAG}" \
   --expected-commit "${EXPECTED_COMMIT}" \
   --expected-sync-id "${EXPECTED_SYNC_ID}" \
@@ -159,6 +232,8 @@ STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
   --main-policy "${MAIN_POLICY}" \
   --require-architecture-tags true \
   --require-latest-parity "${REQUIRE_LATEST_PARITY}" \
+  --allowed-receipt-name hotfix-release-receipt.json \
+  --receipt-schema-version 2 \
   --receipt "${CORE_RECEIPT}"
 
 RELEASE_API=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
@@ -178,11 +253,11 @@ RELEASE_ASSET_DIGESTS=$(jq -ce '
     end
   ' <<< "${RELEASE_API}") \
   || die "release assets do not have a unique SHA-256 identity"
-if [ "$(jq 'length' <<< "${RELEASE_ASSET_DIGESTS}")" -lt 2 ]; then
-  die "release must contain checksums.txt and at least one archive"
-fi
-if ! jq -e 'has("checksums.txt")' <<< "${RELEASE_ASSET_DIGESTS}" >/dev/null; then
-  die "release asset digest set is missing checksums.txt"
+EXPECTED_RELEASE_ASSETS=$(expected_release_assets_json "${TAG}") \
+  || die "could not derive the expected release assets for ${TAG}"
+if ! jq -e --argjson expected "${EXPECTED_RELEASE_ASSETS}" \
+  'keys == $expected' <<< "${RELEASE_ASSET_DIGESTS}" >/dev/null; then
+  die "release asset digest set differs from the release contract"
 fi
 
 gh release download "${TAG}" \
@@ -198,9 +273,9 @@ if [ "${CHECKSUM_DIGEST}" != "${EXPECTED_CHECKSUM_DIGEST}" ]; then
 fi
 
 CHECKSUM_ASSETS='{}'
+CHECKSUM_LINE_PATTERN='^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*\.(tar\.gz|zip))$'
 while IFS= read -r LINE || [ -n "${LINE}" ]; do
-  [ -n "${LINE}" ] || continue
-  if [[ ! "${LINE}" =~ ^([0-9a-f]{64})[[:space:]]+\*?(.+)$ ]]; then
+  if [[ ! "${LINE}" =~ ${CHECKSUM_LINE_PATTERN} ]]; then
     die "checksums.txt contains a malformed line"
   fi
   DIGEST="sha256:${BASH_REMATCH[1]}"
@@ -229,16 +304,17 @@ fi
 
 WORKFLOW_PATH=.github/workflows/hotfix-release.yml
 WORKFLOW_REF=${GITHUB_WORKFLOW_REF:-${WORKFLOW_PATH}@local}
-WORKFLOW_RUN_ID=${GITHUB_RUN_ID:-local}
-WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
 mkdir -p "$(dirname -- "${RECEIPT}")"
 RECEIPT_TEMP=$(mktemp "${RECEIPT}.tmp.XXXXXX")
-trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
+trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}" "${RECEIPT_TEMP}"; rm -rf "${ASSET_DIR}"' EXIT
+HOTFIX_SCHEMA_VERSION=2
+[ "${BASE_TAG}" = "${STATE_RECORDED_TAG}" ] && HOTFIX_SCHEMA_VERSION=1
 jq \
   --arg receipt_type hotfix-release \
-  --argjson hotfix_schema_version 1 \
+  --argjson hotfix_schema_version "${HOTFIX_SCHEMA_VERSION}" \
   --arg base_tag "${BASE_TAG}" \
   --arg base_commit "${EXPECTED_BASE_COMMIT}" \
+  --slurpfile chain "${CHAIN_RECEIPT}" \
   --arg state_sha256 "${STATE_SHA256}" \
   --argjson release_asset_digests "${RELEASE_ASSET_DIGESTS}" \
   --arg workflow_path "${WORKFLOW_PATH}" \
@@ -249,10 +325,10 @@ jq \
     . + {
       receipt_type: $receipt_type,
       hotfix_schema_version: $hotfix_schema_version,
-      previous_release: {
+      previous_release: (if $hotfix_schema_version == 1 then {
         tag: $base_tag,
         commit: $base_commit
-      },
+      } else $chain[0].immediate_parent end),
       upstream_state: {
         sync_id: .sync_id,
         plan_fingerprint: .plan_fingerprint,
@@ -266,13 +342,11 @@ jq \
         run_id: $workflow_run_id,
         run_attempt: $workflow_run_attempt
       }
-    }
+    } + if $hotfix_schema_version == 2 then {
+      accepted_upstream_root: ($chain[0].accepted_upstream_root)
+    } else {} end
   ' "${CORE_RECEIPT}" > "${RECEIPT_TEMP}"
 if [ -n "${ATTACHED_RECEIPT}" ]; then
-  [ -f "${ATTACHED_RECEIPT}" ] \
-    || die "attached receipt does not exist: ${ATTACHED_RECEIPT}"
-  jq -e . "${ATTACHED_RECEIPT}" >/dev/null 2>&1 \
-    || die "attached hotfix receipt is not valid JSON"
   if ! diff -u \
     <(jq -S . "${ATTACHED_RECEIPT}") \
     <(jq -S . "${RECEIPT_TEMP}"); then
@@ -280,6 +354,6 @@ if [ -n "${ATTACHED_RECEIPT}" ]; then
   fi
 fi
 mv "${RECEIPT_TEMP}" "${RECEIPT}"
-trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
+trap 'rm -f "${BASE_STATE}" "${EXPECTED_STATE}" "${CORE_RECEIPT}" "${CHAIN_RECEIPT}"; rm -rf "${ASSET_DIR}"' EXIT
 
 echo "[OK] verified hotfix release ${TAG} at ${EXPECTED_COMMIT}; receipt=${RECEIPT}"

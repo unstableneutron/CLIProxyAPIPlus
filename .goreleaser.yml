@@ -1,6 +1,9 @@
 version: 2
 
 builds:
+  # The exact published archive matrix is consumed across shell and TypeScript
+  # from .github/release-asset-contract.json and regression-checked against this
+  # GoReleaser configuration.
   # GoReleaser runs on Linux without cross C toolchains in this fork. Keep the
   # portable non-Windows archives explicit: they compile without CGO, so dynamic
   # library plugins are not available there. Docker images are CGO-enabled.

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hotfix-release-tag.sh"
+
 ORIGIN_REMOTE=${ORIGIN_REMOTE:-origin}
 ORIGINAL_REMOTE=${ORIGINAL_REMOTE:-original-upstream}
 PLUS_REMOTE=${PLUS_REMOTE:-plus-upstream}
@@ -140,19 +144,41 @@ candidate_branch_for_plan() {
 
 fork_tag_prefix_for_original_tag() {
   local original_tag=$1
-  if [[ "${original_tag}" == *-* ]]; then
-    printf '%s.unstableneutron' "${original_tag}"
-  else
-    printf '%s-unstableneutron' "${original_tag}"
-  fi
+  fork_tag_prefix_for_source_tag "${original_tag}" \
+    || die "invalid original release tag ${original_tag}"
+  # shellcheck disable=SC2153 # Set by fork_tag_prefix_for_source_tag in hotfix-release-tag.sh.
+  printf '%s\n' "${FORK_TAG_PREFIX}"
 }
 
 latest_fork_tag_for_prefix() {
   local prefix=$1
-  git ls-remote --tags --refs "${ORIGIN_REMOTE}" "${prefix}.[0-9]*" \
-    | awk '{ sub("refs/tags/", "", $2); print $2 }' \
-    | sort -V \
-    | tail -n 1 || true
+  local remote_refs tag latest="" latest_suffix=-1 first_suffix=-1 tag_count=0
+  local -A seen_suffixes=()
+  remote_refs=$(git ls-remote --tags --refs "${ORIGIN_REMOTE}" "${prefix}.*") \
+    || die "could not inspect existing fork release suffixes"
+  while read -r _object ref; do
+    [ -n "${ref:-}" ] || continue
+    tag=${ref#refs/tags/}
+    if ! parse_fork_release_tag "${tag}" || [ "${FORK_TAG_PREFIX}" != "${prefix}" ]; then
+      die "reserved release namespace contains malformed tag ${tag}"
+    fi
+    [ -z "${seen_suffixes[${FORK_TAG_SUFFIX}]+x}" ] \
+      || die "reserved release namespace contains duplicate suffix ${FORK_TAG_SUFFIX}"
+    seen_suffixes[${FORK_TAG_SUFFIX}]=1
+    tag_count=$((tag_count + 1))
+    if [ "${first_suffix}" -lt 0 ] || [ "${FORK_TAG_SUFFIX}" -lt "${first_suffix}" ]; then
+      first_suffix=${FORK_TAG_SUFFIX}
+    fi
+    if [ "${FORK_TAG_SUFFIX}" -gt "${latest_suffix}" ]; then
+      latest=${tag}
+      latest_suffix=${FORK_TAG_SUFFIX}
+    fi
+  done <<< "${remote_refs}"
+  if [ "${tag_count}" -gt 0 ] && \
+     [ $((latest_suffix - first_suffix + 1)) -ne "${tag_count}" ]; then
+    die "reserved release namespace contains a suffix gap"
+  fi
+  printf '%s\n' "${latest}"
 }
 
 is_plus_owned_path() {
@@ -468,6 +494,104 @@ state_value_at_ref() {
     || true
 }
 
+state_file_value() {
+  local file=$1
+  local key=$2
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
+}
+
+validate_represented_state_contract() {
+  local file=$1 tag=$2 commit=$3
+  local actual_keys expected_keys base sync_id fingerprint candidate
+  local state_tag state_prefix state_suffix current_prefix current_suffix
+  actual_keys=$(mktemp)
+  expected_keys=$(mktemp)
+  if ! awk -F= '
+    !/^[A-Z][A-Z0-9_]*=[^\r\n]+$/ { exit 1 }
+    seen[$1]++ { exit 1 }
+    { print $1 }
+  ' "${file}" | sort > "${actual_keys}"; then
+    rm -f "${actual_keys}" "${expected_keys}"
+    die "represented release state syntax differs"
+  fi
+  printf '%s\n' \
+    SCHEMA_VERSION SYNC_ID PLAN_FINGERPRINT BASE_FORK_COMMIT \
+    ORIGINAL_REPOSITORY ORIGINAL_TAG ORIGINAL_COMMIT PLUS_REPOSITORY PLUS_TAG \
+    PLUS_TAG_COMMIT PLUS_HEAD_COMMIT PLUS_HEAD_INCLUDED MODELS_REPOSITORY \
+    MODELS_COMMIT EXPECTED_FORK_TAG CANDIDATE_BRANCH | sort > "${expected_keys}"
+  if ! cmp -s "${actual_keys}" "${expected_keys}"; then
+    rm -f "${actual_keys}" "${expected_keys}"
+    die "represented release state fields differ"
+  fi
+  rm -f "${actual_keys}" "${expected_keys}"
+
+  [ "$(state_file_value "${file}" SCHEMA_VERSION)" = 2 ] \
+    || die "represented release state schema differs"
+  if [ "$(state_file_value "${file}" ORIGINAL_REPOSITORY)" != "${ORIGINAL_REPOSITORY}" ] || \
+     [ "$(state_file_value "${file}" PLUS_REPOSITORY)" != "${PLUS_REPOSITORY}" ] || \
+     [ "$(state_file_value "${file}" MODELS_REPOSITORY)" != "${MODELS_REPOSITORY}" ]; then
+    die "represented release repository identity differs"
+  fi
+  local sha_key
+  for sha_key in BASE_FORK_COMMIT ORIGINAL_COMMIT PLUS_TAG_COMMIT PLUS_HEAD_COMMIT MODELS_COMMIT PLAN_FINGERPRINT; do
+    [[ "$(state_file_value "${file}" "${sha_key}")" =~ ^[0-9a-f]{40}$ ]] \
+      || die "represented release state ${sha_key} is invalid"
+  done
+  case "$(state_file_value "${file}" PLUS_HEAD_INCLUDED)" in
+    true|false) ;;
+    *) die "represented release state PLUS_HEAD_INCLUDED is invalid" ;;
+  esac
+  state_tag=$(state_file_value "${file}" EXPECTED_FORK_TAG)
+  parse_fork_release_tag "${state_tag}" \
+    || die "represented release state tag is invalid"
+  state_prefix=${FORK_TAG_PREFIX}
+  state_suffix=${FORK_TAG_SUFFIX}
+  parse_fork_release_tag "${tag}" \
+    || die "represented release tag is invalid"
+  current_prefix=${FORK_TAG_PREFIX}
+  current_suffix=${FORK_TAG_SUFFIX}
+  if [ "${state_prefix}" != "${current_prefix}" ] || \
+     [ "${state_suffix}" -gt "${current_suffix}" ]; then
+    die "represented release state tag differs"
+  fi
+  base=$(state_file_value "${file}" BASE_FORK_COMMIT)
+  git merge-base --is-ancestor "${base}" "${commit}" \
+    || die "represented release base is not an ancestor"
+  sync_id="original-$(safe_ref_component "$(state_file_value "${file}" ORIGINAL_TAG)")_plus-$(safe_ref_component "$(state_file_value "${file}" PLUS_TAG)")"
+  [ "$(state_file_value "${file}" SYNC_ID)" = "${sync_id}" ] \
+    || die "represented release sync ID differs"
+  fingerprint=$(
+    printf '%s\n' \
+      "base_fork_commit=${base}" \
+      "original_tag=$(state_file_value "${file}" ORIGINAL_TAG)" \
+      "original_commit=$(state_file_value "${file}" ORIGINAL_COMMIT)" \
+      "plus_tag=$(state_file_value "${file}" PLUS_TAG)" \
+      "plus_tag_commit=$(state_file_value "${file}" PLUS_TAG_COMMIT)" \
+      "plus_head_commit=$(state_file_value "${file}" PLUS_HEAD_COMMIT)" \
+      "plus_head_included=$(state_file_value "${file}" PLUS_HEAD_INCLUDED)" \
+      "models_commit=$(state_file_value "${file}" MODELS_COMMIT)" \
+      "expected_fork_tag=${state_tag}" \
+      | plan_fingerprint
+  )
+  [ "$(state_file_value "${file}" PLAN_FINGERPRINT)" = "${fingerprint}" ] \
+    || die "represented release plan fingerprint differs"
+  candidate=$(candidate_branch_for_plan "${sync_id}" "${fingerprint}")
+  [ "$(state_file_value "${file}" CANDIDATE_BRANCH)" = "${candidate}" ] \
+    || die "represented release candidate branch differs"
+}
+
+represented_state_matches_target() {
+  local file=$1 original_tag=$2 original_commit=$3 plus_tag=$4 plus_tag_commit=$5
+  local plus_head_commit=$6 plus_head_included=$7 models_commit=$8
+  [ "$(state_file_value "${file}" ORIGINAL_TAG)" = "${original_tag}" ] && \
+    [ "$(state_file_value "${file}" ORIGINAL_COMMIT)" = "${original_commit}" ] && \
+    [ "$(state_file_value "${file}" PLUS_TAG)" = "${plus_tag}" ] && \
+    [ "$(state_file_value "${file}" PLUS_TAG_COMMIT)" = "${plus_tag_commit}" ] && \
+    [ "$(state_file_value "${file}" PLUS_HEAD_COMMIT)" = "${plus_head_commit}" ] && \
+    [ "$(state_file_value "${file}" PLUS_HEAD_INCLUDED)" = "${plus_head_included}" ] && \
+    [ "$(state_file_value "${file}" MODELS_COMMIT)" = "${models_commit}" ]
+}
+
 append_drift_line() {
   local label=$1
   local old=$2
@@ -540,6 +664,7 @@ cmd_plan() {
   models_commit=$(git rev-parse "$(snapshot_ref "${planning_key}" models)^{commit}")
 
   local fork_tag_prefix latest_fork_tag latest_fork_suffix next_fork_suffix next_fork_tag
+  local suffix_exhausted=false
   fork_tag_prefix=$(fork_tag_prefix_for_original_tag "${original_tag}")
   latest_fork_tag=$(latest_fork_tag_for_prefix "${fork_tag_prefix}")
   latest_fork_suffix=""
@@ -547,17 +672,29 @@ cmd_plan() {
     latest_fork_suffix=${latest_fork_tag#"${fork_tag_prefix}."}
   fi
   if [ -n "${latest_fork_suffix}" ]; then
-    next_fork_suffix=$((latest_fork_suffix + 1))
+    if [ "${latest_fork_suffix}" -ge 9007199254740990 ]; then
+      next_fork_suffix=""
+      next_fork_tag=""
+      suffix_exhausted=true
+    else
+      next_fork_suffix=$((latest_fork_suffix + 1))
+      next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
+    fi
   else
     next_fork_suffix=0
+    next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
   fi
-  next_fork_tag="${fork_tag_prefix}.${next_fork_suffix}"
 
-  local latest_fork_commit="" latest_fork_models_commit=""
+  local latest_fork_commit="" latest_fork_models_commit="" latest_fork_state=""
   if [ -n "${latest_fork_tag}" ]; then
     fetch_snapshot_ref "${ORIGIN_REMOTE}" "refs/tags/${latest_fork_tag}" "${planning_key}" latest-fork >/dev/null
     latest_fork_commit=$(git rev-parse "$(snapshot_ref "${planning_key}" latest-fork)^{commit}")
-    latest_fork_models_commit=$(state_value_at_ref "${latest_fork_commit}" MODELS_COMMIT)
+    latest_fork_state=$(mktemp)
+    git show "${latest_fork_commit}:.ccs-fork-upstream.env" > "${latest_fork_state}" 2>/dev/null \
+      || die "represented release ${latest_fork_tag} lacks recorded state"
+    validate_represented_state_contract \
+      "${latest_fork_state}" "${latest_fork_tag}" "${latest_fork_commit}"
+    latest_fork_models_commit=$(state_file_value "${latest_fork_state}" MODELS_COMMIT)
   fi
 
   local blocked=false block_reason="" plus_head_included=false
@@ -590,10 +727,18 @@ cmd_plan() {
 
   local has_changes=true
   if [ "${force_rebuild}" != true ] && [ "${blocked}" != true ] && [ -n "${latest_fork_commit}" ]; then
-    if commit_contains_all "${latest_fork_commit}" "${selected_targets[@]}" \
-      && [ "${latest_fork_models_commit}" = "${models_commit}" ]; then
+    if commit_contains_all "${latest_fork_commit}" "${selected_targets[@]}" && \
+      represented_state_matches_target \
+        "${latest_fork_state}" "${original_tag}" "${original_commit}" \
+        "${plus_tag}" "${plus_tag_commit}" "${plus_head_commit}" \
+        "${plus_head_included}" "${models_commit}"; then
       has_changes=false
     fi
+  fi
+  rm -f "${latest_fork_state}"
+  if [ "${suffix_exhausted}" = true ]; then
+    blocked=true
+    block_reason=suffix-exhausted
   fi
 
   local safe_sync_id

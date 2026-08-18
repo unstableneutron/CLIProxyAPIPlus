@@ -11,30 +11,22 @@ on:
         description: Commit the tag and release must represent
         required: true
         type: string
+      receipt_name:
+        description: The only provenance receipt kind this caller may attach
+        required: true
+        type: string
     outputs:
       release_url:
         description: Published GitHub release URL
-        value: ${{ jobs.release.outputs.release_url }}
+        value: ${{ jobs.publish.outputs.release_url }}
       asset_names_json:
         description: JSON array of published release asset names
-        value: ${{ jobs.release.outputs.asset_names_json }}
+        value: ${{ jobs.publish.outputs.asset_names_json }}
       release_commit:
         description: Peeled commit represented by the release tag
-        value: ${{ jobs.release.outputs.release_commit }}
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing fork tag to publish
-        required: true
-        type: string
-      expected_commit:
-        description: Expected peeled tag commit; empty resolves from the tag
-        required: false
-        default: ''
-        type: string
-
+        value: ${{ jobs.publish.outputs.release_commit }}
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: goreleaser-${{ inputs.tag }}
@@ -44,12 +36,15 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  release:
+  stage:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     outputs:
-      release_url: ${{ steps.verify.outputs.release_url }}
-      asset_names_json: ${{ steps.verify.outputs.asset_names_json }}
-      release_commit: ${{ steps.verify.outputs.release_commit }}
+      artifact_digest: ${{ steps.staged.outputs.artifact-digest }}
+      artifact_id: ${{ steps.staged.outputs.artifact-id }}
+      artifact_name: staged-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+      release_commit: ${{ steps.identity.outputs.expected_commit }}
     steps:
       # actions/checkout v7.0.0
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -62,13 +57,19 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           EXPECTED_COMMIT_INPUT: ${{ inputs.expected_commit }}
+          RECEIPT_NAME: ${{ inputs.receipt_name }}
         run: |
+          case "${RECEIPT_NAME}" in
+            upstream-sync-receipt.json|hotfix-release-receipt.json) ;;
+            *) echo "Unsupported receipt kind ${RECEIPT_NAME}." >&2; exit 1 ;;
+          esac
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
           EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
-          if [ -z "${EXPECTED_COMMIT}" ]; then
-            EXPECTED_COMMIT="${TAG_COMMIT}"
-          fi
+          [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Expected commit must be an exact lowercase 40-character SHA." >&2
+            exit 1
+          }
           if [ "$(git rev-parse HEAD)" != "${EXPECTED_COMMIT}" ]; then
             echo "Checkout does not match expected commit ${EXPECTED_COMMIT}." >&2
             exit 1
@@ -98,54 +99,71 @@ jobs:
             echo "BUILD_DATE=$(git show -s --format=%cI HEAD)"
           } >> "${GITHUB_ENV}"
 
-      - name: Check existing release
-        id: existing
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-          fi
-
       # goreleaser/goreleaser-action v7.2.3
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
-        if: steps.existing.outputs.exists != 'true'
         with:
           distribution: goreleaser
           version: v2.17.0
-          args: release --clean
+          args: release --clean --skip=publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
 
-      - name: Verify release and expose outputs
+      - name: Verify immutable staged asset matrix
+        env:
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          EXPECTED_RECEIPT: ${{ inputs.receipt_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          .github/scripts/stage-release-assets.sh \
+            "${TAG}" "${EXPECTED_COMMIT}" "${EXPECTED_RECEIPT}" \
+            dist release-manifest.json
+
+      # actions/upload-artifact v7.0.1
+      - id: staged
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: staged-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+            release-manifest.json
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: stage
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release_url: ${{ steps.verify.outputs.release_url }}
+      asset_names_json: ${{ steps.verify.outputs.asset_names_json }}
+      release_commit: ${{ steps.verify.outputs.release_commit }}
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.stage.outputs.release_commit }}
+
+      - name: Publish or resume exact staged draft
         id: verify
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          EXPECTED_COMMIT: ${{ needs.stage.outputs.release_commit }}
+          EXPECTED_RECEIPT: ${{ inputs.receipt_name }}
+          STAGED_ARTIFACT_DIGEST: ${{ needs.stage.outputs.artifact_digest }}
+          STAGED_ARTIFACT_ID: ${{ needs.stage.outputs.artifact_id }}
+          STAGED_ARTIFACT_NAME: ${{ needs.stage.outputs.artifact_name }}
         run: |
-          RELEASE_JSON="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json url,assets)"
-          ASSET_NAMES_JSON="$(jq -c '[.assets[].name]' <<< "${RELEASE_JSON}")"
-          if ! jq -e 'index("checksums.txt") != null' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
-            echo "Release ${TAG} is missing checksums.txt." >&2
-            exit 1
-          fi
-          if ! jq -e 'any(.[]; startswith("CLIProxyAPIPlus_"))' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
-            echo "Release ${TAG} has no CLIProxyAPIPlus-branded archive." >&2
-            exit 1
-          fi
-          if jq -e 'any(.[]; startswith("CLIProxyAPI_"))' <<< "${ASSET_NAMES_JSON}" >/dev/null; then
-            echo "Release ${TAG} contains an upstream-branded archive." >&2
-            exit 1
-          fi
-          {
-            echo "release_url=$(jq -r '.url' <<< "${RELEASE_JSON}")"
-            echo "asset_names_json=${ASSET_NAMES_JSON}"
-            echo "release_commit=${EXPECTED_COMMIT}"
-          } >> "${GITHUB_OUTPUT}"
+          .github/scripts/publish-staged-release.sh \
+            "${TAG}" "${EXPECTED_COMMIT}" "${EXPECTED_RECEIPT}" \
+            "${STAGED_ARTIFACT_ID}" "${STAGED_ARTIFACT_NAME}" \
+            "${STAGED_ARTIFACT_DIGEST}" "${GITHUB_RUN_ID}" "${GITHUB_SHA}"
+          echo "release_commit=${EXPECTED_COMMIT}" >> "${GITHUB_OUTPUT}"

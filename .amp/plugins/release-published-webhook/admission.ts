@@ -3,6 +3,7 @@ import { RejectedDelivery } from "./provenance";
 
 const DELIVERY_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const MAXIMUM_WEBHOOK_BYTES = 1_000_000;
 
 export type Admission =
   | { kind: "ignored" }
@@ -13,7 +14,11 @@ export function verifyGitHubSignature(
   supplied: string | undefined,
   secret: string,
 ): boolean {
-  if (secret.length < 32 || !/^sha256=[0-9a-f]{64}$/.test(supplied ?? ""))
+  if (
+    body.byteLength > MAXIMUM_WEBHOOK_BYTES ||
+    secret.length < 32 ||
+    !/^sha256=[0-9a-f]{64}$/.test(supplied ?? "")
+  )
     return false;
   const actual = Buffer.from(supplied!.slice(7), "hex");
   const expected = createHmac("sha256", secret).update(body).digest();
@@ -26,6 +31,8 @@ export function admitWebhook(
   secret: string,
 ): Admission {
   if (headers["x-github-event"] !== "release") return { kind: "ignored" };
+  if (body.byteLength > MAXIMUM_WEBHOOK_BYTES)
+    throw new RejectedDelivery("request body too large");
   const deliveryID = headers["x-github-delivery"];
   if (!deliveryID || !DELIVERY_ID.test(deliveryID))
     throw new RejectedDelivery("delivery ID invalid");

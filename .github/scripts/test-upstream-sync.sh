@@ -125,6 +125,49 @@ setup_base_graph() {
   printf '%s\n' "${fork}"
 }
 
+record_test_release_state() {
+  local repo=$1 tag=$2 original_tag=$3 original_commit=$4 plus_tag=$5
+  local plus_tag_commit=$6 plus_head_commit=$7 plus_head_included=$8 models_commit=$9
+  local base sync_id fingerprint candidate
+  base=$(run_git -C "${repo}" rev-parse HEAD)
+  sync_id="original-$(printf '%s' "${original_tag}" | tr -c 'A-Za-z0-9._-' '-')_plus-$(printf '%s' "${plus_tag}" | tr -c 'A-Za-z0-9._-' '-')"
+  fingerprint=$(
+    printf '%s\n' \
+      "base_fork_commit=${base}" \
+      "original_tag=${original_tag}" \
+      "original_commit=${original_commit}" \
+      "plus_tag=${plus_tag}" \
+      "plus_tag_commit=${plus_tag_commit}" \
+      "plus_head_commit=${plus_head_commit}" \
+      "plus_head_included=${plus_head_included}" \
+      "models_commit=${models_commit}" \
+      "expected_fork_tag=${tag}" \
+      | run_git -C "${repo}" hash-object --stdin
+  )
+  candidate="upstream-sync/${sync_id}-${fingerprint:0:12}"
+  cat > "${repo}/.ccs-fork-upstream.env" <<EOF
+SCHEMA_VERSION=2
+SYNC_ID=${sync_id}
+PLAN_FINGERPRINT=${fingerprint}
+BASE_FORK_COMMIT=${base}
+ORIGINAL_REPOSITORY=router-for-me/CLIProxyAPI
+ORIGINAL_TAG=${original_tag}
+ORIGINAL_COMMIT=${original_commit}
+PLUS_REPOSITORY=kaitranntt/CLIProxyAPIPlus
+PLUS_TAG=${plus_tag}
+PLUS_TAG_COMMIT=${plus_tag_commit}
+PLUS_HEAD_COMMIT=${plus_head_commit}
+PLUS_HEAD_INCLUDED=${plus_head_included}
+MODELS_REPOSITORY=router-for-me/models
+MODELS_COMMIT=${models_commit}
+EXPECTED_FORK_TAG=${tag}
+CANDIDATE_BRANCH=${candidate}
+EOF
+  run_git -C "${repo}" add .ccs-fork-upstream.env
+  run_git -C "${repo}" commit -m "record ${tag} state" >/dev/null
+  run_git -C "${repo}" tag "${tag}"
+}
+
 test_plan_emits_exact_snapshot_and_candidate_branch() {
   local root
   root=$(mktemp -d)
@@ -149,6 +192,28 @@ test_plan_emits_exact_snapshot_and_candidate_branch() {
   done
 
   assert_contains "${out}" "candidate_branch=upstream-sync/original-v7.1.66_plus-v7.1.45-0-"
+  rm -rf "${root}"
+}
+
+test_plan_sanitizes_plus_in_source_tag_identity() {
+  local root fork out
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  run_git -C "${root}/plus" tag -d v7.1.45-0 >/dev/null
+  run_git -C "${root}/plus" tag v7.1.45+meta
+  out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+
+  assert_equal v7.1.45+meta "$(output_value "${out}" plus_tag)" \
+    "planner plus source tag"
+  assert_equal original-v7.1.66_plus-v7.1.45-meta \
+    "$(output_value "${out}" safe_sync_id)" "planner sanitized sync ID"
+  assert_contains "${out}" \
+    "candidate_branch=upstream-sync/original-v7.1.66_plus-v7.1.45-meta-"
   rm -rf "${root}"
 }
 
@@ -793,8 +858,9 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "options: [shadow, promote]"
   assert_contains "${workflow}" "github.event_name == 'schedule' || github.actor == 'unstableneutron'"
   assert_contains "${workflow}" "github.event_name == 'schedule' || inputs.mode == 'promote'"
-  # shellcheck disable=SC2016 # The workflow expression is asserted literally.
-  assert_contains "${workflow}" "MODE: \${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}"
+  # Scheduled and manual no-op runs follow the same represented-release
+  # verifier; no mode-derived bypass is permitted.
+  assert_not_contains "${workflow}" "MODE: \${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}"
   assert_contains "${workflow}" "force_candidate:"
   assert_contains "${workflow}" "repair_ref:"
   assert_contains "${workflow}" "repair_sha:"
@@ -834,6 +900,16 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" 'PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}'
   # shellcheck disable=SC2016 # The workflow shell assignment is asserted literally.
   assert_contains "${workflow}" 'STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"'
+  # shellcheck disable=SC2016 # The workflow shell assignment is asserted literally.
+  assert_contains "${workflow}" 'STATE_PLUS_TAG="$(state_value PLUS_TAG)"'
+  # shellcheck disable=SC2016 # The workflow planner check is asserted literally.
+  assert_contains "${workflow}" '$(plan_value "${PLAN_FILE}" target_drift)" != false'
+  # shellcheck disable=SC2016 # The workflow planner check is asserted literally.
+  assert_contains "${workflow}" '$(plan_value "${PLAN_FILE}" plan_fingerprint)" != "${EXPECTED_PLAN_FINGERPRINT}"'
+  # shellcheck disable=SC2016 # The represented planner is bound to exact live main.
+  assert_contains "${workflow}" '$(git rev-parse HEAD)" != "${CURRENT_MAIN_COMMIT}"'
+  # shellcheck disable=SC2016 # Historical release tags need not equal current policy main.
+  assert_contains "${workflow}" 'base_fork_commit=${CURRENT_MAIN_COMMIT}'
   assert_contains "${workflow}" '--main-policy descendant'
   assert_equal \
     "2" \
@@ -855,21 +931,43 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
 }
 
 test_publication_workflows_are_reusable_and_checked() {
+  local workflow=${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml
   local release=${SCRIPT_DIR}/../workflows/release.yaml
   local docker=${SCRIPT_DIR}/../workflows/docker-image.yml
   local recovery=${SCRIPT_DIR}/../workflows/sync-release-tag.yml
+  local release_stager=${SCRIPT_DIR}/stage-release-assets.sh
+  local release_publisher=${SCRIPT_DIR}/publish-staged-release.sh
   local dockerfile=${SCRIPT_DIR}/../../Dockerfile
   local dockerignore=${SCRIPT_DIR}/../../.dockerignore
 
   assert_contains "${VALIDATOR}" "test-verify-upstream-release.sh"
   assert_contains "${VALIDATOR}" "test-hotfix-release.sh"
+  assert_contains "${VALIDATOR}" "test-verify-hotfix-chain.sh"
   assert_contains "${VALIDATOR}" "test-verify-hotfix-release.sh"
+  assert_contains "${VALIDATOR}" "test-publish-staged-release.sh"
+  assert_contains "${VALIDATOR}" "test-select-docker-digest-evidence.sh"
+  assert_contains "${VALIDATOR}" "test-revalidate-release-target.sh"
   assert_contains "${VALIDATOR}" "UPSTREAM_SYNC_TOOLING_MODE=auto"
 
   assert_contains "${release}" "workflow_call:"
   assert_contains "${release}" "expected_commit:"
+  assert_contains "${release}" "receipt_name:"
+  assert_not_contains "${release}" "workflow_dispatch:"
+  assert_contains "${release}" "stage-release-assets.sh"
+  assert_contains "${release}" "publish-staged-release.sh"
+  # shellcheck disable=SC2016 # Stager jq expression is asserted literally.
+  assert_contains "${release_stager}" 'receipt_name: $receipt_name'
+  # shellcheck disable=SC2016 # Publisher jq expression is asserted literally.
+  assert_contains "${release_publisher}" 'name == $receipt'
   assert_contains "${release}" "release_url:"
   assert_contains "${release}" "asset_names_json:"
+  # shellcheck disable=SC2016 # Script source expression is asserted literally.
+  assert_contains "${release_stager}" 'source "${SCRIPT_DIR}/release-assets.sh"'
+  # shellcheck disable=SC2016 # Script source expression is asserted literally.
+  assert_contains "${release_publisher}" 'source "${SCRIPT_DIR}/release-assets.sh"'
+  # shellcheck disable=SC2016 # Script variables are asserted literally.
+  assert_contains "${release_stager}" '"${ACTUAL_ASSETS}" = "${EXPECTED_ASSETS}"'
+  assert_contains "${release_publisher}" "validate_asset_bytes"
   assert_contains "${release}" "release_commit:"
   assert_contains "${release}" "goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94"
   assert_contains "${release}" "version: v2.17.0"
@@ -877,7 +975,10 @@ test_publication_workflows_are_reusable_and_checked() {
 
   assert_contains "${docker}" "workflow_call:"
   assert_contains "${docker}" "publish_latest:"
-  assert_contains "${docker}" "options: [full, build, publish]"
+  assert_not_contains "${docker}" "workflow_dispatch:"
+  assert_contains "${docker}" "full|build|publish"
+  assert_contains "${docker}" "Expected commit must be an exact lowercase 40-character SHA."
+  assert_contains "${release}" "Expected commit must be an exact lowercase 40-character SHA."
   assert_contains "${docker}" "target_matrix="
   assert_contains "${docker}" '(.tag_suffix == (.platform'
   assert_contains "${docker}" '"runner":"ubuntu-24.04-arm"'
@@ -893,20 +994,37 @@ test_publication_workflows_are_reusable_and_checked() {
   # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
   assert_contains "${docker}" 'ARCH_TAG="${TAG}-${TAG_SUFFIX}"'
   assert_contains "${docker}" "Published early architecture image"
+  assert_contains "${docker}" "inspect_image_state()"
+  assert_contains "${docker}" "revalidate-release-target.sh"
+  assert_contains "${docker}" "verify-registry-index.jq"
+  assert_contains "${docker}" "select-docker-digest-evidence.sh"
+  # shellcheck disable=SC2016 # GitHub expression is asserted literally.
+  assert_contains "${docker}" 'docker-digests-${{ inputs.tag }}-${{ github.run_attempt }}-${{ matrix.tag_suffix }}'
+  assert_not_contains "${docker}" "overwrite: true"
   assert_not_contains "${docker}" "setup-qemu-action"
   assert_not_contains "${docker}" "Refresh models catalog"
 
-  assert_contains "${recovery}" "uses: ./.github/workflows/release.yaml"
-  assert_contains "${recovery}" "uses: ./.github/workflows/docker-image.yml"
-  assert_contains "${recovery}" "docker_build:"
-  assert_contains "${recovery}" "needs: [resolve, release, docker_build]"
-  assert_contains "${recovery}" "verify-upstream-release.sh"
-  assert_contains "${recovery}" "gh release upload"
-  assert_contains "${recovery}" "upstream-sync-receipt.json"
-  assert_contains "${recovery}" "--require-architecture-tags true"
-  # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
-  assert_contains "${recovery}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
-  assert_not_contains "${recovery}" "gh workflow run"
+  assert_contains "${recovery}" "Reject Unsafe Release Recovery"
+  assert_contains "${recovery}" "contents: read"
+  assert_contains "${recovery}" "publish a new immutable identity instead."
+  assert_not_contains "${recovery}" "contents: write"
+  assert_not_contains "${recovery}" "packages: write"
+  assert_not_contains "${recovery}" "gh release"
+  assert_not_contains "${recovery}" "docker"
+  assert_not_contains "${recovery}" "--clobber"
+
+  assert_contains "${workflow}" "receipt_name: upstream-sync-receipt.json"
+  assert_contains "${workflow}" "requires an absent receipt identity"
+  assert_contains "${workflow}" "Attach immutable receipt after complete evidence publication"
+  assert_not_contains "${workflow}" "--clobber"
+  local upstream_artifact_line upstream_receipt_line
+  # shellcheck disable=SC2016 # GitHub expression is asserted literally.
+  upstream_artifact_line=$(grep -nF 'name: upstream-sync-receipt-${{ github.run_id }}-${{ github.run_attempt }}' \
+    "${workflow}" | tail -n 1 | cut -d: -f1)
+  upstream_receipt_line=$(grep -nF 'name: Attach immutable receipt after complete evidence publication' \
+    "${workflow}" | tail -n 1 | cut -d: -f1)
+  [ "${upstream_artifact_line}" -lt "${upstream_receipt_line}" ] \
+    || fail "upstream receipt must publish only after its complete Actions artifact"
 
   assert_contains "${dockerfile}" "# syntax=docker/dockerfile:1"
   assert_contains "${dockerfile}" "golang:1.26-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113"
@@ -938,6 +1056,89 @@ test_detects_original_ahead_of_plus() {
   assert_contains "${out}" "next_fork_tag=v7.1.66-unstableneutron.0"
 }
 
+test_plan_uses_strict_consecutive_release_suffixes() {
+  local root fork out tag original_commit plus_commit plus_head models_commit
+
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  for tag in \
+    v7.1.66-unstableneutron.1 \
+    v7.1.66-unstableneutron.2 \
+    v7.1.66-unstableneutron.3; do
+    record_test_release_state "${fork}" "${tag}" \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
+    run_git -C "${fork}" push -q origin main "refs/tags/${tag}"
+  done
+  out=${root}/plan.out
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null)
+  assert_equal v7.1.66-unstableneutron.3 \
+    "$(output_value "${out}" latest_fork_tag)" "latest nonzero-root tag"
+  assert_equal 3 "$(output_value "${out}" latest_fork_suffix)" \
+    "latest nonzero-root suffix"
+  assert_equal v7.1.66-unstableneutron.4 \
+    "$(output_value "${out}" next_fork_tag)" "next nonzero-root tag"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  for tag in v7.1.66-unstableneutron.1 v7.1.66-unstableneutron.3; do
+    run_git -C "${fork}" tag "${tag}"
+    run_git -C "${fork}" push -q origin "refs/tags/${tag}"
+  done
+  if (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${root}/gap.out" \
+    "${HELPER}" plan > "${root}/gap.log" 2>&1); then
+    fail "planner accepted a fork release suffix gap"
+  fi
+  assert_contains "${root}/gap.log" "reserved release namespace contains a suffix gap"
+  rm -rf "${root}"
+
+  for tag in \
+    v7.1.66-unstableneutron.invalid \
+    v7.1.66-unstableneutron.9007199254740991; do
+    root=$(mktemp -d)
+    fork=$(setup_base_graph "${root}")
+    run_git -C "${fork}" tag "${tag}"
+    run_git -C "${fork}" push -q origin "refs/tags/${tag}"
+    if (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${root}/invalid.out" \
+      "${HELPER}" plan > "${root}/invalid.log" 2>&1); then
+      fail "planner accepted malformed reserved tag ${tag}"
+    fi
+    assert_contains "${root}/invalid.log" "reserved release namespace contains malformed tag ${tag}"
+    rm -rf "${root}"
+  done
+}
+
+test_plan_preserves_prerelease_release_prefix() {
+  local root fork out tag original_commit plus_commit plus_head models_commit
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  run_git -C "${root}/original" tag v7.1.67-rc.1
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.67-rc.1)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  for tag in \
+    v7.1.67-rc.1.unstableneutron.4 \
+    v7.1.67-rc.1.unstableneutron.5; do
+    record_test_release_state "${fork}" "${tag}" \
+      v7.1.67-rc.1 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
+    run_git -C "${fork}" push -q origin main "refs/tags/${tag}"
+  done
+  out=${root}/plan.out
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null)
+  assert_equal v7.1.67-rc.1.unstableneutron \
+    "$(output_value "${out}" fork_tag_prefix)" "prerelease fork tag prefix"
+  assert_equal v7.1.67-rc.1.unstableneutron.6 \
+    "$(output_value "${out}" next_fork_tag)" "next prerelease fork tag"
+  rm -rf "${root}"
+}
+
 test_noops_when_latest_fork_tag_represents_both_sources() {
   local root
   root=$(mktemp -d)
@@ -945,20 +1146,174 @@ test_noops_when_latest_fork_tag_represents_both_sources() {
   fork=$(setup_base_graph "${root}")
   local models_commit
   models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  local original_commit plus_commit plus_head
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
   local out=${root}/plan.out
 
   (
     cd "${fork}"
     run_git fetch -q original-upstream main --tags
     run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
-    commit_file "${fork}" .ccs-fork-upstream.env "MODELS_COMMIT=${models_commit}" "record models provenance"
-    run_git tag v7.1.66-unstableneutron.0
+    record_test_release_state "${fork}" v7.1.66-unstableneutron.0 \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
     run_git push -q origin main --tags
     FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
   )
 
   assert_contains "${out}" "has_changes=false"
   assert_contains "${out}" "latest_fork_tag=v7.1.66-unstableneutron.0"
+}
+
+test_noops_through_legacy_hotfix_with_inherited_upstream_state() {
+  local root fork models_commit original_commit plus_commit plus_head out
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
+  out=${root}/plan.out
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream main --tags
+    run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    record_test_release_state "${fork}" v7.1.66-unstableneutron.0 \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
+    commit_file "${fork}" hotfix.txt fixed "legacy hotfix without state rewrite"
+    run_git tag v7.1.66-unstableneutron.1
+    run_git push -q origin main --tags
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+  assert_equal false "$(output_value "${out}" has_changes)" \
+    "legacy inherited state no-op"
+  assert_equal v7.1.66-unstableneutron.1 \
+    "$(output_value "${out}" latest_fork_tag)" "legacy latest hotfix"
+  assert_equal v7.1.66-unstableneutron.2 \
+    "$(output_value "${out}" next_fork_tag)" "legacy next hotfix"
+  rm -rf "${root}"
+}
+
+test_rejects_every_represented_state_field_drift() {
+  local root fork original_commit plus_commit plus_head models_commit valid_commit key value out
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream main --tags
+    run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    record_test_release_state "${fork}" v7.1.66-unstableneutron.0 \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
+    run_git push -q origin main --tags
+  )
+  valid_commit=$(run_git -C "${fork}" rev-parse HEAD)
+
+  while IFS=$'\t' read -r key value; do
+    run_git -C "${fork}" reset --hard -q "${valid_commit}"
+    awk -F= -v key="${key}" -v value="${value}" \
+      '$1 == key { print key "=" value; next } { print }' \
+      "${fork}/.ccs-fork-upstream.env" > "${fork}/state.tmp"
+    mv "${fork}/state.tmp" "${fork}/.ccs-fork-upstream.env"
+    run_git -C "${fork}" add .ccs-fork-upstream.env
+    run_git -C "${fork}" commit -m "tamper represented ${key}" >/dev/null
+    run_git -C "${fork}" tag -f v7.1.66-unstableneutron.0 >/dev/null
+    run_git -C "${fork}" push -q --force origin refs/tags/v7.1.66-unstableneutron.0
+    out="${root}/${key}.log"
+    if (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${root}/${key}.out" \
+      "${HELPER}" plan > "${out}" 2>&1); then
+      fail "planner accepted represented state drift in ${key}"
+    fi
+    assert_contains "${out}" "represented release"
+  done <<EOF
+SCHEMA_VERSION	3
+SYNC_ID	wrong-sync-id
+PLAN_FINGERPRINT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BASE_FORK_COMMIT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ORIGINAL_REPOSITORY	example/original
+ORIGINAL_TAG	v0.0.1
+ORIGINAL_COMMIT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PLUS_REPOSITORY	example/plus
+PLUS_TAG	v0.0.1-0
+PLUS_TAG_COMMIT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PLUS_HEAD_COMMIT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PLUS_HEAD_INCLUDED	true
+MODELS_REPOSITORY	example/models
+MODELS_COMMIT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EXPECTED_FORK_TAG	v7.1.66-unstableneutron.1
+CANDIDATE_BRANCH	upstream-sync/wrong
+EOF
+
+  local mutation
+  for mutation in missing duplicate extra malformed; do
+    run_git -C "${fork}" reset --hard -q "${valid_commit}"
+    case "${mutation}" in
+      missing)
+        sed -i '/^MODELS_COMMIT=/d' "${fork}/.ccs-fork-upstream.env"
+        ;;
+      duplicate)
+        value=$(grep '^MODELS_COMMIT=' "${fork}/.ccs-fork-upstream.env")
+        echo "${value}" >> "${fork}/.ccs-fork-upstream.env"
+        ;;
+      extra)
+        echo 'UNEXPECTED_FIELD=value' >> "${fork}/.ccs-fork-upstream.env"
+        ;;
+      malformed)
+        echo 'not-a-state-field' >> "${fork}/.ccs-fork-upstream.env"
+        ;;
+    esac
+    run_git -C "${fork}" add .ccs-fork-upstream.env
+    run_git -C "${fork}" commit -m "${mutation} represented state" >/dev/null
+    run_git -C "${fork}" tag -f v7.1.66-unstableneutron.0 >/dev/null
+    run_git -C "${fork}" push -q --force origin refs/tags/v7.1.66-unstableneutron.0
+    out="${root}/${mutation}.log"
+    if (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${root}/${mutation}.out" \
+      "${HELPER}" plan > "${out}" 2>&1); then
+      fail "planner accepted ${mutation} represented state"
+    fi
+    assert_contains "${out}" "represented release state"
+  done
+  rm -rf "${root}"
+}
+
+test_same_commit_new_source_tag_is_drift_not_an_accepted_noop() {
+  local root fork models_commit original_commit plus_commit plus_head out
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  models_commit=$(run_git -C "${root}/models" rev-parse HEAD)
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
+  out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    run_git fetch -q original-upstream main --tags
+    run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
+    record_test_release_state "${fork}" v7.1.66-unstableneutron.0 \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${models_commit}"
+    run_git push -q origin main --tags
+  )
+  run_git -C "${root}/plus" tag v7.1.45-1 refs/tags/v7.1.45-0
+
+  (cd "${fork}" && FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null)
+  assert_equal true "$(output_value "${out}" has_changes)" \
+    "same-commit source tag must require a new identity"
+  assert_equal true "$(output_value "${out}" target_drift)" \
+    "same-commit source tag target drift"
+  assert_equal v7.1.45-1 "$(output_value "${out}" plus_tag)" \
+    "same-commit latest source tag"
+  # shellcheck disable=SC2016 # Planner drift text is asserted literally.
+  assert_contains "${out}" 'Plus tag: `v7.1.45-0` -> `v7.1.45-1`'
+  rm -rf "${root}"
 }
 
 test_detects_models_only_drift_after_represented_sources() {
@@ -969,14 +1324,19 @@ test_detects_models_only_drift_after_represented_sources() {
   local models=${root}/models
   local represented_models_commit
   represented_models_commit=$(run_git -C "${models}" rev-parse HEAD)
+  local original_commit plus_commit plus_head
+  original_commit=$(run_git -C "${root}/original" rev-parse refs/tags/v7.1.66)
+  plus_commit=$(run_git -C "${root}/plus" rev-parse refs/tags/v7.1.45-0)
+  plus_head=$(run_git -C "${root}/plus" rev-parse HEAD)
   local out=${root}/plan.out
 
   (
     cd "${fork}"
     run_git fetch -q original-upstream main --tags
     run_git merge --no-edit refs/tags/v7.1.66 >/dev/null
-    commit_file "${fork}" .ccs-fork-upstream.env "MODELS_COMMIT=${represented_models_commit}" "record models provenance"
-    run_git tag v7.1.66-unstableneutron.0
+    record_test_release_state "${fork}" v7.1.66-unstableneutron.0 \
+      v7.1.66 "${original_commit}" v7.1.45-0 "${plus_commit}" \
+      "${plus_head}" false "${represented_models_commit}"
     run_git push -q origin main --tags
   )
   commit_file "${models}" models.json models-2 "move models head"
@@ -1043,8 +1403,12 @@ test_original_merge_protects_plus_owned_paths() {
   local out=${root}/merge.out
 
   commit_file "${fork}" .github/workflows/release.yaml fork-workflow "fork workflow"
+  commit_file "${fork}" .github/release-asset-contract.json fork-contract "fork release contract"
+  commit_file "${fork}" .amp/plugins/release-published-webhook/provenance.ts fork-webhook "fork webhook"
   commit_file "${original}" internal/auth/copilot/provider.go original-clobber "original clobber"
   commit_file "${original}" .github/workflows/release.yaml original-workflow "original workflow"
+  commit_file "${original}" .github/release-asset-contract.json original-contract "original release contract"
+  commit_file "${original}" .amp/plugins/release-published-webhook/provenance.ts original-webhook "original webhook"
   run_git -C "${original}" tag v7.1.67
 
   (
@@ -1061,6 +1425,12 @@ test_original_merge_protects_plus_owned_paths() {
   fi
   if ! grep -Fq fork-workflow "${fork}/.github/workflows/release.yaml"; then
     fail "original merge overwrote fork-owned workflow file"
+  fi
+  if ! grep -Fq fork-contract "${fork}/.github/release-asset-contract.json"; then
+    fail "original merge overwrote fork-owned release contract"
+  fi
+  if ! grep -Fq fork-webhook "${fork}/.amp/plugins/release-published-webhook/provenance.ts"; then
+    fail "original merge overwrote fork-owned webhook policy"
   fi
 }
 
@@ -1124,6 +1494,11 @@ test_manifest_classifies_fork_surfaces() {
     .github/scripts/test-upstream-sync.sh \
     .github/upstream-sync-ownership.tsv \
     .github/upstream-sync-invariants.tsv \
+    .github/release-asset-contract.json \
+    .github/scripts/verify-registry-index.jq \
+    .goreleaser.yml \
+    .amp/plugins/release-published-webhook/provenance.ts \
+    tools/release-asset-contract/contract_test.go \
     internal/runtime/executor/gemini_cli_executor.go \
     sdk/api/handlers/gemini/gemini-cli_handlers.go \
     sdk/auth/gemini.go \
@@ -1137,6 +1512,16 @@ test_manifest_classifies_fork_surfaces() {
   assert_contains "${out}" '| `.github/upstream-sync-ownership.tsv` | `fork-owned` |'
   # shellcheck disable=SC2016
   assert_contains "${out}" '| `.github/upstream-sync-invariants.tsv` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/release-asset-contract.json` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.github/scripts/verify-registry-index.jq` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.goreleaser.yml` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `.amp/plugins/release-published-webhook/provenance.ts` | `fork-owned` |'
+  # shellcheck disable=SC2016
+  assert_contains "${out}" '| `tools/release-asset-contract/contract_test.go` | `fork-owned` |'
   # shellcheck disable=SC2016
   assert_contains "${out}" '| `internal/runtime/executor/gemini_cli_executor.go` | `fork-owned` |'
   # shellcheck disable=SC2016
@@ -1437,6 +1822,7 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
 
 main() {
   test_plan_emits_exact_snapshot_and_candidate_branch
+  test_plan_sanitizes_plus_in_source_tag_identity
   test_materialize_uses_namespaced_refs_without_network
   test_same_target_produces_same_plan_fingerprint
   test_moved_target_produces_new_plan_fingerprint
@@ -1459,7 +1845,12 @@ main() {
   test_v2_workflow_contract_is_candidate_first_and_scheduled
   test_publication_workflows_are_reusable_and_checked
   test_detects_original_ahead_of_plus
+  test_plan_uses_strict_consecutive_release_suffixes
+  test_plan_preserves_prerelease_release_prefix
   test_noops_when_latest_fork_tag_represents_both_sources
+  test_noops_through_legacy_hotfix_with_inherited_upstream_state
+  test_rejects_every_represented_state_field_drift
+  test_same_commit_new_source_tag_is_drift_not_an_accepted_noop
   test_detects_models_only_drift_after_represented_sources
   test_includes_safe_plus_head_delta
   test_blocks_unsafe_plus_head_delta
