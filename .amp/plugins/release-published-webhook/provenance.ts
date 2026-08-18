@@ -1603,7 +1603,19 @@ export async function validateRelease(
         ),
       );
     }
-    const artifact = await workflowArtifact(client, core.workflowRunID, releaseWorkflowAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
+    const readArtifact = () => workflowArtifact(
+      client,
+      core.workflowRunID,
+      releaseWorkflowAttempt,
+      "hotfix",
+      receiptBytes,
+      signal,
+      releaseWorkflowAttempt === workflowRunAttempt,
+      workflowRun.headSHA,
+    );
+    const artifact = releaseWorkflowAttempt < workflowRunAttempt
+      ? await historicalEvidence(readArtifact)
+      : await readArtifact();
     const finalPlan = artifact.get("final-plan.out");
     if (!finalPlan) throw new RejectedDelivery("final plan artifact is missing");
     parseFinalPlan(finalPlan, currentState.state, tag, commit);

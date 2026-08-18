@@ -1498,6 +1498,99 @@ describe("hotfix release provenance", () => {
     ).rejects.toBeInstanceOf(errorClass);
   });
 
+  test("permanently rejects a missing authenticated prior-attempt artifact", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    fixture.values.set(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      { total_count: 0, artifacts: [] },
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
+  });
+
+  test("keeps a missing current-attempt artifact retryable", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.set(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      { total_count: 0, artifacts: [] },
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies authenticated prior-attempt artifact listing HTTP %s", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies authenticated prior-attempt artifact download HTTP %s", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    const listing = fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+    );
+    const target = listing.artifacts[0].archive_download_url;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: (path, requestSignal) => original.get(path, requestSignal),
+      bytes: async (url, requestSignal) => {
+        if (url === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.bytes(url, requestSignal);
+      },
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
   test("keeps exact failed-attempt hotfix evidence retryable until the same run succeeds", async () => {
     const fixture = releaseFixture("hotfix");
     fixture.values.get(
