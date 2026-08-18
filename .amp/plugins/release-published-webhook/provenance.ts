@@ -167,6 +167,26 @@ interface ReceiptCore {
 
 const PLAN_KEYS = ["original_tag","plus_tag","pre_sync_head","base_fork_commit","original_repository","plus_repository","models_repository","original_head","plus_tag_head","plus_head","models_commit","plus_head_included","plus_head_already_represented","plus_head_delta_paths","unsafe_plus_head_delta_paths","blocked","block_reason","fork_tag_prefix","latest_fork_tag","latest_fork_models_commit","latest_fork_suffix","next_fork_tag","expected_fork_tag","safe_sync_id","plan_fingerprint","candidate_branch","snapshot_namespace","original_snapshot_ref","plus_tag_snapshot_ref","plus_head_snapshot_ref","models_snapshot_ref","target_drift","target_drift_summary","has_changes"];
 
+function expectedFinalPlanFingerprint(state: UpstreamState, tag: string, commit: string): string {
+  const input = [
+    `base_fork_commit=${commit}`,
+    `original_tag=${state.ORIGINAL_TAG}`,
+    `original_commit=${state.ORIGINAL_COMMIT}`,
+    `plus_tag=${state.PLUS_TAG}`,
+    `plus_tag_commit=${state.PLUS_TAG_COMMIT}`,
+    `plus_head_commit=${state.PLUS_HEAD_COMMIT}`,
+    `plus_head_included=${state.PLUS_HEAD_INCLUDED}`,
+    `models_commit=${state.MODELS_COMMIT}`,
+    `expected_fork_tag=${tag}`,
+    "",
+  ].join("\n");
+  const body = Buffer.from(input);
+  return createHash("sha1")
+    .update(`blob ${body.length}\0`)
+    .update(body)
+    .digest("hex");
+}
+
 function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, commit: string): void {
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new RejectedDelivery("final plan encoding differs"); }
@@ -185,23 +205,7 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
   const tagParts = /^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron)\.([0-9]+)$/.exec(tag);
   if (!tagParts) throw new RejectedDelivery("final plan release tag differs");
   const suffix = Number(tagParts[2]);
-  const fingerprintInput = [
-    `base_fork_commit=${commit}`,
-    `original_tag=${state.ORIGINAL_TAG}`,
-    `original_commit=${state.ORIGINAL_COMMIT}`,
-    `plus_tag=${state.PLUS_TAG}`,
-    `plus_tag_commit=${state.PLUS_TAG_COMMIT}`,
-    `plus_head_commit=${state.PLUS_HEAD_COMMIT}`,
-    `plus_head_included=${state.PLUS_HEAD_INCLUDED}`,
-    `models_commit=${state.MODELS_COMMIT}`,
-    `expected_fork_tag=${tag}`,
-    "",
-  ].join("\n");
-  const fingerprintBody = Buffer.from(fingerprintInput);
-  const expectedFingerprint = createHash("sha1")
-    .update(`blob ${fingerprintBody.length}\0`)
-    .update(fingerprintBody)
-    .digest("hex");
+  const expectedFingerprint = expectedFinalPlanFingerprint(state, tag, commit);
   const safeSyncID = state.SYNC_ID.replace(/[^A-Za-z0-9._-]/g, "-");
   const expectedCandidate = `upstream-sync/${safeSyncID}-${expectedFingerprint.slice(0, 12)}`;
   const snapshotNamespace = `refs/upstream-sync/${expectedFingerprint}`;
@@ -233,7 +237,7 @@ function validateRunState(bytes: Uint8Array, state: UpstreamState, receipt: JSON
   exactKeys(final,["status","plan_fingerprint","has_changes","target_drift","blocked"],"run state final plan"); exactKeys(promotion,["commit","tag"],"run state promotion");
   exactKeys(release,["url","assets","image","image_digest","platforms","architecture_images"],"run state release");
   const original=object(target.original,"run state original"), plus=object(target.plus,"run state plus"); exactKeys(original,["tag","commit"],"run state original"); exactKeys(plus,["tag","tag_commit","head","head_included"],"run state plus");
-  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || !SHA.test(string(final.plan_fingerprint,"final fingerprint")) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || !sameJSON(release,{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images})) throw new RejectedDelivery("run state identity differs");
+  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || final.plan_fingerprint!==expectedFinalPlanFingerprint(state, tag, commit) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || !sameJSON(release,{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images})) throw new RejectedDelivery("run state identity differs");
   if (repair.imported===false ? (repair.pr!==null || repair.sha!==null) : (repair.imported!==true || !Number.isSafeInteger(repair.pr) || (repair.pr as number) <= 0 || repair.sha!==commit)) throw new RejectedDelivery("run state repair differs");
 }
 
@@ -1120,7 +1124,8 @@ async function validatePreviousUpstreamRelease(
     release.prerelease !== false ||
     byTag.prerelease !== release.prerelease ||
     release.target_commitish !== "main" ||
-    byTag.target_commitish !== release.target_commitish
+    byTag.target_commitish !== release.target_commitish ||
+    !sameJSON(byTag.assets, release.assets)
   ) {
     throw new RejectedDelivery("previous release identity differs");
   }
@@ -1227,7 +1232,7 @@ async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: 
   seen.add(expected.tag); seen.add(expected.commit);
   const byTag = object(await client.get(`/repos/${REPOSITORY}/releases/tags/${encodeURIComponent(expected.tag)}`, signal), "historical release");
   const id = integer(byTag.id, "historical release ID"), release = object(await client.get(`/repos/${REPOSITORY}/releases/${id}`, signal), "canonical historical release");
-  if (release.id !== id || release.tag_name !== expected.tag || byTag.tag_name !== expected.tag || release.html_url !== `https://github.com/${REPOSITORY}/releases/tag/${expected.tag}` || byTag.html_url !== release.html_url || release.assets_url !== `https://api.github.com/repos/${REPOSITORY}/releases/${id}/assets` || byTag.assets_url !== release.assets_url || release.published_at !== byTag.published_at || release.draft !== false || byTag.draft !== false || release.prerelease !== false || byTag.prerelease !== false || release.target_commitish !== "main" || byTag.target_commitish !== "main") throw new RejectedDelivery("historical release identity differs");
+  if (release.id !== id || release.tag_name !== expected.tag || byTag.tag_name !== expected.tag || release.html_url !== `https://github.com/${REPOSITORY}/releases/tag/${expected.tag}` || byTag.html_url !== release.html_url || release.assets_url !== `https://api.github.com/repos/${REPOSITORY}/releases/${id}/assets` || byTag.assets_url !== release.assets_url || release.published_at !== byTag.published_at || release.draft !== false || byTag.draft !== false || release.prerelease !== false || byTag.prerelease !== false || release.target_commitish !== "main" || byTag.target_commitish !== "main" || !sameJSON(byTag.assets, release.assets)) throw new RejectedDelivery("historical release identity differs");
   identity(release.author, BOT_LOGIN, BOT_ID, "Bot", "historical release author"); identity(byTag.author, BOT_LOGIN, BOT_ID, "Bot", "historical tag release author");
   const tag = await fetchAnnotatedTag(client, expected.tag, signal); if (tag.commit !== expected.commit) throw new RejectedDelivery("historical tag commit differs");
   const historicalState = await readStateAt(client, expected.commit, signal); if (!equalBytes(historicalState.bytes, stateBytes) || historicalState.state.SYNC_ID !== state.SYNC_ID || historicalState.state.PLAN_FINGERPRINT !== state.PLAN_FINGERPRINT) throw new RejectedDelivery("hotfix changed upstream state");

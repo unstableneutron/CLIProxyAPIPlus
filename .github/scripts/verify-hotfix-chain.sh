@@ -82,6 +82,60 @@ trap 'rm -rf "${ROOT}"' EXIT
 
 git show "${EXPECTED_COMMIT}:.ccs-fork-upstream.env" > "${STATE_FILE}" \
   || die "candidate commit does not contain upstream-sync state"
+validate_upstream_state() {
+  local file=$1 keys="${ROOT}/state-keys" expected_keys="${ROOT}/expected-state-keys"
+  if ! awk -F= '
+    /^$/ { next }
+    !/^[A-Z][A-Z0-9_]*=/ { exit 1 }
+    seen[$1]++ { exit 1 }
+    { print $1 }
+  ' "${file}" | sort > "${keys}"; then
+    die "candidate upstream-sync state is malformed"
+  fi
+  printf '%s\n' \
+    SCHEMA_VERSION SYNC_ID PLAN_FINGERPRINT BASE_FORK_COMMIT ORIGINAL_REPOSITORY \
+    ORIGINAL_TAG ORIGINAL_COMMIT PLUS_REPOSITORY PLUS_TAG PLUS_TAG_COMMIT \
+    PLUS_HEAD_COMMIT PLUS_HEAD_INCLUDED MODELS_REPOSITORY MODELS_COMMIT \
+    EXPECTED_FORK_TAG CANDIDATE_BRANCH | sort > "${expected_keys}"
+  cmp -s "${keys}" "${expected_keys}" \
+    || die "candidate upstream-sync state schema differs"
+  state_field() {
+    local key=$1
+    awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
+  }
+  [ "$(state_field SCHEMA_VERSION)" = 2 ] \
+    || die "candidate upstream-sync state version differs"
+  if [ "$(state_field ORIGINAL_REPOSITORY)" != router-for-me/CLIProxyAPI ] || \
+     [ "$(state_field PLUS_REPOSITORY)" != kaitranntt/CLIProxyAPIPlus ] || \
+     [ "$(state_field MODELS_REPOSITORY)" != router-for-me/models ]; then
+    die "candidate upstream-sync repository identity differs"
+  fi
+  local key
+  for key in BASE_FORK_COMMIT ORIGINAL_COMMIT PLUS_TAG_COMMIT PLUS_HEAD_COMMIT MODELS_COMMIT PLAN_FINGERPRINT; do
+    [[ "$(state_field "${key}")" =~ ^[0-9a-f]{40}$ ]] \
+      || die "candidate upstream-sync state hash ${key} is malformed"
+  done
+  if [[ ! "$(state_field ORIGINAL_TAG)" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || \
+     [[ ! "$(state_field PLUS_TAG)" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || \
+     [[ ! "$(state_field EXPECTED_FORK_TAG)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.[0-9]+$ ]]; then
+    die "candidate upstream-sync state tag is malformed"
+  fi
+  case "$(state_field PLUS_HEAD_INCLUDED)" in
+    true|false) ;;
+    *) die "candidate upstream-sync state boolean is malformed" ;;
+  esac
+  local derived_sync
+  derived_sync="original-$(state_field ORIGINAL_TAG)_plus-$(state_field PLUS_TAG)"
+  local state_fingerprint
+  state_fingerprint=$(state_field PLAN_FINGERPRINT)
+  local derived_candidate
+  derived_candidate="upstream-sync/${derived_sync}-${state_fingerprint:0:12}"
+  if [ "$(state_field SYNC_ID)" != "${derived_sync}" ] || \
+     [ "$(state_field CANDIDATE_BRANCH)" != "${derived_candidate}" ]; then
+    die "candidate upstream-sync state derivation differs"
+  fi
+}
+validate_upstream_state "${STATE_FILE}"
 state_value() {
   local key=$1
   awk -F= -v key="${key}" \
@@ -110,6 +164,20 @@ json_exact_keys() {
 
 validate_upstream_run_state() {
   local run_state=$1 receipt_file=$2 commit=$3 tag=$4
+  local expected_final_fingerprint
+  expected_final_fingerprint=$(
+    printf '%s\n' \
+      "base_fork_commit=${commit}" \
+      "original_tag=$(state_value ORIGINAL_TAG)" \
+      "original_commit=$(state_value ORIGINAL_COMMIT)" \
+      "plus_tag=$(state_value PLUS_TAG)" \
+      "plus_tag_commit=$(state_value PLUS_TAG_COMMIT)" \
+      "plus_head_commit=$(state_value PLUS_HEAD_COMMIT)" \
+      "plus_head_included=$(state_value PLUS_HEAD_INCLUDED)" \
+      "models_commit=$(state_value MODELS_COMMIT)" \
+      "expected_fork_tag=${tag}" \
+      | git hash-object --stdin
+  )
   jq -e \
     --arg base_fork_commit "$(state_value BASE_FORK_COMMIT)" \
     --arg original_tag "$(state_value ORIGINAL_TAG)" \
@@ -122,6 +190,7 @@ validate_upstream_run_state() {
     --arg sync_id "$(state_value SYNC_ID)" \
     --arg plan_fingerprint "$(state_value PLAN_FINGERPRINT)" \
     --arg candidate_branch "$(state_value CANDIDATE_BRANCH)" \
+    --arg expected_final_fingerprint "${expected_final_fingerprint}" \
     --arg commit "${commit}" \
     --arg tag "${tag}" \
     --slurpfile receipt "${receipt_file}" '
@@ -145,8 +214,7 @@ validate_upstream_run_state() {
       ((.repair.imported == false and .repair.pr == null and .repair.sha == null) or
        (.repair.imported == true and (.repair.pr | type) == "number" and (.repair.pr | floor) == .repair.pr and .repair.pr > 0 and .repair.pr <= 9007199254740991 and .repair.sha == $commit)) and
       .final_plan.status == "clean-noop" and
-      (.final_plan.plan_fingerprint | type) == "string" and
-      (.final_plan.plan_fingerprint | test("^[0-9a-f]{40}$")) and
+      .final_plan.plan_fingerprint == $expected_final_fingerprint and
       .final_plan.has_changes == false and .final_plan.target_drift == false and .final_plan.blocked == false and
       .runtime_smoke == "not_run" and .vn3_deployed == false and
       .promotion == {commit: $commit, tag: $tag} and
@@ -343,7 +411,8 @@ verify_release_and_link() {
       .path == $path and .head_branch == "main" and .status == "completed" and
       .conclusion == "success" and .actor.login == $login and .actor.id == $owner_id and
       .repository.full_name == $repo and .repository.id == $repo_id and
-      (.run_attempt | type) == "number" and .run_attempt >= 1 and
+      (.run_attempt | type) == "number" and (.run_attempt | floor) == .run_attempt and
+      .run_attempt >= 1 and .run_attempt <= 9007199254740991 and
       (.head_sha | type) == "string" and (.head_sha | test("^[0-9a-f]{40}$"))
     ' "${run_file}" >/dev/null \
     || die "workflow run for ${tag} has an unexpected identity"

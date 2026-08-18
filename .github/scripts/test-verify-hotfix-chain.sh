@@ -122,7 +122,20 @@ PY
 write_root_fixture() {
   local root=$1 commit=$2
   local node="${root}/fixtures/${ROOT_TAG}"
-  local archive_name=CLIProxyAPIPlus_7.2.131-unstableneutron.0_linux_amd64_no-plugin.tar.gz
+  local archive_name=CLIProxyAPIPlus_7.2.131-unstableneutron.0_linux_amd64_no-plugin.tar.gz final_fingerprint
+  final_fingerprint=$(
+    printf '%s\n' \
+      "base_fork_commit=${commit}" \
+      'original_tag=v7.2.131' \
+      'original_commit=2222222222222222222222222222222222222222' \
+      'plus_tag=v7.2.127-3' \
+      'plus_tag_commit=3333333333333333333333333333333333333333' \
+      'plus_head_commit=3333333333333333333333333333333333333333' \
+      'plus_head_included=false' \
+      'models_commit=4444444444444444444444444444444444444444' \
+      "expected_fork_tag=${ROOT_TAG}" \
+      | git hash-object --stdin
+  )
   mkdir -p "${node}"
   printf 'root archive\n' > "${node}/archive"
   printf '%s  %s\n' "$(sha256sum "${node}/archive" | awk '{ print $1 }')" "${archive_name}" \
@@ -161,6 +174,7 @@ write_root_fixture() {
     --arg commit "${commit}" \
     --arg sync_id "${SYNC_ID}" \
     --arg fingerprint "${FINGERPRINT}" \
+    --arg final_fingerprint "${final_fingerprint}" \
     --arg candidate "upstream-sync/${SYNC_ID}-${FINGERPRINT:0:12}" \
     --slurpfile receipt "${node}/upstream-sync-receipt.json" '
       {
@@ -179,7 +193,7 @@ write_root_fixture() {
         },
         candidate: {branch: $candidate, sha: $commit, acceptable: true, validation_status: "passed"},
         repair: {imported: false, pr: null, sha: null},
-        final_plan: {status: "clean-noop", plan_fingerprint: ("b" * 40), has_changes: false, target_drift: false, blocked: false},
+        final_plan: {status: "clean-noop", plan_fingerprint: $final_fingerprint, has_changes: false, target_drift: false, blocked: false},
         runtime_smoke: "not_run",
         vn3_deployed: false,
         promotion: {commit: $commit, tag: $receipt[0].tag},
@@ -441,6 +455,7 @@ MODELS_REPOSITORY=router-for-me/models
 MODELS_COMMIT=4444444444444444444444444444444444444444
 EXPECTED_FORK_TAG=${ROOT_TAG}
 CANDIDATE_BRANCH=upstream-sync/${SYNC_ID}-${FINGERPRINT:0:12}
+${EXTRA_STATE_LINE:-}
 EOF
   printf 'root\n' > "${repo}/app.txt"
   run_git -C "${repo}" add .
@@ -523,6 +538,10 @@ test_workflow_legacy_preflight_and_chained_parent() {
 test_rejects_historical_receipt_and_planner_drift() {
   local root receipt temporary
 
+  root=$(mktemp -d); EXTRA_STATE_LINE=EXTRA_STATE_KEY=unexpected setup_fixture "${root}"
+  expect_second_failure "${root}" "state schema differs"
+  rm -rf "${root}"
+
   root=$(mktemp -d); setup_fixture "${root}"
   temporary="${root}/fixtures/${FIRST_TAG}/release.json"
   jq '(.assets[] | select(.name == "checksums.txt") | .uploader.id) += 1' \
@@ -567,6 +586,14 @@ test_rejects_historical_receipt_and_planner_drift() {
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${ROOT_TAG}/run-state.json"
+  jq '.final_plan.plan_fingerprint = ("f" * 40)' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  rebuild_root_artifact "${root}"
+  expect_second_failure "${root}" "historical run state"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
   temporary="${root}/fixtures/${FIRST_TAG}/release.json"
   jq '(.assets[] | select(.name == "hotfix-release-receipt.json") | .size) += 1' \
     "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
@@ -585,6 +612,18 @@ test_rejects_historical_receipt_and_planner_drift() {
   jq '.hotfix_schema_version = "1"' "${receipt}" > "${receipt}.new"; mv "${receipt}.new" "${receipt}"
   rebuild_first_fixture "${root}"
   expect_second_failure "${root}" "schema version must be an integer"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/run.json"
+  jq '.run_attempt = 1.5' "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  receipt="${root}/fixtures/${FIRST_TAG}/hotfix-release-receipt.json"
+  jq '.release_workflow.run_attempt = "1.5"' "${receipt}" > "${receipt}.new"; mv "${receipt}.new" "${receipt}"
+  rebuild_first_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/artifacts.json"
+  jq '.artifacts[0].name = "hotfix-release-receipt-900-1.5"' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "workflow run"
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"

@@ -47,12 +47,8 @@ function storedZip(files: Record<string, Uint8Array>): Uint8Array {
   const central=Buffer.concat(centrals), end=Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(centrals.length,8); end.writeUInt16LE(centrals.length,10); end.writeUInt32LE(central.length,12); end.writeUInt32LE(offset,16); return new Uint8Array(Buffer.concat([...locals,central,end]));
 }
 
-function runState(receipt: Record<string,any>, commit:string, tag:string) { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:"v7.2.127-3",tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:"b".repeat(40),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
-
-function finalPlan(tag: string, commit: string) {
-  const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
-  const syncID = "original-v7.2.132_plus-v7.2.127-3";
-  const fingerprintInput = [
+function fixturePlanFingerprint(tag: string, commit: string): string {
+  const input = [
     `base_fork_commit=${commit}`,
     "original_tag=v7.2.132",
     `original_commit=${"2".repeat(40)}`,
@@ -64,11 +60,19 @@ function finalPlan(tag: string, commit: string) {
     `expected_fork_tag=${tag}`,
     "",
   ].join("\n");
-  const fingerprintBody = Buffer.from(fingerprintInput);
-  const fingerprint = createHash("sha1")
-    .update(`blob ${fingerprintBody.length}\0`)
-    .update(fingerprintBody)
+  const body = Buffer.from(input);
+  return createHash("sha1")
+    .update(`blob ${body.length}\0`)
+    .update(body)
     .digest("hex");
+}
+
+function runState(receipt: Record<string,any>, commit:string, tag:string) { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:"v7.2.127-3",tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
+
+function finalPlan(tag: string, commit: string) {
+  const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
+  const syncID = "original-v7.2.132_plus-v7.2.127-3";
+  const fingerprint = fixturePlanFingerprint(tag, commit);
   const namespace = `refs/upstream-sync/${fingerprint}`;
   const values: Record<string, string> = {
     original_tag: "v7.2.132",
@@ -631,6 +635,13 @@ function releaseFixture(
           const content = bytes(JSON.stringify(baseReceipt));
           baseReceiptAsset!.size = content.length;
           baseReceiptAsset!.digest = sha256(content);
+          const taggedReceipt = values
+            .get(`/repos/${REPOSITORY}/releases/tags/${baseTag}`)
+            .assets.find(
+              (asset: any) => asset.name === "upstream-sync-receipt.json",
+            );
+          taggedReceipt.size = content.length;
+          taggedReceipt.digest = baseReceiptAsset!.digest;
           assetBytes.set(baseReceiptAsset!.url, content);
         }
       : undefined,
@@ -1535,6 +1546,23 @@ describe("hotfix release provenance", () => {
     replaceUpstreamRunState(runStateDrift, bytes("{}"));
     await expect(validate(runStateDrift)).rejects.toThrow("run state");
 
+    const rootFingerprintDrift = releaseFixture("hotfix");
+    const rootState = JSON.parse(
+      new TextDecoder().decode(
+        runState(
+          rootFingerprintDrift.baseReceipt!,
+          rootFingerprintDrift.baseCommit!,
+          rootFingerprintDrift.baseTag!,
+        ),
+      ),
+    );
+    rootState.final_plan.plan_fingerprint = "f".repeat(40);
+    replaceUpstreamRunState(
+      rootFingerprintDrift,
+      bytes(JSON.stringify(rootState)),
+    );
+    await expect(validate(rootFingerprintDrift)).rejects.toThrow("run state");
+
     const sizeDrift = releaseFixture("hotfix");
     for (const release of [
       sizeDrift.values.get(`/repos/${REPOSITORY}/releases/101`),
@@ -1552,6 +1580,18 @@ describe("hotfix release provenance", () => {
     schemaTypeDrift.receipt.hotfix_schema_version = "1";
     schemaTypeDrift.refreshReceipt();
     await expect(validate(schemaTypeDrift)).rejects.toThrow("schema");
+  });
+
+  test.each([
+    ["accepted root", () => releaseFixture("hotfix"), "v7.2.132-unstableneutron.0"],
+    ["immediate hotfix parent", () => advanceHotfixFixture(releaseFixture("hotfix")), "v7.2.132-unstableneutron.1"],
+  ])("rejects canonical-vs-by-tag asset drift for the %s", async (_name, makeFixture, historicalTag) => {
+    const fixture = makeFixture();
+    const byTag = fixture.values.get(
+      `/repos/${REPOSITORY}/releases/tags/${historicalTag}`,
+    );
+    byTag.assets[0].size += 1;
+    await expect(validate(fixture)).rejects.toThrow("release identity differs");
   });
 
   test("accepts semantically exact root run state independent of JSON object order", async () => {
