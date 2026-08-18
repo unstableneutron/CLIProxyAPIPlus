@@ -226,7 +226,29 @@ jobs:
           EXISTING_DIGEST=""
           EXISTING_INSPECT_FILE=$(mktemp)
           trap 'rm -f "${EXISTING_INSPECT_FILE}"' EXIT
-          IMAGE_STATE="$(.github/scripts/inspect-ghcr-image-state.sh \
+          inspect_image_state() {
+            local reference=$1 present_output=$2 output output_lines
+            output=$(mktemp)
+            if docker buildx imagetools inspect "${reference}" > "${output}" 2>&1; then
+              cp "${output}" "${present_output}"
+              rm -f "${output}"
+              echo present
+              return 0
+            fi
+            output_lines=$(awk 'END { print NR }' "${output}")
+            if [ "${output_lines}" -eq 1 ] && grep -Eiq \
+              '^ERROR: .*(: 404 Not Found|: not found|: manifest unknown(: manifest unknown)?|: no such manifest)$' \
+              "${output}"; then
+              rm -f "${output}"
+              echo absent
+              return 0
+            fi
+            echo "Could not determine whether image identity ${reference} exists:" >&2
+            cat "${output}" >&2
+            rm -f "${output}"
+            return 1
+          }
+          IMAGE_STATE="$(inspect_image_state \
             "${IMAGE}:${ARCH_TAG}" "${EXISTING_INSPECT_FILE}")"
           if [ "${IMAGE_STATE}" = present ]; then
             EXISTING_INSPECT="$(cat "${EXISTING_INSPECT_FILE}")"

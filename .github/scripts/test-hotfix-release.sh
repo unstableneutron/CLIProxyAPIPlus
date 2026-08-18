@@ -213,7 +213,8 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "Reject reused or partially published identity"
   assert_contains "${WORKFLOW}" ".github/scripts/confirm-hotfix-identities-absent.sh"
   assert_not_contains "${WORKFLOW}" 'if docker buildx imagetools inspect'
-  assert_contains "${DOCKER_WORKFLOW}" ".github/scripts/inspect-ghcr-image-state.sh"
+  assert_contains "${DOCKER_WORKFLOW}" "inspect_image_state()"
+  assert_not_contains "${DOCKER_WORKFLOW}" ".github/scripts/inspect-ghcr-image-state.sh"
   assert_not_contains "${DOCKER_WORKFLOW}" '2>/dev/null)"; then'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${WORKFLOW}" 'git push origin "refs/tags/${TAG}"'

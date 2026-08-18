@@ -916,6 +916,8 @@ test_publication_workflows_are_reusable_and_checked() {
   # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
   assert_contains "${docker}" 'ARCH_TAG="${TAG}-${TAG_SUFFIX}"'
   assert_contains "${docker}" "Published early architecture image"
+  assert_contains "${docker}" "inspect_image_state()"
+  assert_not_contains "${docker}" ".github/scripts/"
   assert_not_contains "${docker}" "setup-qemu-action"
   assert_not_contains "${docker}" "Refresh models catalog"
 
