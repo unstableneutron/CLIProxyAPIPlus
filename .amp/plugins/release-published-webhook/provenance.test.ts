@@ -1530,11 +1530,19 @@ describe("upstream release provenance", () => {
     )).resolves.toBeDefined();
   });
 
-  test("rejects a stale retry even when receivedAt was fresh", async () => {
+  test("admits exact finalization after a delayed retry of an originally fresh delivery", async () => {
     const fixture = releaseFixture();
+    const completeAssets = fixture.canonical.assets;
+    fixture.canonical.assets = completeAssets.filter(
+      (asset: any) => asset !== fixture.receiptAsset,
+    );
+    await expect(
+      validate(fixture),
+    ).rejects.toBeInstanceOf(RetryableNotReady);
+    fixture.canonical.assets = completeAssets;
     await expect(
       validate(fixture, { now: () => Date.parse("2026-08-16T05:35:00Z") }),
-    ).rejects.toThrow("stale or future");
+    ).resolves.toBeDefined();
   });
 
   test("rejects a future published timestamp", async () => {

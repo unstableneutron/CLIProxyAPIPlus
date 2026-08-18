@@ -453,14 +453,17 @@ function validateFreshness(
 ): void {
   const published = canonicalUtcTimestamp(publishedAt, false);
   const received = canonicalUtcTimestamp(receivedAt, true);
-  const ages = [received - published, now - published];
+  // Amp records receivedAt when it accepts the durable event and preserves it
+  // across at-least-once retries, so delayed finalization must not refresh it.
+  const deliveryAge = received - published;
+  const retryAge = now - received;
   if (
     !Number.isFinite(published) ||
     !Number.isFinite(received) ||
     !Number.isFinite(now) ||
-    ages.some(
-      (age) => age > MAXIMUM_RELEASE_AGE_MS || age < -MAXIMUM_CLOCK_SKEW_MS,
-    )
+    deliveryAge > MAXIMUM_RELEASE_AGE_MS ||
+    deliveryAge < -MAXIMUM_CLOCK_SKEW_MS ||
+    retryAge < -MAXIMUM_CLOCK_SKEW_MS
   ) {
     throw new RejectedDelivery("release timestamp is stale or future");
   }
