@@ -108,6 +108,60 @@ json_exact_keys() {
     || die "${label} schema differs"
 }
 
+validate_upstream_run_state() {
+  local run_state=$1 receipt_file=$2 commit=$3 tag=$4
+  jq -e \
+    --arg base_fork_commit "$(state_value BASE_FORK_COMMIT)" \
+    --arg original_tag "$(state_value ORIGINAL_TAG)" \
+    --arg original_commit "$(state_value ORIGINAL_COMMIT)" \
+    --arg plus_tag "$(state_value PLUS_TAG)" \
+    --arg plus_tag_commit "$(state_value PLUS_TAG_COMMIT)" \
+    --arg plus_head "$(state_value PLUS_HEAD_COMMIT)" \
+    --argjson plus_head_included "$(state_value PLUS_HEAD_INCLUDED)" \
+    --arg models_commit "$(state_value MODELS_COMMIT)" \
+    --arg sync_id "$(state_value SYNC_ID)" \
+    --arg plan_fingerprint "$(state_value PLAN_FINGERPRINT)" \
+    --arg candidate_branch "$(state_value CANDIDATE_BRANCH)" \
+    --arg commit "${commit}" \
+    --arg tag "${tag}" \
+    --slurpfile receipt "${receipt_file}" '
+      (keys | sort) == (["candidate", "final_plan", "promotion", "release", "repair", "runtime_smoke", "schema_version", "state", "target", "vn3_deployed"] | sort) and
+      (.target | keys | sort) == (["base_fork_commit", "blocked", "expected_fork_tag", "models_commit", "original", "plan_fingerprint", "plus", "sync_id", "target_drift"] | sort) and
+      (.target.original | keys | sort) == (["commit", "tag"] | sort) and
+      (.target.plus | keys | sort) == (["head", "head_included", "tag", "tag_commit"] | sort) and
+      (.candidate | keys | sort) == (["acceptable", "branch", "sha", "validation_status"] | sort) and
+      (.repair | keys | sort) == (["imported", "pr", "sha"] | sort) and
+      (.final_plan | keys | sort) == (["blocked", "has_changes", "plan_fingerprint", "status", "target_drift"] | sort) and
+      (.promotion | keys | sort) == (["commit", "tag"] | sort) and
+      (.release | keys | sort) == (["architecture_images", "assets", "image", "image_digest", "platforms", "url"] | sort) and
+      .schema_version == 1 and .state == "released" and
+      .target.base_fork_commit == $base_fork_commit and
+      .target.original == {tag: $original_tag, commit: $original_commit} and
+      .target.plus == {tag: $plus_tag, tag_commit: $plus_tag_commit, head: $plus_head, head_included: $plus_head_included} and
+      .target.models_commit == $models_commit and .target.sync_id == $sync_id and
+      .target.plan_fingerprint == $plan_fingerprint and .target.expected_fork_tag == $tag and
+      (.target.target_drift | type) == "boolean" and .target.blocked == false and
+      .candidate == {branch: $candidate_branch, sha: $commit, acceptable: true, validation_status: "passed"} and
+      ((.repair.imported == false and .repair.pr == null and .repair.sha == null) or
+       (.repair.imported == true and (.repair.pr | type) == "number" and (.repair.pr | floor) == .repair.pr and .repair.pr > 0 and .repair.pr <= 9007199254740991 and .repair.sha == $commit)) and
+      .final_plan.status == "clean-noop" and
+      (.final_plan.plan_fingerprint | type) == "string" and
+      (.final_plan.plan_fingerprint | test("^[0-9a-f]{40}$")) and
+      .final_plan.has_changes == false and .final_plan.target_drift == false and .final_plan.blocked == false and
+      .runtime_smoke == "not_run" and .vn3_deployed == false and
+      .promotion == {commit: $commit, tag: $tag} and
+      .release == {
+        url: $receipt[0].release_url,
+        assets: $receipt[0].release_assets,
+        image: $receipt[0].image,
+        image_digest: $receipt[0].image_digest,
+        platforms: $receipt[0].platforms,
+        architecture_images: $receipt[0].architecture_images
+      }
+    ' "${run_state}" >/dev/null \
+    || die "historical run state for ${tag} differs"
+}
+
 verify_release_and_link() {
   local tag=$1
   local commit=$2
@@ -201,8 +255,8 @@ verify_release_and_link() {
     --arg login "${BOT_LOGIN}" \
     --argjson bot_id "${BOT_ID}" '
       all(.assets[];
-        (.id | type) == "number" and .id > 0 and
-        (.size | type) == "number" and .size > 0 and .size <= 2000000000 and
+        (.id | type) == "number" and (.id | floor) == .id and .id > 0 and .id <= 9007199254740991 and
+        (.size | type) == "number" and (.size | floor) == .size and .size > 0 and .size <= 2000000000 and
         .state == "uploaded" and
         .url == ("https://api.github.com/repos/" + $repo + "/releases/assets/" + (.id | tostring)) and
         .uploader.login == $login and .uploader.id == $bot_id and .uploader.type == "Bot" and
@@ -219,6 +273,8 @@ verify_release_and_link() {
     || die "receipt asset for ${tag} exceeds the metadata limit"
   gh api -H 'Accept: application/octet-stream' \
     "repos/${GITHUB_REPOSITORY}/releases/assets/${receipt_id}" > "${node_dir}/${receipt_name}"
+  [ "$(stat -c %s "${node_dir}/${receipt_name}")" -eq "${receipt_size}" ] \
+    || die "receipt bytes for ${tag} do not match the release asset size"
   [ "sha256:$(sha256sum "${node_dir}/${receipt_name}" | awk '{ print $1 }')" = "${receipt_digest}" ] \
     || die "receipt bytes for ${tag} do not match the release asset digest"
   jq -e . "${node_dir}/${receipt_name}" >/dev/null \
@@ -238,6 +294,8 @@ verify_release_and_link() {
     || die "checksums asset for ${tag} exceeds the metadata limit"
   gh api -H 'Accept: application/octet-stream' \
     "repos/${GITHUB_REPOSITORY}/releases/assets/${checksum_id}" > "${checksum_file}"
+  [ "$(stat -c %s "${checksum_file}")" -eq "${checksum_size}" ] \
+    || die "checksums.txt bytes for ${tag} do not match the release asset size"
   [ "sha256:$(sha256sum "${checksum_file}" | awk '{ print $1 }')" = "${checksum_digest}" ] \
     || die "checksums.txt bytes for ${tag} do not match the release asset digest"
   local seen_checksums="${node_dir}/checksum-names"
@@ -340,8 +398,8 @@ verify_release_and_link() {
     --argjson repo_id "${REPOSITORY_ID}" \
     --arg head "${run_head}" '
       [.artifacts[] | select(.name == $name)] | .[0] |
-      .expired == false and (.id | type) == "number" and .id > 0 and
-      (.size_in_bytes | type) == "number" and .size_in_bytes > 0 and .size_in_bytes <= 4000000 and
+      .expired == false and (.id | type) == "number" and (.id | floor) == .id and .id > 0 and .id <= 9007199254740991 and
+      (.size_in_bytes | type) == "number" and (.size_in_bytes | floor) == .size_in_bytes and .size_in_bytes > 0 and .size_in_bytes <= 4000000 and
       (.digest | type) == "string" and (.digest | test("^sha256:[0-9a-f]{64}$")) and
       .archive_download_url == ("https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/actions/artifacts/" + (.id | tostring) + "/zip") and
       .workflow_run.id == $run_id and .workflow_run.repository_id == $repo_id and
@@ -359,6 +417,15 @@ verify_release_and_link() {
   if [ "${kind}" = upstream ]; then
     diff -u <(printf '%s\n' run-state.json upstream-sync-receipt.json | sort) "${artifact_files}" >/dev/null \
       || die "upstream receipt artifact files for ${tag} differ"
+    local run_state_member run_state_file="${node_dir}/run-state.json"
+    run_state_member=$(unzip -Z1 "${artifact_zip}" | awk -F/ '$NF == "run-state.json" { print }')
+    [ "$(wc -l <<< "${run_state_member}" | tr -d ' ')" -eq 1 ] \
+      || die "historical run state for ${tag} is missing or duplicated"
+    unzip -p "${artifact_zip}" "${run_state_member}" > "${run_state_file}"
+    if [ ! -s "${run_state_file}" ] || [ "$(stat -c %s "${run_state_file}")" -gt 1000000 ]; then
+      die "historical run state for ${tag} exceeds the metadata limit"
+    fi
+    validate_upstream_run_state "${run_state_file}" "${receipt_file}" "${commit}" "${tag}"
   else
     diff -u <(printf '%s\n' final-plan.out hotfix-release-receipt.json independently-verified-receipt.json | sort) "${artifact_files}" >/dev/null \
       || die "hotfix receipt artifact files for ${tag} differ"
@@ -411,6 +478,22 @@ verify_release_and_link() {
         *) die "historical final plan boolean ${plan_boolean} for ${tag} is malformed" ;;
       esac
     done
+    local plan_prefix=${tag%.*} plan_suffix=$((10#${tag##*.})) expected_plan_fingerprint expected_candidate expected_namespace
+    expected_plan_fingerprint=$(
+      printf '%s\n' \
+        "base_fork_commit=${commit}" \
+        "original_tag=$(state_value ORIGINAL_TAG)" \
+        "original_commit=$(state_value ORIGINAL_COMMIT)" \
+        "plus_tag=$(state_value PLUS_TAG)" \
+        "plus_tag_commit=$(state_value PLUS_TAG_COMMIT)" \
+        "plus_head_commit=$(state_value PLUS_HEAD_COMMIT)" \
+        "plus_head_included=$(state_value PLUS_HEAD_INCLUDED)" \
+        "models_commit=$(state_value MODELS_COMMIT)" \
+        "expected_fork_tag=${tag}" \
+        | git hash-object --stdin
+    )
+    expected_candidate="upstream-sync/$(printf '%s' "${EXPECTED_SYNC_ID}" | tr -c 'A-Za-z0-9._-' '-')-${expected_plan_fingerprint:0:12}"
+    expected_namespace="refs/upstream-sync/${expected_plan_fingerprint}"
     if [ "$(plan_value original_tag)" != "$(state_value ORIGINAL_TAG)" ] || \
        [ "$(plan_value plus_tag)" != "$(state_value PLUS_TAG)" ] || \
        [ "$(plan_value pre_sync_head)" != "${commit}" ] || \
@@ -427,6 +510,21 @@ verify_release_and_link() {
        [ "$(plan_value expected_fork_tag)" != "${tag}" ] || \
        [ "$(plan_value latest_fork_models_commit)" != "$(state_value MODELS_COMMIT)" ] || \
        [ "$(plan_value safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
+       [ "$(plan_value plus_head_already_represented)" != true ] || \
+       [ -n "$(plan_value plus_head_delta_paths)" ] || \
+       [ -n "$(plan_value unsafe_plus_head_delta_paths)" ] || \
+       [ -n "$(plan_value block_reason)" ] || \
+       [ "$(plan_value fork_tag_prefix)" != "${plan_prefix}" ] || \
+       [ "$(plan_value latest_fork_suffix)" != "${plan_suffix}" ] || \
+       [ "$(plan_value next_fork_tag)" != "${plan_prefix}.$((plan_suffix + 1))" ] || \
+       [ "$(plan_value plan_fingerprint)" != "${expected_plan_fingerprint}" ] || \
+       [ "$(plan_value candidate_branch)" != "${expected_candidate}" ] || \
+       [ "$(plan_value snapshot_namespace)" != "${expected_namespace}" ] || \
+       [ "$(plan_value original_snapshot_ref)" != "${expected_namespace}/original" ] || \
+       [ "$(plan_value plus_tag_snapshot_ref)" != "${expected_namespace}/plus-tag" ] || \
+       [ "$(plan_value plus_head_snapshot_ref)" != "${expected_namespace}/plus-head" ] || \
+       [ "$(plan_value models_snapshot_ref)" != "${expected_namespace}/models" ] || \
+       [ -n "$(plan_value target_drift_summary)" ] || \
        [ "$(plan_value has_changes)" != false ] || \
        [ "$(plan_value target_drift)" != false ] || \
        [ "$(plan_value blocked)" != false ]; then
@@ -544,6 +642,11 @@ validate_chain() {
     || die "hotfix receipt ${tag} release-asset digests differ"
 
   local schema
+  jq -e '
+      (.hotfix_schema_version | type) == "number" and
+      (.hotfix_schema_version | floor) == .hotfix_schema_version
+    ' "${receipt_file}" >/dev/null \
+    || die "hotfix receipt ${tag} schema version must be an integer"
   schema=$(jq -r '.hotfix_schema_version // empty' "${receipt_file}")
   case "${schema}" in
     1)

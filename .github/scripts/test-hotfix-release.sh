@@ -222,6 +222,12 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" target_drift'
   # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
   assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" blocked'
+  # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
+  assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" plan_fingerprint'
+  # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
+  assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" candidate_branch'
+  # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
+  assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" next_fork_tag'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
   assert_contains "${RECOVERY_WORKFLOW}" 'TAG}" != "${RECORDED_RELEASE_TAG}'
   assert_contains "${UPSTREAM_WORKFLOW}" "hotfix-release-receipt.json"

@@ -76,7 +76,7 @@ write_artifact() {
   if [ "${kind}" = upstream ]; then
     artifact_prefix=upstream-sync
     cp "${node}/${receipt_name}" "${work}/${receipt_name}"
-    printf '{}\n' > "${work}/run-state.json"
+    cp "${node}/run-state.json" "${work}/run-state.json"
   else
     cp "${node}/${receipt_name}" "${work}/${receipt_name}"
     cp "${node}/${receipt_name}" "${work}/independently-verified-receipt.json"
@@ -158,6 +158,42 @@ write_root_fixture() {
     ' > "${node}/upstream-sync-receipt.json"
   write_release "${root}" "${ROOT_TAG}" 100 1 2 3 upstream-sync-receipt.json
   jq -n \
+    --arg commit "${commit}" \
+    --arg sync_id "${SYNC_ID}" \
+    --arg fingerprint "${FINGERPRINT}" \
+    --arg candidate "upstream-sync/${SYNC_ID}-${FINGERPRINT:0:12}" \
+    --slurpfile receipt "${node}/upstream-sync-receipt.json" '
+      {
+        schema_version: 1,
+        state: "released",
+        target: {
+          base_fork_commit: ("1" * 40),
+          original: {tag: "v7.2.131", commit: ("2" * 40)},
+          plus: {tag: "v7.2.127-3", tag_commit: ("3" * 40), head: ("3" * 40), head_included: false},
+          models_commit: ("4" * 40),
+          sync_id: $sync_id,
+          plan_fingerprint: $fingerprint,
+          expected_fork_tag: $receipt[0].tag,
+          target_drift: true,
+          blocked: false
+        },
+        candidate: {branch: $candidate, sha: $commit, acceptable: true, validation_status: "passed"},
+        repair: {imported: false, pr: null, sha: null},
+        final_plan: {status: "clean-noop", plan_fingerprint: ("b" * 40), has_changes: false, target_drift: false, blocked: false},
+        runtime_smoke: "not_run",
+        vn3_deployed: false,
+        promotion: {commit: $commit, tag: $receipt[0].tag},
+        release: {
+          url: $receipt[0].release_url,
+          assets: $receipt[0].release_assets,
+          image: $receipt[0].image,
+          image_digest: $receipt[0].image_digest,
+          platforms: $receipt[0].platforms,
+          architecture_images: $receipt[0].architecture_images
+        }
+      }
+    ' > "${node}/run-state.json"
+  jq -n \
     --arg head "${commit}" '
       {
         path: ".github/workflows/upstream-sync-v2.yml",
@@ -176,6 +212,21 @@ write_root_fixture() {
 
 write_final_plan() {
   local root=$1 commit=$2
+  local fingerprint namespace
+  fingerprint=$(
+    printf '%s\n' \
+      "base_fork_commit=${commit}" \
+      'original_tag=v7.2.131' \
+      'original_commit=2222222222222222222222222222222222222222' \
+      'plus_tag=v7.2.127-3' \
+      'plus_tag_commit=3333333333333333333333333333333333333333' \
+      'plus_head_commit=3333333333333333333333333333333333333333' \
+      'plus_head_included=false' \
+      'models_commit=4444444444444444444444444444444444444444' \
+      "expected_fork_tag=${FIRST_TAG}" \
+      | git hash-object --stdin
+  )
+  namespace="refs/upstream-sync/${fingerprint}"
   cat > "${root}/fixtures/${FIRST_TAG}/final-plan.out" <<EOF
 original_tag=v7.2.131
 plus_tag=v7.2.127-3
@@ -198,16 +249,16 @@ fork_tag_prefix=v7.2.131-unstableneutron
 latest_fork_tag=${FIRST_TAG}
 latest_fork_models_commit=4444444444444444444444444444444444444444
 latest_fork_suffix=1
-next_fork_tag=${FIRST_TAG}
+next_fork_tag=${SECOND_TAG}
 expected_fork_tag=${FIRST_TAG}
 safe_sync_id=${SYNC_ID}
-plan_fingerprint=${FINGERPRINT}
-candidate_branch=upstream-sync/${SYNC_ID}-${FINGERPRINT:0:12}
-snapshot_namespace=refs/upstream-sync/test
-original_snapshot_ref=refs/upstream-sync/test/original
-plus_tag_snapshot_ref=refs/upstream-sync/test/plus-tag
-plus_head_snapshot_ref=refs/upstream-sync/test/plus-head
-models_snapshot_ref=refs/upstream-sync/test/models
+plan_fingerprint=${fingerprint}
+candidate_branch=upstream-sync/${SYNC_ID}-${fingerprint:0:12}
+snapshot_namespace=${namespace}
+original_snapshot_ref=${namespace}/original
+plus_tag_snapshot_ref=${namespace}/plus-tag
+plus_head_snapshot_ref=${namespace}/plus-head
+models_snapshot_ref=${namespace}/models
 target_drift=false
 target_drift_summary=
 has_changes=false
@@ -295,6 +346,11 @@ rebuild_first_fixture() {
   local node="${root}/fixtures/${FIRST_TAG}"
   write_release "${root}" "${FIRST_TAG}" 101 11 12 13 hotfix-release-receipt.json
   write_artifact "${root}" "${FIRST_TAG}" hotfix 900 "$(cat "${root}/first.commit")" hotfix-release-receipt.json 10900
+}
+
+rebuild_root_artifact() {
+  local root=$1
+  write_artifact "${root}" "${ROOT_TAG}" upstream 800 "$(cat "${root}/root.commit")" upstream-sync-receipt.json 10800
 }
 
 make_stubs() {
@@ -435,8 +491,10 @@ expect_second_failure() {
     "${root}/failed-chain.json" > "${output}" 2>&1; then
     fail "chained verifier unexpectedly accepted malformed evidence"
   fi
-  grep -Fq "${expected}" "${output}" \
-    || fail "expected verifier failure to contain: ${expected}"
+  if [ -n "${expected}" ]; then
+    grep -Fq "${expected}" "${output}" \
+      || fail "expected verifier failure to contain: ${expected}"
+  fi
 }
 
 test_workflow_legacy_preflight_and_chained_parent() {
@@ -502,6 +560,34 @@ test_rejects_historical_receipt_and_planner_drift() {
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${ROOT_TAG}/run-state.json"
+  printf '{}\n' > "${temporary}"
+  rebuild_root_artifact "${root}"
+  expect_second_failure "${root}" "historical run state"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/release.json"
+  jq '(.assets[] | select(.name == "hotfix-release-receipt.json") | .size) += 1' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "receipt bytes"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  temporary="${root}/fixtures/${FIRST_TAG}/release.json"
+  jq '(.assets[] | select(.name == "checksums.txt") | .size) += 1' \
+    "${temporary}" > "${temporary}.new"; mv "${temporary}.new" "${temporary}"
+  expect_second_failure "${root}" "checksums.txt bytes"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
+  receipt="${root}/fixtures/${FIRST_TAG}/hotfix-release-receipt.json"
+  jq '.hotfix_schema_version = "1"' "${receipt}" > "${receipt}.new"; mv "${receipt}.new" "${receipt}"
+  rebuild_first_fixture "${root}"
+  expect_second_failure "${root}" "schema version must be an integer"
+  rm -rf "${root}"
+
+  root=$(mktemp -d); setup_fixture "${root}"
   temporary="${root}/fixtures/${FIRST_TAG}/final-plan.out"
   sed -i 's/^has_changes=false$/has_changes=true/' "${temporary}"
   rebuild_first_fixture "${root}"
@@ -514,6 +600,23 @@ test_rejects_historical_receipt_and_planner_drift() {
   rebuild_first_fixture "${root}"
   expect_second_failure "${root}" "final plan fields"
   rm -rf "${root}"
+
+  local baseline copy field
+  baseline=$(mktemp -d); setup_fixture "${baseline}"
+  for field in \
+    fork_tag_prefix latest_fork_suffix next_fork_tag plan_fingerprint candidate_branch \
+    snapshot_namespace original_snapshot_ref plus_tag_snapshot_ref plus_head_snapshot_ref \
+    models_snapshot_ref plus_head_already_represented plus_head_delta_paths \
+    unsafe_plus_head_delta_paths block_reason target_drift_summary; do
+    copy=$(mktemp -d)
+    cp -a "${baseline}/." "${copy}/"
+    temporary="${copy}/fixtures/${FIRST_TAG}/final-plan.out"
+    sed -i "s#^${field}=.*#${field}=tampered#" "${temporary}"
+    rebuild_first_fixture "${copy}"
+    expect_second_failure "${copy}" ""
+    rm -rf "${copy}"
+  done
+  rm -rf "${baseline}"
 }
 
 test_rejects_schema_v2_at_suffix_one() {

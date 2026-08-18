@@ -449,10 +449,85 @@ jobs:
           plan_value() {
             awk -F= -v key="$2" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$1"
           }
-          if [ "$(plan_value "${FINAL_PLAN}" has_changes)" != false ] || \
+          PLAN_KEYS=$(mktemp)
+          EXPECTED_PLAN_KEYS=$(mktemp)
+          if ! awk -F= '
+            !/^[a-z][a-z0-9_]*=/ { exit 1 }
+            seen[$1]++ { exit 1 }
+            { print $1 }
+          ' "${FINAL_PLAN}" | sort > "${PLAN_KEYS}"; then
+            echo "Final planner output syntax differs." >&2
+            exit 1
+          fi
+          printf '%s\n' \
+            original_tag plus_tag pre_sync_head base_fork_commit original_repository \
+            plus_repository models_repository original_head plus_tag_head plus_head \
+            models_commit plus_head_included plus_head_already_represented \
+            plus_head_delta_paths unsafe_plus_head_delta_paths blocked block_reason \
+            fork_tag_prefix latest_fork_tag latest_fork_models_commit latest_fork_suffix \
+            next_fork_tag expected_fork_tag safe_sync_id plan_fingerprint candidate_branch \
+            snapshot_namespace original_snapshot_ref plus_tag_snapshot_ref \
+            plus_head_snapshot_ref models_snapshot_ref target_drift target_drift_summary \
+            has_changes | sort > "${EXPECTED_PLAN_KEYS}"
+          if ! cmp -s "${PLAN_KEYS}" "${EXPECTED_PLAN_KEYS}"; then
+            echo "Final planner output fields differ." >&2
+            exit 1
+          fi
+          state_value() {
+            awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' .ccs-fork-upstream.env
+          }
+          TAG_PREFIX=${TAG%.*}
+          TAG_SUFFIX=$((10#${TAG##*.}))
+          EXPECTED_PLAN_FINGERPRINT=$(
+            printf '%s\n' \
+              "base_fork_commit=${EXPECTED_COMMIT}" \
+              "original_tag=$(state_value ORIGINAL_TAG)" \
+              "original_commit=$(state_value ORIGINAL_COMMIT)" \
+              "plus_tag=$(state_value PLUS_TAG)" \
+              "plus_tag_commit=$(state_value PLUS_TAG_COMMIT)" \
+              "plus_head_commit=$(state_value PLUS_HEAD_COMMIT)" \
+              "plus_head_included=$(state_value PLUS_HEAD_INCLUDED)" \
+              "models_commit=$(state_value MODELS_COMMIT)" \
+              "expected_fork_tag=${TAG}" \
+              | git hash-object --stdin
+          )
+          EXPECTED_NAMESPACE="refs/upstream-sync/${EXPECTED_PLAN_FINGERPRINT}"
+          EXPECTED_SYNC_ID=$(state_value SYNC_ID)
+          EXPECTED_CANDIDATE="upstream-sync/$(printf '%s' "${EXPECTED_SYNC_ID}" | tr -c 'A-Za-z0-9._-' '-')-${EXPECTED_PLAN_FINGERPRINT:0:12}"
+          if [ "$(plan_value "${FINAL_PLAN}" original_tag)" != "$(state_value ORIGINAL_TAG)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_tag)" != "$(state_value PLUS_TAG)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" pre_sync_head)" != "${EXPECTED_COMMIT}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" base_fork_commit)" != "${EXPECTED_COMMIT}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" original_repository)" != "$(state_value ORIGINAL_REPOSITORY)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_repository)" != "$(state_value PLUS_REPOSITORY)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" models_repository)" != "$(state_value MODELS_REPOSITORY)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" original_head)" != "$(state_value ORIGINAL_COMMIT)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_tag_head)" != "$(state_value PLUS_TAG_COMMIT)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_head)" != "$(state_value PLUS_HEAD_COMMIT)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" models_commit)" != "$(state_value MODELS_COMMIT)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_head_included)" != "$(state_value PLUS_HEAD_INCLUDED)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_head_already_represented)" != true ] || \
+             [ -n "$(plan_value "${FINAL_PLAN}" plus_head_delta_paths)" ] || \
+             [ -n "$(plan_value "${FINAL_PLAN}" unsafe_plus_head_delta_paths)" ] || \
+             [ -n "$(plan_value "${FINAL_PLAN}" block_reason)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" fork_tag_prefix)" != "${TAG_PREFIX}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" latest_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" latest_fork_models_commit)" != "$(state_value MODELS_COMMIT)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" latest_fork_suffix)" != "${TAG_SUFFIX}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" next_fork_tag)" != "${TAG_PREFIX}.$((TAG_SUFFIX + 1))" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" expected_fork_tag)" != "${TAG}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" safe_sync_id)" != "${EXPECTED_SYNC_ID}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plan_fingerprint)" != "${EXPECTED_PLAN_FINGERPRINT}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" candidate_branch)" != "${EXPECTED_CANDIDATE}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" snapshot_namespace)" != "${EXPECTED_NAMESPACE}" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" original_snapshot_ref)" != "${EXPECTED_NAMESPACE}/original" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_tag_snapshot_ref)" != "${EXPECTED_NAMESPACE}/plus-tag" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" plus_head_snapshot_ref)" != "${EXPECTED_NAMESPACE}/plus-head" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" models_snapshot_ref)" != "${EXPECTED_NAMESPACE}/models" ] || \
+             [ -n "$(plan_value "${FINAL_PLAN}" target_drift_summary)" ] || \
+             [ "$(plan_value "${FINAL_PLAN}" has_changes)" != false ] || \
              [ "$(plan_value "${FINAL_PLAN}" target_drift)" != false ] || \
-             [ "$(plan_value "${FINAL_PLAN}" blocked)" != false ] || \
-             [ "$(plan_value "${FINAL_PLAN}" latest_fork_tag)" != "${TAG}" ]; then
+             [ "$(plan_value "${FINAL_PLAN}" blocked)" != false ]; then
             echo "Final planner did not reach clean no-op state at ${TAG}." >&2
             exit 1
           fi

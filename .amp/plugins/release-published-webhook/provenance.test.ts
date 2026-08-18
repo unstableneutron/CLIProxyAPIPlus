@@ -49,7 +49,69 @@ function storedZip(files: Record<string, Uint8Array>): Uint8Array {
 
 function runState(receipt: Record<string,any>, commit:string, tag:string) { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:"v7.2.127-3",tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:"b".repeat(40),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
 
-function finalPlan(tag:string, commit:string) { const values: Record<string,string>={original_tag:"v7.2.132",plus_tag:"v7.2.127-3",pre_sync_head:commit,base_fork_commit:commit,original_repository:"router-for-me/CLIProxyAPI",plus_repository:"kaitranntt/CLIProxyAPIPlus",models_repository:"router-for-me/models",original_head:"2".repeat(40),plus_tag_head:"3".repeat(40),plus_head:"3".repeat(40),models_commit:"4".repeat(40),plus_head_included:"false",plus_head_already_represented:"true",plus_head_delta_paths:"",unsafe_plus_head_delta_paths:"",blocked:"false",block_reason:"",fork_tag_prefix:"v7.2.132-unstableneutron",latest_fork_tag:tag,latest_fork_models_commit:"4".repeat(40),latest_fork_suffix:"1",next_fork_tag:tag,expected_fork_tag:tag,safe_sync_id:"original-v7.2.132_plus-v7.2.127-3",plan_fingerprint:"b".repeat(40),candidate_branch:"upstream-sync/x",snapshot_namespace:"refs/upstream-sync/x",original_snapshot_ref:"refs/upstream-sync/x/original",plus_tag_snapshot_ref:"refs/upstream-sync/x/plus-tag",plus_head_snapshot_ref:"refs/upstream-sync/x/plus-head",models_snapshot_ref:"refs/upstream-sync/x/models",target_drift:"false",target_drift_summary:"",has_changes:"false"}; return bytes(Object.entries(values).map(([k,v])=>`${k}=${v}`).join("\n")+"\n"); }
+function finalPlan(tag: string, commit: string) {
+  const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
+  const syncID = "original-v7.2.132_plus-v7.2.127-3";
+  const fingerprintInput = [
+    `base_fork_commit=${commit}`,
+    "original_tag=v7.2.132",
+    `original_commit=${"2".repeat(40)}`,
+    "plus_tag=v7.2.127-3",
+    `plus_tag_commit=${"3".repeat(40)}`,
+    `plus_head_commit=${"3".repeat(40)}`,
+    "plus_head_included=false",
+    `models_commit=${"4".repeat(40)}`,
+    `expected_fork_tag=${tag}`,
+    "",
+  ].join("\n");
+  const fingerprintBody = Buffer.from(fingerprintInput);
+  const fingerprint = createHash("sha1")
+    .update(`blob ${fingerprintBody.length}\0`)
+    .update(fingerprintBody)
+    .digest("hex");
+  const namespace = `refs/upstream-sync/${fingerprint}`;
+  const values: Record<string, string> = {
+    original_tag: "v7.2.132",
+    plus_tag: "v7.2.127-3",
+    pre_sync_head: commit,
+    base_fork_commit: commit,
+    original_repository: "router-for-me/CLIProxyAPI",
+    plus_repository: "kaitranntt/CLIProxyAPIPlus",
+    models_repository: "router-for-me/models",
+    original_head: "2".repeat(40),
+    plus_tag_head: "3".repeat(40),
+    plus_head: "3".repeat(40),
+    models_commit: "4".repeat(40),
+    plus_head_included: "false",
+    plus_head_already_represented: "true",
+    plus_head_delta_paths: "",
+    unsafe_plus_head_delta_paths: "",
+    blocked: "false",
+    block_reason: "",
+    fork_tag_prefix: tagParts[1],
+    latest_fork_tag: tag,
+    latest_fork_models_commit: "4".repeat(40),
+    latest_fork_suffix: String(Number(tagParts[2])),
+    next_fork_tag: `${tagParts[1]}.${Number(tagParts[2]) + 1}`,
+    expected_fork_tag: tag,
+    safe_sync_id: syncID,
+    plan_fingerprint: fingerprint,
+    candidate_branch: `upstream-sync/${syncID}-${fingerprint.slice(0, 12)}`,
+    snapshot_namespace: namespace,
+    original_snapshot_ref: `${namespace}/original`,
+    plus_tag_snapshot_ref: `${namespace}/plus-tag`,
+    plus_head_snapshot_ref: `${namespace}/plus-head`,
+    models_snapshot_ref: `${namespace}/models`,
+    target_drift: "false",
+    target_drift_summary: "",
+    has_changes: "false",
+  };
+  return bytes(
+    `${Object.entries(values)
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n")}\n`,
+  );
+}
 
 function encodedContent(value: Uint8Array) {
   return {
@@ -875,6 +937,23 @@ function replaceHotfixFinalPlan(fixture: ReleaseFixture, plan: Uint8Array) {
   fixture.assetBytes.set(artifact.archive_download_url, zip);
 }
 
+function replaceUpstreamRunState(fixture: ReleaseFixture, state: Uint8Array) {
+  const runID = 800;
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  const receiptAsset = fixture.baseReceiptAsset ?? fixture.receiptAsset;
+  const receipt = fixture.assetBytes.get(receiptAsset.url)!;
+  const zip = storedZip({
+    "nested/upstream-sync-receipt.json": receipt,
+    "work/run-state.json": state,
+  });
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
 describe("upstream release provenance", () => {
   test("accepts an exact verified upstream release", async () => {
     const fixture = releaseFixture();
@@ -1451,6 +1530,49 @@ describe("hotfix release provenance", () => {
     );
   });
 
+  test("rejects cross-verifier root run-state, receipt-size, and schema-type drift", async () => {
+    const runStateDrift = releaseFixture("hotfix");
+    replaceUpstreamRunState(runStateDrift, bytes("{}"));
+    await expect(validate(runStateDrift)).rejects.toThrow("run state");
+
+    const sizeDrift = releaseFixture("hotfix");
+    for (const release of [
+      sizeDrift.values.get(`/repos/${REPOSITORY}/releases/101`),
+      sizeDrift.values.get(
+        `/repos/${REPOSITORY}/releases/tags/${sizeDrift.currentTag}`,
+      ),
+    ]) {
+      release.assets.find(
+        (asset: any) => asset.name === "hotfix-release-receipt.json",
+      ).size += 1;
+    }
+    await expect(validate(sizeDrift)).rejects.toThrow("asset bytes digest");
+
+    const schemaTypeDrift = releaseFixture("hotfix");
+    schemaTypeDrift.receipt.hotfix_schema_version = "1";
+    schemaTypeDrift.refreshReceipt();
+    await expect(validate(schemaTypeDrift)).rejects.toThrow("schema");
+  });
+
+  test("accepts semantically exact root run state independent of JSON object order", async () => {
+    const fixture = releaseFixture("hotfix");
+    const reordered = JSON.parse(
+      new TextDecoder().decode(
+        runState(fixture.baseReceipt!, fixture.baseCommit!, fixture.baseTag!),
+      ),
+    );
+    reordered.release = {
+      architecture_images: reordered.release.architecture_images,
+      platforms: reordered.release.platforms,
+      image_digest: reordered.release.image_digest,
+      image: reordered.release.image,
+      assets: reordered.release.assets,
+      url: reordered.release.url,
+    };
+    replaceUpstreamRunState(fixture, bytes(JSON.stringify(reordered)));
+    await expect(validate(fixture)).resolves.toMatchObject({ kind: "hotfix" });
+  });
+
   test.each([
     [
       "release",
@@ -1546,10 +1668,76 @@ describe("hotfix release provenance", () => {
   );
 
   test.each([
+    ["schema-v1", () => releaseFixture("hotfix")],
+    ["schema-v2", () => advanceHotfixFixture(releaseFixture("hotfix"))],
+  ])(
+    "classifies %s immediate-parent comparison HTTP failures",
+    async (_name, makeFixture) => {
+      for (const status of [404, 410, 429, 500]) {
+        const fixture = makeFixture();
+        const comparison = `/repos/${REPOSITORY}/compare/${fixture.receipt.previous_release.commit}...${fixture.currentCommit}`;
+        const original = fixture.github;
+        const github: GitHubClient = {
+          get: async (path, requestSignal) => {
+            if (path === comparison) {
+              throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+            }
+            return original.get(path, requestSignal);
+          },
+          bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+        };
+        const validation = validateRelease(
+          fixture.payload,
+          receivedAt,
+          github,
+          fixture.registry.client,
+          signal,
+          { now },
+        );
+        if (status === 404 || status === 410) {
+          await expect(validation).rejects.toBeInstanceOf(RejectedDelivery);
+        } else {
+          await expect(validation).rejects.toBeInstanceOf(GitHubHTTPError);
+        }
+      }
+    },
+  );
+
+  test.each([
     ["original_tag", "v7.2.131"],
     ["plus_tag", "v7.2.127-2"],
     ["pre_sync_head", "f".repeat(40)],
     ["base_fork_commit", "f".repeat(40)],
+    ["original_repository", "wrong/original"],
+    ["plus_repository", "wrong/plus"],
+    ["models_repository", "wrong/models"],
+    ["original_head", "f".repeat(40)],
+    ["plus_tag_head", "f".repeat(40)],
+    ["plus_head", "f".repeat(40)],
+    ["models_commit", "f".repeat(40)],
+    ["plus_head_included", "true"],
+    ["plus_head_already_represented", "false"],
+    ["plus_head_delta_paths", "internal/example.go"],
+    ["unsafe_plus_head_delta_paths", "README.md"],
+    ["block_reason", "unexpected"],
+    ["fork_tag_prefix", "v7.2.131-unstableneutron"],
+    ["latest_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["latest_fork_models_commit", "f".repeat(40)],
+    ["latest_fork_suffix", "9"],
+    ["next_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["expected_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["safe_sync_id", "wrong"],
+    ["plan_fingerprint", "f".repeat(40)],
+    ["candidate_branch", "upstream-sync/wrong"],
+    ["snapshot_namespace", "refs/upstream-sync/wrong"],
+    ["original_snapshot_ref", "refs/upstream-sync/wrong/original"],
+    ["plus_tag_snapshot_ref", "refs/upstream-sync/wrong/plus-tag"],
+    ["plus_head_snapshot_ref", "refs/upstream-sync/wrong/plus-head"],
+    ["models_snapshot_ref", "refs/upstream-sync/wrong/models"],
+    ["target_drift_summary", "unexpected"],
+    ["has_changes", "true"],
+    ["target_drift", "true"],
+    ["blocked", "true"],
   ])("rejects a wrong final planner %s", async (key, wrongValue) => {
     const fixture = releaseFixture("hotfix");
     const plan = new TextDecoder()

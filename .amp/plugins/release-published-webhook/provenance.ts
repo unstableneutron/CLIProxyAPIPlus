@@ -182,6 +182,29 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
     sha(values[key], `final plan ${key}`);
   for (const key of ["plus_head_included","plus_head_already_represented","blocked","target_drift","has_changes"])
     if (values[key] !== "true" && values[key] !== "false") throw new RejectedDelivery("final plan boolean differs");
+  const tagParts = /^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron)\.([0-9]+)$/.exec(tag);
+  if (!tagParts) throw new RejectedDelivery("final plan release tag differs");
+  const suffix = Number(tagParts[2]);
+  const fingerprintInput = [
+    `base_fork_commit=${commit}`,
+    `original_tag=${state.ORIGINAL_TAG}`,
+    `original_commit=${state.ORIGINAL_COMMIT}`,
+    `plus_tag=${state.PLUS_TAG}`,
+    `plus_tag_commit=${state.PLUS_TAG_COMMIT}`,
+    `plus_head_commit=${state.PLUS_HEAD_COMMIT}`,
+    `plus_head_included=${state.PLUS_HEAD_INCLUDED}`,
+    `models_commit=${state.MODELS_COMMIT}`,
+    `expected_fork_tag=${tag}`,
+    "",
+  ].join("\n");
+  const fingerprintBody = Buffer.from(fingerprintInput);
+  const expectedFingerprint = createHash("sha1")
+    .update(`blob ${fingerprintBody.length}\0`)
+    .update(fingerprintBody)
+    .digest("hex");
+  const safeSyncID = state.SYNC_ID.replace(/[^A-Za-z0-9._-]/g, "-");
+  const expectedCandidate = `upstream-sync/${safeSyncID}-${expectedFingerprint.slice(0, 12)}`;
+  const snapshotNamespace = `refs/upstream-sync/${expectedFingerprint}`;
   if (values.original_tag !== state.ORIGINAL_TAG || values.plus_tag !== state.PLUS_TAG ||
       values.pre_sync_head !== commit || values.base_fork_commit !== commit ||
       values.original_repository !== state.ORIGINAL_REPOSITORY || values.plus_repository !== state.PLUS_REPOSITORY ||
@@ -189,6 +212,13 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
       values.plus_tag_head !== state.PLUS_TAG_COMMIT || values.plus_head !== state.PLUS_HEAD_COMMIT || values.models_commit !== state.MODELS_COMMIT ||
       values.plus_head_included !== state.PLUS_HEAD_INCLUDED || values.safe_sync_id !== state.SYNC_ID ||
       values.latest_fork_tag !== tag || values.expected_fork_tag !== tag || values.latest_fork_models_commit !== state.MODELS_COMMIT ||
+      values.plus_head_already_represented !== "true" || values.plus_head_delta_paths !== "" || values.unsafe_plus_head_delta_paths !== "" ||
+      values.block_reason !== "" || values.fork_tag_prefix !== tagParts[1] || values.latest_fork_suffix !== String(suffix) ||
+      values.next_fork_tag !== `${tagParts[1]}.${suffix + 1}` || values.plan_fingerprint !== expectedFingerprint ||
+      values.candidate_branch !== expectedCandidate || values.snapshot_namespace !== snapshotNamespace ||
+      values.original_snapshot_ref !== `${snapshotNamespace}/original` || values.plus_tag_snapshot_ref !== `${snapshotNamespace}/plus-tag` ||
+      values.plus_head_snapshot_ref !== `${snapshotNamespace}/plus-head` || values.models_snapshot_ref !== `${snapshotNamespace}/models` ||
+      values.target_drift_summary !== "" ||
       values.has_changes !== "false" || values.target_drift !== "false" || values.blocked !== "false")
     throw new RejectedDelivery("final plan identity differs");
 }
@@ -203,8 +233,23 @@ function validateRunState(bytes: Uint8Array, state: UpstreamState, receipt: JSON
   exactKeys(final,["status","plan_fingerprint","has_changes","target_drift","blocked"],"run state final plan"); exactKeys(promotion,["commit","tag"],"run state promotion");
   exactKeys(release,["url","assets","image","image_digest","platforms","architecture_images"],"run state release");
   const original=object(target.original,"run state original"), plus=object(target.plus,"run state plus"); exactKeys(original,["tag","commit"],"run state original"); exactKeys(plus,["tag","tag_commit","head","head_included"],"run state plus");
-  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || !SHA.test(string(final.plan_fingerprint,"final fingerprint")) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || JSON.stringify(release)!==JSON.stringify({url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images})) throw new RejectedDelivery("run state identity differs");
+  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || !SHA.test(string(final.plan_fingerprint,"final fingerprint")) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || !sameJSON(release,{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images})) throw new RejectedDelivery("run state identity differs");
   if (repair.imported===false ? (repair.pr!==null || repair.sha!==null) : (repair.imported!==true || !Number.isSafeInteger(repair.pr) || (repair.pr as number) <= 0 || repair.sha!==commit)) throw new RejectedDelivery("run state repair differs");
+}
+
+function sameJSON(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+      left.every((entry, index) => sameJSON(entry, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  const leftObject = left as JSONObject;
+  const rightObject = right as JSONObject;
+  const leftKeys = Object.keys(leftObject).sort();
+  const rightKeys = Object.keys(rightObject).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) =>
+    key === rightKeys[index] && sameJSON(leftObject[key], rightObject[key]));
 }
 
 function object(value: unknown, field: string): JSONObject {
@@ -1448,9 +1493,11 @@ export async function validateRelease(
     }
 
     const baseComparison = object(
-      await client.get(
-        `/repos/${REPOSITORY}/compare/${baseCommit}...${commit}`,
-        signal,
+      await historicalEvidence(() =>
+        client.get(
+          `/repos/${REPOSITORY}/compare/${baseCommit}...${commit}`,
+          signal,
+        ),
       ),
       "hotfix base comparison",
     );
