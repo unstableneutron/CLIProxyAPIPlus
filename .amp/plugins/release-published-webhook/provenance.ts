@@ -176,6 +176,10 @@ interface ReceiptCore {
 
 const PLAN_KEYS = ["original_tag","plus_tag","pre_sync_head","base_fork_commit","original_repository","plus_repository","models_repository","original_head","plus_tag_head","plus_head","models_commit","plus_head_included","plus_head_already_represented","plus_head_delta_paths","unsafe_plus_head_delta_paths","blocked","block_reason","fork_tag_prefix","latest_fork_tag","latest_fork_models_commit","latest_fork_suffix","next_fork_tag","expected_fork_tag","safe_sync_id","plan_fingerprint","candidate_branch","snapshot_namespace","original_snapshot_ref","plus_tag_snapshot_ref","plus_head_snapshot_ref","models_snapshot_ref","target_drift","target_drift_summary","has_changes"];
 
+function safeRefComponent(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
 function expectedFinalPlanFingerprint(state: UpstreamState, tag: string, commit: string): string {
   const input = [
     `base_fork_commit=${commit}`,
@@ -215,7 +219,7 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
   if (!tagParts) throw new RejectedDelivery("final plan release tag differs");
   const suffix = Number(tagParts[2]);
   const expectedFingerprint = expectedFinalPlanFingerprint(state, tag, commit);
-  const safeSyncID = state.SYNC_ID.replace(/[^A-Za-z0-9._-]/g, "-");
+  const safeSyncID = safeRefComponent(state.SYNC_ID);
   const expectedCandidate = `upstream-sync/${safeSyncID}-${expectedFingerprint.slice(0, 12)}`;
   const snapshotNamespace = `refs/upstream-sync/${expectedFingerprint}`;
   if (values.original_tag !== state.ORIGINAL_TAG || values.plus_tag !== state.PLUS_TAG ||
@@ -486,7 +490,7 @@ export function parseUpstreamState(bytes: Uint8Array): UpstreamState {
     throw new RejectedDelivery("state tag is invalid");
   }
 
-  const syncID = `original-${state.ORIGINAL_TAG}_plus-${state.PLUS_TAG}`;
+  const syncID = `original-${safeRefComponent(state.ORIGINAL_TAG)}_plus-${safeRefComponent(state.PLUS_TAG)}`;
   const candidateBranch = `upstream-sync/${syncID}-${state.PLAN_FINGERPRINT.slice(0, 12)}`;
   if (state.SYNC_ID !== syncID || state.CANDIDATE_BRANCH !== candidateBranch) {
     throw new RejectedDelivery("state linkage differs");

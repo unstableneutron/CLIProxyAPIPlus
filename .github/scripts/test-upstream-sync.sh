@@ -152,6 +152,28 @@ test_plan_emits_exact_snapshot_and_candidate_branch() {
   rm -rf "${root}"
 }
 
+test_plan_sanitizes_plus_in_source_tag_identity() {
+  local root fork out
+  root=$(mktemp -d)
+  fork=$(setup_base_graph "${root}")
+  run_git -C "${root}/plus" tag -d v7.1.45-0 >/dev/null
+  run_git -C "${root}/plus" tag v7.1.45+meta
+  out=${root}/plan.out
+
+  (
+    cd "${fork}"
+    FORCE_REBUILD=false GITHUB_OUTPUT="${out}" "${HELPER}" plan >/dev/null
+  )
+
+  assert_equal v7.1.45+meta "$(output_value "${out}" plus_tag)" \
+    "planner plus source tag"
+  assert_equal original-v7.1.66_plus-v7.1.45-meta \
+    "$(output_value "${out}" safe_sync_id)" "planner sanitized sync ID"
+  assert_contains "${out}" \
+    "candidate_branch=upstream-sync/original-v7.1.66_plus-v7.1.45-meta-"
+  rm -rf "${root}"
+}
+
 test_materialize_uses_namespaced_refs_without_network() {
   local root
   root=$(mktemp -d)
@@ -1438,6 +1460,7 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
 
 main() {
   test_plan_emits_exact_snapshot_and_candidate_branch
+  test_plan_sanitizes_plus_in_source_tag_identity
   test_materialize_uses_namespaced_refs_without_network
   test_same_target_produces_same_plan_fingerprint
   test_moved_target_produces_new_plan_fingerprint

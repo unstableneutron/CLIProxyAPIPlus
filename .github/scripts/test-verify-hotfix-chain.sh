@@ -6,7 +6,9 @@ VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
 ROOT_TAG=v7.2.131-unstableneutron.0
 FIRST_TAG=v7.2.131-unstableneutron.1
 SECOND_TAG=v7.2.131-unstableneutron.2
-SYNC_ID=original-v7.2.131_plus-v7.2.127-3
+ORIGINAL_SOURCE_TAG=v7.2.131
+PLUS_SOURCE_TAG=v7.2.127-3
+SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-${PLUS_SOURCE_TAG}
 FINGERPRINT=eeef3819ca9dfb38b4528fc5dabc3324d538b19b
 IMAGE=ghcr.io/unstableneutron/cli-proxy-api-plus
 
@@ -126,9 +128,9 @@ write_root_fixture() {
   final_fingerprint=$(
     printf '%s\n' \
       "base_fork_commit=${commit}" \
-      'original_tag=v7.2.131' \
+      "original_tag=${ORIGINAL_SOURCE_TAG}" \
       'original_commit=2222222222222222222222222222222222222222' \
-      'plus_tag=v7.2.127-3' \
+      "plus_tag=${PLUS_SOURCE_TAG}" \
       'plus_tag_commit=3333333333333333333333333333333333333333' \
       'plus_head_commit=3333333333333333333333333333333333333333' \
       'plus_head_included=false' \
@@ -176,14 +178,16 @@ write_root_fixture() {
     --arg fingerprint "${FINGERPRINT}" \
     --arg final_fingerprint "${final_fingerprint}" \
     --arg candidate "upstream-sync/${SYNC_ID}-${FINGERPRINT:0:12}" \
+    --arg original_tag "${ORIGINAL_SOURCE_TAG}" \
+    --arg plus_tag "${PLUS_SOURCE_TAG}" \
     --slurpfile receipt "${node}/upstream-sync-receipt.json" '
       {
         schema_version: 1,
         state: "released",
         target: {
           base_fork_commit: ("1" * 40),
-          original: {tag: "v7.2.131", commit: ("2" * 40)},
-          plus: {tag: "v7.2.127-3", tag_commit: ("3" * 40), head: ("3" * 40), head_included: false},
+          original: {tag: $original_tag, commit: ("2" * 40)},
+          plus: {tag: $plus_tag, tag_commit: ("3" * 40), head: ("3" * 40), head_included: false},
           models_commit: ("4" * 40),
           sync_id: $sync_id,
           plan_fingerprint: $fingerprint,
@@ -230,9 +234,9 @@ write_final_plan() {
   fingerprint=$(
     printf '%s\n' \
       "base_fork_commit=${commit}" \
-      'original_tag=v7.2.131' \
+      "original_tag=${ORIGINAL_SOURCE_TAG}" \
       'original_commit=2222222222222222222222222222222222222222' \
-      'plus_tag=v7.2.127-3' \
+      "plus_tag=${PLUS_SOURCE_TAG}" \
       'plus_tag_commit=3333333333333333333333333333333333333333' \
       'plus_head_commit=3333333333333333333333333333333333333333' \
       'plus_head_included=false' \
@@ -242,8 +246,8 @@ write_final_plan() {
   )
   namespace="refs/upstream-sync/${fingerprint}"
   cat > "${root}/fixtures/${FIRST_TAG}/final-plan.out" <<EOF
-original_tag=v7.2.131
-plus_tag=v7.2.127-3
+original_tag=${ORIGINAL_SOURCE_TAG}
+plus_tag=${PLUS_SOURCE_TAG}
 pre_sync_head=${commit}
 base_fork_commit=${commit}
 original_repository=router-for-me/CLIProxyAPI
@@ -444,10 +448,10 @@ SYNC_ID=${SYNC_ID}
 PLAN_FINGERPRINT=${FINGERPRINT}
 BASE_FORK_COMMIT=1111111111111111111111111111111111111111
 ORIGINAL_REPOSITORY=router-for-me/CLIProxyAPI
-ORIGINAL_TAG=v7.2.131
+ORIGINAL_TAG=${ORIGINAL_SOURCE_TAG}
 ORIGINAL_COMMIT=2222222222222222222222222222222222222222
 PLUS_REPOSITORY=kaitranntt/CLIProxyAPIPlus
-PLUS_TAG=v7.2.127-3
+PLUS_TAG=${PLUS_SOURCE_TAG}
 PLUS_TAG_COMMIT=3333333333333333333333333333333333333333
 PLUS_HEAD_COMMIT=3333333333333333333333333333333333333333
 PLUS_HEAD_INCLUDED=false
@@ -533,6 +537,41 @@ test_workflow_legacy_preflight_and_chained_parent() {
     "${root}/second-chain.json" >/dev/null \
     || fail "schema-v2 chain output did not bind parent and root"
   rm -rf "${root}"
+}
+
+test_accepts_planner_sanitized_source_tag_linkage() (
+  local root
+  PLUS_SOURCE_TAG=v7.2.127+meta
+  SYNC_ID=original-${ORIGINAL_SOURCE_TAG}_plus-v7.2.127-meta
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  run_chain \
+    "${root}" "${SECOND_TAG}" "${FIRST_TAG}" \
+    "$(cat "${root}/second.commit")" "$(cat "${root}/first.commit")" \
+    "${root}/source-tag-chain.json" >/dev/null
+  rm -rf "${root}"
+)
+
+test_rejects_noncanonical_historical_checksum_separators() {
+  local root checksum release separator digest
+  for separator in tabs mixed; do
+    root=$(mktemp -d)
+    setup_fixture "${root}"
+    checksum="${root}/fixtures/${FIRST_TAG}/checksums.txt"
+    release="${root}/fixtures/${FIRST_TAG}/release.json"
+    if [ "${separator}" = tabs ]; then
+      sed -i $'s/  /\t\t/' "${checksum}"
+    else
+      sed -i $'s/  / \t/' "${checksum}"
+    fi
+    digest=$(sha256_digest "${checksum}")
+    jq --arg digest "${digest}" \
+      '(.assets[] | select(.name == "checksums.txt") | .digest) = $digest' \
+      "${release}" > "${release}.new"
+    mv "${release}.new" "${release}"
+    expect_second_failure "${root}" "checksums.txt for ${FIRST_TAG} is malformed"
+    rm -rf "${root}"
+  done
 }
 
 test_rejects_historical_receipt_and_planner_drift() {
@@ -693,6 +732,8 @@ main() {
     command -v "${command}" >/dev/null || fail "${command} is required"
   done
   test_workflow_legacy_preflight_and_chained_parent
+  test_accepts_planner_sanitized_source_tag_linkage
+  test_rejects_noncanonical_historical_checksum_separators
   test_rejects_historical_receipt_and_planner_drift
   test_rejects_schema_v2_at_suffix_one
   echo "[OK] hotfix chain verifier tests passed"

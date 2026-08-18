@@ -15,6 +15,10 @@ die() {
   exit 1
 }
 
+safe_ref_component() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
+}
+
 TAG=""
 EXPECTED_COMMIT=""
 PARENT_TAG=""
@@ -124,8 +128,10 @@ validate_upstream_state() {
     true|false) ;;
     *) die "candidate upstream-sync state boolean is malformed" ;;
   esac
-  local derived_sync
-  derived_sync="original-$(state_field ORIGINAL_TAG)_plus-$(state_field PLUS_TAG)"
+  local original_tag plus_tag derived_sync
+  original_tag=$(state_field ORIGINAL_TAG)
+  plus_tag=$(state_field PLUS_TAG)
+  derived_sync="original-$(safe_ref_component "${original_tag}")_plus-$(safe_ref_component "${plus_tag}")"
   local state_fingerprint
   state_fingerprint=$(state_field PLAN_FINGERPRINT)
   local derived_candidate
@@ -367,9 +373,10 @@ verify_release_and_link() {
   [ "sha256:$(sha256sum "${checksum_file}" | awk '{ print $1 }')" = "${checksum_digest}" ] \
     || die "checksums.txt bytes for ${tag} do not match the release asset digest"
   local seen_checksums="${node_dir}/checksum-names"
+  local checksum_line_pattern='^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*\.(tar\.gz|zip))$'
   : > "${seen_checksums}"
   while IFS= read -r line || [ -n "${line}" ]; do
-    [[ "${line}" =~ ^([0-9a-f]{64})[[:space:]][[:space:]]([A-Za-z0-9][A-Za-z0-9._+-]*\.(tar\.gz|zip))$ ]] \
+    [[ "${line}" =~ ${checksum_line_pattern} ]] \
       || die "checksums.txt for ${tag} is malformed"
     local expected_digest="sha256:${BASH_REMATCH[1]}" asset_name=${BASH_REMATCH[2]} api_digest
     grep -Fxq "${asset_name}" "${seen_checksums}" && die "checksums.txt for ${tag} has duplicate entries"

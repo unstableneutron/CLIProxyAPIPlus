@@ -12,6 +12,7 @@ import {
   RejectedDelivery,
   RegistryHTTPError,
   RetryableNotReady,
+  parseUpstreamState,
   revalidateRelease,
   validateRelease,
   verifyRegistry,
@@ -48,12 +49,16 @@ function storedZip(files: Record<string, Uint8Array>): Uint8Array {
   const central=Buffer.concat(centrals), end=Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(centrals.length,8); end.writeUInt16LE(centrals.length,10); end.writeUInt32LE(central.length,12); end.writeUInt32LE(offset,16); return new Uint8Array(Buffer.concat([...locals,central,end]));
 }
 
-function fixturePlanFingerprint(tag: string, commit: string): string {
+function fixturePlanFingerprint(
+  tag: string,
+  commit: string,
+  plusTag = "v7.2.127-3",
+): string {
   const input = [
     `base_fork_commit=${commit}`,
     "original_tag=v7.2.132",
     `original_commit=${"2".repeat(40)}`,
-    "plus_tag=v7.2.127-3",
+    `plus_tag=${plusTag}`,
     `plus_tag_commit=${"3".repeat(40)}`,
     `plus_head_commit=${"3".repeat(40)}`,
     "plus_head_included=false",
@@ -68,16 +73,16 @@ function fixturePlanFingerprint(tag: string, commit: string): string {
     .digest("hex");
 }
 
-function runState(receipt: Record<string,any>, commit:string, tag:string) { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:"v7.2.127-3",tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
+function runState(receipt: Record<string,any>, commit:string, tag:string, plusTag="v7.2.127-3") { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:plusTag,tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit,plusTag),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
 
-function finalPlan(tag: string, commit: string) {
+function finalPlan(tag: string, commit: string, plusTag = "v7.2.127-3") {
   const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
-  const syncID = "original-v7.2.132_plus-v7.2.127-3";
-  const fingerprint = fixturePlanFingerprint(tag, commit);
+  const syncID = `original-v7.2.132_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`;
+  const fingerprint = fixturePlanFingerprint(tag, commit, plusTag);
   const namespace = `refs/upstream-sync/${fingerprint}`;
   const values: Record<string, string> = {
     original_tag: "v7.2.132",
-    plus_tag: "v7.2.127-3",
+    plus_tag: plusTag,
     pre_sync_head: commit,
     base_fork_commit: commit,
     original_repository: "router-for-me/CLIProxyAPI",
@@ -273,9 +278,12 @@ function makeAsset(
   };
 }
 
-function stateFile(expectedTag: string): Uint8Array {
+function stateFile(
+  expectedTag: string,
+  plusTag = "v7.2.127-3",
+): Uint8Array {
   const fingerprint = "14e308bd7b8de821e7d600e938543cbec944f6fb";
-  const syncID = "original-v7.2.132_plus-v7.2.127-3";
+  const syncID = `original-v7.2.132_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`;
   return bytes(
     [
       "SCHEMA_VERSION=2",
@@ -286,7 +294,7 @@ function stateFile(expectedTag: string): Uint8Array {
       "ORIGINAL_TAG=v7.2.132",
       `ORIGINAL_COMMIT=${"2".repeat(40)}`,
       "PLUS_REPOSITORY=kaitranntt/CLIProxyAPIPlus",
-      "PLUS_TAG=v7.2.127-3",
+      `PLUS_TAG=${plusTag}`,
       `PLUS_TAG_COMMIT=${"3".repeat(40)}`,
       `PLUS_HEAD_COMMIT=${"3".repeat(40)}`,
       "PLUS_HEAD_INCLUDED=false",
@@ -301,6 +309,7 @@ function stateFile(expectedTag: string): Uint8Array {
 
 function releaseFixture(
   kind: "upstream" | "hotfix" = "upstream",
+  plusTag = "v7.2.127-3",
 ): ReleaseFixture {
   const hotfix = kind === "hotfix";
   const baseTag = "v7.2.132-unstableneutron.0";
@@ -336,7 +345,7 @@ function releaseFixture(
   const architectureImages = structuredClone(registry.architectureImages);
   const receipt: Record<string, any> = {
     schema_version: 2,
-    sync_id: "original-v7.2.132_plus-v7.2.127-3",
+    sync_id: `original-v7.2.132_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`,
     plan_fingerprint: "14e308bd7b8de821e7d600e938543cbec944f6fb",
     main_commit: currentCommit,
     tag: currentTag,
@@ -349,7 +358,7 @@ function releaseFixture(
     workflow_run_id: String(currentWorkflowID),
     architecture_images: architectureImages,
   };
-  const stateBytes = stateFile(baseTag);
+  const stateBytes = stateFile(baseTag, plusTag);
   if (hotfix) {
     Object.assign(receipt, {
       receipt_type: "hotfix-release",
@@ -579,7 +588,7 @@ function releaseFixture(
 
   const addArtifact = (runID:number, artifactKind:"upstream"|"hotfix", artifactReceipt:Record<string,any>, artifactCommit:string, artifactTag:string, runHead:string) => {
     const receiptFile = bytes(JSON.stringify(artifactReceipt));
-    const files = artifactKind === "upstream" ? {"nested/upstream-sync-receipt.json":receiptFile,"work/run-state.json":runState(artifactReceipt,artifactCommit,artifactTag)} : {"hotfix-release-receipt.json":receiptFile,"verify/independently-verified-receipt.json":receiptFile,"final-plan.out":finalPlan(artifactTag,artifactCommit)};
+    const files = artifactKind === "upstream" ? {"nested/upstream-sync-receipt.json":receiptFile,"work/run-state.json":runState(artifactReceipt,artifactCommit,artifactTag,plusTag)} : {"hotfix-release-receipt.json":receiptFile,"verify/independently-verified-receipt.json":receiptFile,"final-plan.out":finalPlan(artifactTag,artifactCommit,plusTag)};
     const zip=storedZip(files), id=runID+10000, url=`https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${id}/zip`;
     assetBytes.set(url,zip);
     values.set(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`,{total_count:1,artifacts:[{id,name:`${artifactKind === "upstream" ? "upstream-sync" : "hotfix-release"}-receipt-${runID}-1`,digest:sha256(zip),size_in_bytes:zip.length,expired:false,archive_download_url:url,workflow_run:{id:runID,repository_id:REPOSITORY_ID,head_repository_id:REPOSITORY_ID,head_sha:runHead}}]});
@@ -967,6 +976,17 @@ function replaceUpstreamRunState(fixture: ReleaseFixture, state: Uint8Array) {
 }
 
 describe("upstream release provenance", () => {
+  test("accepts planner-sanitized linkage for source tags containing plus", () => {
+    const state = parseUpstreamState(
+      stateFile("v7.2.132-unstableneutron.0", "v7.2.127+meta"),
+    );
+    expect(state.PLUS_TAG).toBe("v7.2.127+meta");
+    expect(state.SYNC_ID).toBe("original-v7.2.132_plus-v7.2.127-meta");
+    expect(state.CANDIDATE_BRANCH).toBe(
+      `upstream-sync/${state.SYNC_ID}-${state.PLAN_FINGERPRINT.slice(0, 12)}`,
+    );
+  });
+
   test("accepts an exact verified upstream release", async () => {
     const fixture = releaseFixture();
     const result = await validate(fixture);
@@ -1382,6 +1402,13 @@ describe("upstream release provenance", () => {
 });
 
 describe("hotfix release provenance", () => {
+  test("accepts planner-sanitized source tags through legacy hotfix provenance", async () => {
+    const fixture = releaseFixture("hotfix", "v7.2.127+meta");
+    const result = await validate(fixture);
+    expect(result.kind).toBe("hotfix");
+    expect(result.syncID).toBe("original-v7.2.132_plus-v7.2.127-meta");
+  });
+
   test("accepts an exact hotfix anchored to an accepted upstream release", async () => {
     const fixture = releaseFixture("hotfix");
     const result = await validate(fixture);
