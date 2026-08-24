@@ -1014,6 +1014,7 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${recovery}" "--clobber"
 
   assert_contains "${workflow}" "receipt_name: upstream-sync-receipt.json"
+  assert_contains "${workflow}" $'permissions:\n  actions: read\n  contents: write'
   assert_contains "${workflow}" "requires an absent receipt identity"
   assert_contains "${workflow}" "Attach immutable receipt after complete evidence publication"
   assert_not_contains "${workflow}" "--clobber"

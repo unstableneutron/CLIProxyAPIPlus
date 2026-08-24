@@ -302,6 +302,7 @@ test_workflow_contract_is_fail_closed() {
     fail "candidate absence policy must precede every tag, release, and GHCR mutation"
   fi
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/release.yaml"
+  assert_contains "${WORKFLOW}" $'permissions:\n  actions: read\n  contents: write'
   assert_contains "${WORKFLOW}" "uses: ./.github/workflows/docker-image.yml"
   assert_contains "${WORKFLOW}" "verify-hotfix-release.sh"
   assert_contains "${WORKFLOW}" "hotfix-release-receipt.json"
