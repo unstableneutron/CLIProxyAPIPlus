@@ -204,7 +204,10 @@ validate_release() {
     --argjson expected "${EXPECTED_ASSETS}" '
       .tag_name == $tag and .prerelease == false and .body == $body and
       .target_commitish == "main" and
-      .html_url == ("https://github.com/" + $repo + "/releases/tag/" + $tag) and
+      (($state == "draft" and
+        (.html_url | test("^https://github[.]com/" + $repo + "/releases/tag/untagged-[0-9a-f]{20}$"))) or
+       ($state == "stable" and
+        .html_url == ("https://github.com/" + $repo + "/releases/tag/" + $tag))) and
       .assets_url == ("https://api.github.com/repos/" + $repo + "/releases/" + (.id | tostring) + "/assets") and
       .author.login == "github-actions[bot]" and .author.id == 41898282 and .author.type == "Bot" and
       (($state == "draft" and .draft == true) or ($state == "stable" and .draft == false)) and

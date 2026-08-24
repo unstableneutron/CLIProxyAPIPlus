@@ -122,7 +122,7 @@ case "${method}:${path}" in
     jq '{
       id: 900,
       tag_name: .tag_name,
-      html_url: ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + .tag_name),
+      html_url: "https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/untagged-aaaaaaaaaaaaaaaaaaaa",
       assets_url: "https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/900/assets",
       draft: true,
       prerelease: false,
@@ -139,7 +139,10 @@ case "${method}:${path}" in
     printf 'publish\n' >> "${STUB_CALLS}"
     [ "${form_draft}" = false ] || exit 2
     [ "${STUB_FAIL_PUBLISH_BEFORE_ACCEPT:-false}" = true ] && exit 1
-    jq '.draft = false' "${STUB_RELEASE_FILE}" > "${STUB_RELEASE_FILE}.new"
+    jq --arg tag "${STUB_RELEASE_TAG}" '
+      .draft = false |
+      .html_url = ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + $tag)
+    ' "${STUB_RELEASE_FILE}" > "${STUB_RELEASE_FILE}.new"
     write_release "${STUB_RELEASE_FILE}.new"
     [ "${STUB_FAIL_PUBLISH_AFTER_ACCEPT:-false}" = true ] && exit 1
     cat "${STUB_RELEASE_FILE}"
@@ -258,9 +261,11 @@ write_release() {
     --arg tag "${TAG}" \
     --arg body "${body}" \
     --argjson draft "${draft}" \
-    --argjson assets "${assets}" '{
+    --argjson assets "${assets}" \
+    --arg stable_url "https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/${TAG}" \
+    --arg draft_url "https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/untagged-aaaaaaaaaaaaaaaaaaaa" '{
       id: 900, tag_name: $tag,
-      html_url: ("https://github.com/unstableneutron/CLIProxyAPIPlus/releases/tag/" + $tag),
+      html_url: (if $draft then $draft_url else $stable_url end),
       assets_url: "https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/900/assets",
       draft: $draft, prerelease: false, target_commitish: "main", body: $body,
       author: {login: "github-actions[bot]", id: 41898282, type: "Bot"}, assets: $assets
@@ -281,6 +286,7 @@ run_publisher() {
   STUB_EXPECTED_COMMIT="${COMMIT}" \
   STUB_CALLS="${root}/calls" \
   STUB_NEXT_ASSET_ID="${root}/next-asset-id" \
+  STUB_RELEASE_TAG="${TAG}" \
   STUB_COMMIT_COUNT="${root}/commit-count" \
   env "$@" \
     "${PUBLISHER}" "${TAG}" "${COMMIT}" "${RECEIPT}" \
@@ -404,7 +410,7 @@ test_reuses_pinned_evidence_and_rejects_drift() {
   GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
   STUB_RELEASE_FILE="${root}/release.json" STUB_ARTIFACT_ID="${ARTIFACT_ID}" \
   STUB_ARTIFACT_JSON="${root}/artifact.json" STUB_ARTIFACT_ZIP="${root}/artifact.zip" \
-  STUB_EXPECTED_COMMIT="${COMMIT}" STUB_CALLS="${root}/calls" \
+  STUB_EXPECTED_COMMIT="${COMMIT}" STUB_CALLS="${root}/calls" STUB_RELEASE_TAG="${TAG}" \
   STUB_NEXT_ASSET_ID="${root}/next-asset-id" STUB_COMMIT_COUNT="${root}/commit-count" \
     "${PUBLISHER}" "${TAG}" "${COMMIT}" "${RECEIPT}" \
       999 "staged-release-assets-${RUN_ID}-2" "sha256:$(printf 'f%.0s' {1..64})" \
