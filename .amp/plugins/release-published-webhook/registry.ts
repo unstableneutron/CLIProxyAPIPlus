@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
-import type { RegistryClient } from "./provenance";
+import { readBoundedResponse } from "./bounded-response";
+import {
+  MAXIMUM_REGISTRY_MANIFEST_BYTES,
+  RejectedDelivery,
+  RegistryHTTPError,
+  type RegistryClient,
+} from "./provenance";
 
 const REPOSITORY = "unstableneutron/cli-proxy-api-plus";
+export const MAXIMUM_REGISTRY_TOKEN_BYTES = 64_000;
 export const MANIFEST_ACCEPT = [
   "application/vnd.oci.image.index.v1+json",
   "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -20,8 +27,17 @@ export class PublicGhcrRegistry implements RegistryClient {
       this.token = await this.getToken(signal);
       response = await this.request(reference, signal);
     }
-    if (!response.ok) throw new Error(`registry returned ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!response.ok)
+      throw new RegistryHTTPError(
+        response.status,
+        `registry returned ${response.status}`,
+      );
+    const bytes = await readBoundedResponse(
+      response,
+      MAXIMUM_REGISTRY_MANIFEST_BYTES,
+      "registry manifest",
+      (message) => new RejectedDelivery(message),
+    );
     return {
       bytes,
       digest: response.headers.get("docker-content-digest") ?? "",
@@ -46,7 +62,20 @@ export class PublicGhcrRegistry implements RegistryClient {
     const response = await this.fetcher(url, { signal });
     if (!response.ok)
       throw new Error(`registry token service returned ${response.status}`);
-    const value: unknown = await response.json();
+    const bytes = await readBoundedResponse(
+      response,
+      MAXIMUM_REGISTRY_TOKEN_BYTES,
+      "registry token response",
+      (message) => new RejectedDelivery(message),
+    );
+    let value: unknown;
+    try {
+      value = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      );
+    } catch {
+      throw new RejectedDelivery("registry token service response invalid");
+    }
     if (
       !value ||
       typeof value !== "object" ||

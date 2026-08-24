@@ -1,15 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import releaseAssetContract from "../../../.github/release-asset-contract.json";
+import sharedRegistryIndex from "../../../.github/scripts/testdata/upstream-release/image-index.json";
 import {
   BOT_ID,
   BOT_LOGIN,
+  GitHubHTTPError,
   IMAGE,
+  MAXIMUM_REGISTRY_MANIFEST_BYTES,
   OWNER_ID,
   OWNER_LOGIN,
   REPOSITORY,
   REPOSITORY_ID,
   RejectedDelivery,
+  RegistryHTTPError,
   RetryableNotReady,
+  parseUpstreamState,
   revalidateRelease,
   validateRelease,
   verifyRegistry,
@@ -46,9 +52,84 @@ function storedZip(files: Record<string, Uint8Array>): Uint8Array {
   const central=Buffer.concat(centrals), end=Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(centrals.length,8); end.writeUInt16LE(centrals.length,10); end.writeUInt32LE(central.length,12); end.writeUInt32LE(offset,16); return new Uint8Array(Buffer.concat([...locals,central,end]));
 }
 
-function runState(receipt: Record<string,any>, commit:string, tag:string) { return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:"v7.2.132",commit:"2".repeat(40)},plus:{tag:"v7.2.127-3",tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:"b".repeat(40),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release:{url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images}})); }
+function fixturePlanFingerprint(
+  tag: string,
+  commit: string,
+  plusTag = "v7.2.127-3",
+  originalTag = "v7.2.132",
+): string {
+  const input = [
+    `base_fork_commit=${commit}`,
+    `original_tag=${originalTag}`,
+    `original_commit=${"2".repeat(40)}`,
+    `plus_tag=${plusTag}`,
+    `plus_tag_commit=${"3".repeat(40)}`,
+    `plus_head_commit=${"3".repeat(40)}`,
+    "plus_head_included=false",
+    `models_commit=${"4".repeat(40)}`,
+    `expected_fork_tag=${tag}`,
+    "",
+  ].join("\n");
+  const body = Buffer.from(input);
+  return createHash("sha1")
+    .update(`blob ${body.length}\0`)
+    .update(body)
+    .digest("hex");
+}
 
-function finalPlan(tag:string, commit:string) { const values: Record<string,string>={original_tag:"v7.2.132",plus_tag:"v7.2.127-3",pre_sync_head:commit,base_fork_commit:commit,original_repository:"router-for-me/CLIProxyAPI",plus_repository:"kaitranntt/CLIProxyAPIPlus",models_repository:"router-for-me/models",original_head:"2".repeat(40),plus_tag_head:"3".repeat(40),plus_head:"3".repeat(40),models_commit:"4".repeat(40),plus_head_included:"false",plus_head_already_represented:"true",plus_head_delta_paths:"",unsafe_plus_head_delta_paths:"",blocked:"false",block_reason:"",fork_tag_prefix:"v7.2.132-unstableneutron",latest_fork_tag:tag,latest_fork_models_commit:"4".repeat(40),latest_fork_suffix:"1",next_fork_tag:tag,expected_fork_tag:tag,safe_sync_id:"original-v7.2.132_plus-v7.2.127-3",plan_fingerprint:"b".repeat(40),candidate_branch:"upstream-sync/x",snapshot_namespace:"refs/upstream-sync/x",original_snapshot_ref:"refs/upstream-sync/x/original",plus_tag_snapshot_ref:"refs/upstream-sync/x/plus-tag",plus_head_snapshot_ref:"refs/upstream-sync/x/plus-head",models_snapshot_ref:"refs/upstream-sync/x/models",target_drift:"false",target_drift_summary:"",has_changes:"false"}; return bytes(Object.entries(values).map(([k,v])=>`${k}=${v}`).join("\n")+"\n"); }
+function runState(receipt: Record<string,any>, commit:string, tag:string, plusTag="v7.2.127-3", originalTag="v7.2.132") {
+  const release: Record<string, unknown> = {url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images};
+  if (receipt.schema_version === 3) release.asset_identities = receipt.release_asset_identities;
+  return bytes(JSON.stringify({schema_version:1,state:"released",target:{base_fork_commit:"1".repeat(40),original:{tag:originalTag,commit:"2".repeat(40)},plus:{tag:plusTag,tag_commit:"3".repeat(40),head:"3".repeat(40),head_included:false},models_commit:"4".repeat(40),sync_id:receipt.sync_id,plan_fingerprint:receipt.plan_fingerprint,expected_fork_tag:tag,target_drift:true,blocked:false},candidate:{branch:`upstream-sync/${receipt.sync_id}-${receipt.plan_fingerprint.slice(0,12)}`,sha:commit,acceptable:true,validation_status:"passed"},repair:{imported:false,pr:null,sha:null},final_plan:{status:"clean-noop",plan_fingerprint:fixturePlanFingerprint(tag,commit,plusTag,originalTag),has_changes:false,target_drift:false,blocked:false},runtime_smoke:"not_run",vn3_deployed:false,promotion:{commit,tag},release}));
+}
+
+function finalPlan(tag: string, commit: string, plusTag = "v7.2.127-3", originalTag = "v7.2.132") {
+  const tagParts = /^(.*)\.([0-9]+)$/.exec(tag)!;
+  const syncID = `original-${originalTag.replace(/[^A-Za-z0-9._-]/g, "-")}_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`;
+  const fingerprint = fixturePlanFingerprint(tag, commit, plusTag, originalTag);
+  const namespace = `refs/upstream-sync/${fingerprint}`;
+  const values: Record<string, string> = {
+    original_tag: originalTag,
+    plus_tag: plusTag,
+    pre_sync_head: commit,
+    base_fork_commit: commit,
+    original_repository: "router-for-me/CLIProxyAPI",
+    plus_repository: "kaitranntt/CLIProxyAPIPlus",
+    models_repository: "router-for-me/models",
+    original_head: "2".repeat(40),
+    plus_tag_head: "3".repeat(40),
+    plus_head: "3".repeat(40),
+    models_commit: "4".repeat(40),
+    plus_head_included: "false",
+    plus_head_already_represented: "true",
+    plus_head_delta_paths: "",
+    unsafe_plus_head_delta_paths: "",
+    blocked: "false",
+    block_reason: "",
+    fork_tag_prefix: tagParts[1],
+    latest_fork_tag: tag,
+    latest_fork_models_commit: "4".repeat(40),
+    latest_fork_suffix: String(Number(tagParts[2])),
+    next_fork_tag: `${tagParts[1]}.${Number(tagParts[2]) + 1}`,
+    expected_fork_tag: tag,
+    safe_sync_id: syncID,
+    plan_fingerprint: fingerprint,
+    candidate_branch: `upstream-sync/${syncID}-${fingerprint.slice(0, 12)}`,
+    snapshot_namespace: namespace,
+    original_snapshot_ref: `${namespace}/original`,
+    plus_tag_snapshot_ref: `${namespace}/plus-tag`,
+    plus_head_snapshot_ref: `${namespace}/plus-head`,
+    models_snapshot_ref: `${namespace}/models`,
+    target_drift: "false",
+    target_drift_summary: "",
+    has_changes: "false",
+  };
+  return bytes(
+    `${Object.entries(values)
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n")}\n`,
+  );
+}
 
 function encodedContent(value: Uint8Array) {
   return {
@@ -175,6 +256,8 @@ interface ReleaseFixture {
   currentTag: string;
   currentCommit: string;
   currentWorkflowID: number;
+  originalTag: string;
+  plusTag: string;
   stateBytes: Uint8Array;
   baseReceipt?: Record<string, any>;
   baseReceiptAsset?: Record<string, any>;
@@ -205,9 +288,50 @@ function makeAsset(
   };
 }
 
-function stateFile(expectedTag: string): Uint8Array {
+function makeReleaseArchiveAssets(
+  firstID: number,
+  tag: string,
+  label: string,
+  assetBytes: Map<string, Uint8Array>,
+) {
+  const archives = releaseAssetContract.archive_suffixes.map((suffix, index) => {
+    const name = `CLIProxyAPIPlus_${tag.slice(1)}_${suffix}`;
+    return makeAsset(
+      firstID + index,
+      name,
+      bytes(`${label}-${suffix}`),
+      assetBytes,
+    );
+  });
+  const checksumContent = archives
+    .map((asset) => `${asset.digest.slice(7)}  ${asset.name}\n`)
+    .join("");
+  const checksum = makeAsset(
+    firstID + archives.length,
+    "checksums.txt",
+    bytes(checksumContent),
+    assetBytes,
+  );
+  return {
+    archives,
+    archive: archives.find((asset) =>
+      asset.name.endsWith("_linux_amd64_no-plugin.tar.gz"),
+    )!,
+    checksum,
+    names: [...archives.map((asset) => asset.name), checksum.name].sort(),
+    digests: Object.fromEntries(
+      [...archives, checksum].map((asset) => [asset.name, asset.digest]),
+    ),
+  };
+}
+
+function stateFile(
+  expectedTag: string,
+  plusTag = "v7.2.127-3",
+  originalTag = "v7.2.132",
+): Uint8Array {
   const fingerprint = "14e308bd7b8de821e7d600e938543cbec944f6fb";
-  const syncID = "original-v7.2.132_plus-v7.2.127-3";
+  const syncID = `original-${originalTag.replace(/[^A-Za-z0-9._-]/g, "-")}_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`;
   return bytes(
     [
       "SCHEMA_VERSION=2",
@@ -215,10 +339,10 @@ function stateFile(expectedTag: string): Uint8Array {
       `PLAN_FINGERPRINT=${fingerprint}`,
       `BASE_FORK_COMMIT=${"1".repeat(40)}`,
       "ORIGINAL_REPOSITORY=router-for-me/CLIProxyAPI",
-      "ORIGINAL_TAG=v7.2.132",
+      `ORIGINAL_TAG=${originalTag}`,
       `ORIGINAL_COMMIT=${"2".repeat(40)}`,
       "PLUS_REPOSITORY=kaitranntt/CLIProxyAPIPlus",
-      "PLUS_TAG=v7.2.127-3",
+      `PLUS_TAG=${plusTag}`,
       `PLUS_TAG_COMMIT=${"3".repeat(40)}`,
       `PLUS_HEAD_COMMIT=${"3".repeat(40)}`,
       "PLUS_HEAD_INCLUDED=false",
@@ -233,10 +357,15 @@ function stateFile(expectedTag: string): Uint8Array {
 
 function releaseFixture(
   kind: "upstream" | "hotfix" = "upstream",
+  plusTag = "v7.2.127-3",
+  options: { originalTag?: string; rootSuffix?: number } = {},
 ): ReleaseFixture {
   const hotfix = kind === "hotfix";
-  const baseTag = "v7.2.132-unstableneutron.0";
-  const currentTag = hotfix ? "v7.2.132-unstableneutron.1" : baseTag;
+  const originalTag = options.originalTag ?? "v7.2.132";
+  const rootSuffix = options.rootSuffix ?? 0;
+  const prefix = `${originalTag}${originalTag.includes("-") ? "." : "-"}unstableneutron`;
+  const baseTag = `${prefix}.${rootSuffix}`;
+  const currentTag = hotfix ? `${prefix}.${rootSuffix + 1}` : baseTag;
   const baseCommit = "5".repeat(40);
   const currentCommit = hotfix ? "6".repeat(40) : baseCommit;
   const currentTagObject = hotfix ? "7".repeat(40) : "8".repeat(40);
@@ -254,34 +383,32 @@ function releaseFixture(
       if (reference !== "latest") registry.manifests.set(reference, manifest);
     }
   }
-  const archiveName = `CLIProxyAPIPlus_7.2.132-unstableneutron.${hotfix ? 1 : 0}_linux_amd64_no-plugin.tar.gz`;
-  const archiveContent = bytes(`archive-${kind}`);
-  const archiveAsset = makeAsset(11, archiveName, archiveContent, assetBytes);
-  const checksumContent = `${rawSHA256(archiveContent)}  ${archiveName}\n`;
-  const checksumAsset = makeAsset(
-    12,
-    "checksums.txt",
-    bytes(checksumContent),
+  const releaseArchiveAssets = makeReleaseArchiveAssets(
+    11,
+    currentTag,
+    `archive-${kind}`,
     assetBytes,
   );
+  const archiveAsset = releaseArchiveAssets.archive;
+  const checksumAsset = releaseArchiveAssets.checksum;
   const releaseURL = `https://github.com/${REPOSITORY}/releases/tag/${currentTag}`;
   const architectureImages = structuredClone(registry.architectureImages);
   const receipt: Record<string, any> = {
     schema_version: 2,
-    sync_id: "original-v7.2.132_plus-v7.2.127-3",
+    sync_id: `original-${originalTag.replace(/[^A-Za-z0-9._-]/g, "-")}_plus-${plusTag.replace(/[^A-Za-z0-9._-]/g, "-")}`,
     plan_fingerprint: "14e308bd7b8de821e7d600e938543cbec944f6fb",
     main_commit: currentCommit,
     tag: currentTag,
     tag_commit: currentCommit,
     release_url: releaseURL,
-    release_assets: [archiveName, "checksums.txt"].sort(),
+    release_assets: releaseArchiveAssets.names,
     image: `${IMAGE}:${currentTag}`,
     image_digest: registry.manifests.get(currentTag)!.digest,
     platforms: ["linux/amd64", "linux/arm64"],
     workflow_run_id: String(currentWorkflowID),
     architecture_images: architectureImages,
   };
-  const stateBytes = stateFile(baseTag);
+  const stateBytes = stateFile(baseTag, plusTag, originalTag);
   if (hotfix) {
     Object.assign(receipt, {
       receipt_type: "hotfix-release",
@@ -292,10 +419,7 @@ function releaseFixture(
         plan_fingerprint: receipt.plan_fingerprint,
         sha256: rawSHA256(stateBytes),
       },
-      release_asset_digests: {
-        [archiveName]: archiveAsset.digest,
-        "checksums.txt": checksumAsset.digest,
-      },
+      release_asset_digests: releaseArchiveAssets.digests,
       release_workflow: {
         path: ".github/workflows/hotfix-release.yml",
         ref: `${REPOSITORY}/.github/workflows/hotfix-release.yml@refs/heads/main`,
@@ -309,7 +433,7 @@ function releaseFixture(
     ? "hotfix-release-receipt.json"
     : "upstream-sync-receipt.json";
   const receiptAsset = makeAsset(
-    13,
+    20,
     receiptName,
     bytes(JSON.stringify(receipt)),
     assetBytes,
@@ -324,7 +448,7 @@ function releaseFixture(
     prerelease: false,
     target_commitish: "main",
     author: structuredClone(bot),
-    assets: [checksumAsset, archiveAsset, receiptAsset],
+    assets: [...releaseArchiveAssets.archives, checksumAsset, receiptAsset],
   };
   const payload = {
     action: "published",
@@ -392,6 +516,7 @@ function releaseFixture(
     encodedContent(stateBytes),
   );
   values.set(`/repos/${REPOSITORY}/actions/runs/${currentWorkflowID}`, {
+    id: currentWorkflowID,
     repository: structuredClone(repository),
     actor: structuredClone(owner),
     path: hotfix
@@ -419,21 +544,13 @@ function releaseFixture(
       `/repos/${REPOSITORY}/compare/${baseCommit}...${currentCommit}`,
       { status: "ahead" },
     );
-    const baseArchiveName =
-      "CLIProxyAPIPlus_7.2.132-unstableneutron.0_linux_amd64_no-plugin.tar.gz";
-    const baseArchiveContent = bytes("base-archive");
-    const baseArchive = makeAsset(
+    const baseArchiveAssets = makeReleaseArchiveAssets(
       21,
-      baseArchiveName,
-      baseArchiveContent,
+      baseTag,
+      "base-archive",
       assetBytes,
     );
-    const baseChecksum = makeAsset(
-      22,
-      "checksums.txt",
-      bytes(`${rawSHA256(baseArchiveContent)}  ${baseArchiveName}\n`),
-      assetBytes,
-    );
+    const baseChecksum = baseArchiveAssets.checksum;
     const baseURL = `https://github.com/${REPOSITORY}/releases/tag/${baseTag}`;
     baseReceipt = {
       schema_version: 2,
@@ -443,7 +560,7 @@ function releaseFixture(
       tag: baseTag,
       tag_commit: baseCommit,
       release_url: baseURL,
-      release_assets: [baseArchiveName, "checksums.txt"].sort(),
+      release_assets: baseArchiveAssets.names,
       image: `${IMAGE}:${baseTag}`,
       image_digest: baseRegistry.manifests.get(baseTag)!.digest,
       platforms: ["linux/amd64", "linux/arm64"],
@@ -451,7 +568,7 @@ function releaseFixture(
       architecture_images: structuredClone(baseRegistry.architectureImages),
     };
     baseReceiptAsset = makeAsset(
-      23,
+      30,
       "upstream-sync-receipt.json",
       bytes(JSON.stringify(baseReceipt)),
       assetBytes,
@@ -466,7 +583,7 @@ function releaseFixture(
       prerelease: false,
       target_commitish: "main",
       author: structuredClone(bot),
-      assets: [baseChecksum, baseArchive, baseReceiptAsset],
+      assets: [...baseArchiveAssets.archives, baseChecksum, baseReceiptAsset],
     };
     values.set(
       `/repos/${REPOSITORY}/releases/tags/${baseTag}`,
@@ -493,6 +610,7 @@ function releaseFixture(
       encodedContent(stateBytes),
     );
     values.set(`/repos/${REPOSITORY}/actions/runs/${baseWorkflowID}`, {
+      id: baseWorkflowID,
       repository: structuredClone(repository),
       actor: structuredClone(owner),
       path: ".github/workflows/upstream-sync-v2.yml",
@@ -511,10 +629,10 @@ function releaseFixture(
 
   const addArtifact = (runID:number, artifactKind:"upstream"|"hotfix", artifactReceipt:Record<string,any>, artifactCommit:string, artifactTag:string, runHead:string) => {
     const receiptFile = bytes(JSON.stringify(artifactReceipt));
-    const files = artifactKind === "upstream" ? {"nested/upstream-sync-receipt.json":receiptFile,"work/run-state.json":runState(artifactReceipt,artifactCommit,artifactTag)} : {"hotfix-release-receipt.json":receiptFile,"verify/independently-verified-receipt.json":receiptFile,"final-plan.out":finalPlan(artifactTag,artifactCommit)};
+    const files = artifactKind === "upstream" ? {"nested/upstream-sync-receipt.json":receiptFile,"work/run-state.json":runState(artifactReceipt,artifactCommit,artifactTag,plusTag,originalTag)} : {"hotfix-release-receipt.json":receiptFile,"verify/independently-verified-receipt.json":receiptFile,"final-plan.out":finalPlan(artifactTag,artifactCommit,plusTag,originalTag)};
     const zip=storedZip(files), id=runID+10000, url=`https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${id}/zip`;
     assetBytes.set(url,zip);
-    values.set(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`,{total_count:1,artifacts:[{id,name:`${artifactKind === "upstream" ? "upstream-sync" : "hotfix-release"}-receipt-${runID}-1`,size_in_bytes:zip.length,expired:false,archive_download_url:url,workflow_run:{id:runID,repository_id:REPOSITORY_ID,head_repository_id:REPOSITORY_ID,head_sha:runHead}}]});
+    values.set(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`,{total_count:1,artifacts:[{id,name:`${artifactKind === "upstream" ? "upstream-sync" : "hotfix-release"}-receipt-${runID}-1`,digest:sha256(zip),size_in_bytes:zip.length,expired:false,archive_download_url:url,workflow_run:{id:runID,repository_id:REPOSITORY_ID,head_repository_id:REPOSITORY_ID,head_sha:runHead}}]});
   };
   addArtifact(currentWorkflowID,kind,receipt,currentCommit,currentTag,hotfix ? currentCommit : "9".repeat(40));
   if (hotfix) addArtifact(baseWorkflowID,"upstream",baseReceipt!,baseCommit,baseTag,"a".repeat(40));
@@ -545,6 +663,8 @@ function releaseFixture(
     currentTag,
     currentCommit,
     currentWorkflowID,
+    originalTag,
+    plusTag,
     stateBytes,
     baseReceipt,
     baseReceiptAsset,
@@ -568,10 +688,423 @@ function releaseFixture(
           const content = bytes(JSON.stringify(baseReceipt));
           baseReceiptAsset!.size = content.length;
           baseReceiptAsset!.digest = sha256(content);
+          const taggedReceipt = values
+            .get(`/repos/${REPOSITORY}/releases/tags/${baseTag}`)
+            .assets.find(
+              (asset: any) => asset.name === "upstream-sync-receipt.json",
+            );
+          taggedReceipt.size = content.length;
+          taggedReceipt.digest = baseReceiptAsset!.digest;
           assetBytes.set(baseReceiptAsset!.url, content);
         }
       : undefined,
   };
+  return fixture;
+}
+
+function refreshUpstreamSchema3Evidence(fixture: ReleaseFixture): void {
+  const content = bytes(JSON.stringify(fixture.receipt));
+  const releasePaths = [
+    `/repos/${REPOSITORY}/releases/${fixture.canonical.id}`,
+    `/repos/${REPOSITORY}/releases/tags/${fixture.currentTag}`,
+  ];
+  for (const path of releasePaths) {
+    const release = fixture.values.get(path);
+    const asset = release.assets.find(
+      (candidate: any) => candidate.name === "upstream-sync-receipt.json",
+    );
+    asset.size = content.length;
+    asset.digest = sha256(content);
+  }
+  fixture.receiptAsset.size = content.length;
+  fixture.receiptAsset.digest = sha256(content);
+  fixture.assetBytes.set(fixture.receiptAsset.url, content);
+
+  const run = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+  );
+  const zip = storedZip({
+    "upstream-sync-receipt.json": content,
+    "run-state.json": runState(
+      fixture.receipt,
+      fixture.currentCommit,
+      fixture.currentTag,
+      fixture.plusTag,
+      fixture.originalTag,
+    ),
+  });
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  artifact.name = `upstream-sync-receipt-${fixture.currentWorkflowID}-1`;
+  artifact.workflow_run.head_sha = run.head_sha;
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
+function upgradeCurrentUpstreamToSchema3(fixture: ReleaseFixture): void {
+  if (fixture.receipt.receipt_type) throw new Error("fixture is not upstream");
+  const identities = Object.fromEntries(
+    fixture.canonical.assets
+      .filter((asset: any) => asset.name !== "upstream-sync-receipt.json")
+      .map((asset: any) => [
+        asset.name,
+        { id: asset.id, size: asset.size, digest: asset.digest },
+      ]),
+  );
+  fixture.receipt.schema_version = 3;
+  fixture.receipt.release_asset_identities = identities;
+  fixture.receipt.release_workflow = {
+    path: ".github/workflows/upstream-sync-v2.yml",
+    ref: `${REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main`,
+    commit: fixture.currentCommit,
+    run_id: String(fixture.currentWorkflowID),
+    run_attempt: "1",
+  };
+  refreshUpstreamSchema3Evidence(fixture);
+}
+
+function upgradeBaseUpstreamToSchema3(fixture: ReleaseFixture): void {
+  if (!fixture.baseReceipt || !fixture.baseRelease || !fixture.baseReceiptAsset) {
+    throw new Error("fixture has no upstream base");
+  }
+  const identities = Object.fromEntries(
+    fixture.baseRelease.assets
+      .filter((asset: any) => asset.name !== "upstream-sync-receipt.json")
+      .map((asset: any) => [
+        asset.name,
+        { id: asset.id, size: asset.size, digest: asset.digest },
+      ]),
+  );
+  fixture.baseReceipt.schema_version = 3;
+  fixture.baseReceipt.release_asset_identities = identities;
+  fixture.baseReceipt.release_workflow = {
+    path: ".github/workflows/upstream-sync-v2.yml",
+    ref: `${REPOSITORY}/.github/workflows/upstream-sync-v2.yml@refs/heads/main`,
+    commit: fixture.baseCommit,
+    run_id: "800",
+    run_attempt: "1",
+  };
+
+  const content = bytes(JSON.stringify(fixture.baseReceipt));
+  for (const path of [
+    `/repos/${REPOSITORY}/releases/100`,
+    `/repos/${REPOSITORY}/releases/tags/${fixture.baseTag}`,
+  ]) {
+    const release = fixture.values.get(path);
+    const asset = release.assets.find(
+      (candidate: any) => candidate.name === "upstream-sync-receipt.json",
+    );
+    asset.size = content.length;
+    asset.digest = sha256(content);
+  }
+  fixture.baseReceiptAsset.size = content.length;
+  fixture.baseReceiptAsset.digest = sha256(content);
+  fixture.assetBytes.set(fixture.baseReceiptAsset.url, content);
+  const run = fixture.values.get(`/repos/${REPOSITORY}/actions/runs/800`);
+  const zip = storedZip({
+    "upstream-sync-receipt.json": content,
+    "run-state.json": runState(
+      fixture.baseReceipt,
+      fixture.baseCommit!,
+      fixture.baseTag!,
+      fixture.plusTag,
+      fixture.originalTag,
+    ),
+  });
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/800/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  artifact.name = "upstream-sync-receipt-800-1";
+  artifact.workflow_run.head_sha = run.head_sha;
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
+function addHotfixAttempt(
+  fixture: ReleaseFixture,
+  runID: number,
+  attempt: number,
+  conclusion: "success" | "failure" | "cancelled" | "timed_out",
+) {
+  const run = structuredClone(
+    fixture.values.get(`/repos/${REPOSITORY}/actions/runs/${runID}`),
+  );
+  run.id = runID;
+  run.run_attempt = attempt;
+  run.status = "completed";
+  run.conclusion = conclusion;
+  fixture.values.set(
+    `/repos/${REPOSITORY}/actions/runs/${runID}/attempts/${attempt}`,
+    run,
+  );
+}
+
+function fixtureReleaseLink(
+  fixture: ReleaseFixture,
+  kind: "upstream" | "hotfix",
+  tag: string,
+  commit: string,
+  receiptAsset: Record<string, any>,
+  workflowID: number,
+) {
+  const run = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${workflowID}`,
+  );
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${workflowID}/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts.find((value: any) =>
+    value.name.startsWith(
+      kind === "upstream" ? "upstream-sync-receipt-" : "hotfix-release-receipt-",
+    ),
+  );
+  const attempt = String(run.run_attempt);
+  return {
+    tag,
+    commit,
+    receipt: {
+      name:
+        kind === "upstream"
+          ? "upstream-sync-receipt.json"
+          : "hotfix-release-receipt.json",
+      asset_id: String(receiptAsset.id),
+      digest: receiptAsset.digest,
+    },
+    workflow: {
+      path:
+        kind === "upstream"
+          ? ".github/workflows/upstream-sync-v2.yml"
+          : ".github/workflows/hotfix-release.yml",
+      run_id: String(workflowID),
+      run_attempt: attempt,
+      head_sha: run.head_sha,
+    },
+    artifact: {
+      id: String(artifact.id),
+      name: artifact.name,
+      digest: artifact.digest,
+    },
+  };
+}
+
+function advanceHotfixFixture(fixture: ReleaseFixture): ReleaseFixture {
+  const previousTag = fixture.currentTag;
+  const previousCommit = fixture.currentCommit;
+  const previousReceiptAsset = fixture.receiptAsset;
+  const previousWorkflowID = fixture.currentWorkflowID;
+  const previousSuffix = Number(previousTag.slice(previousTag.lastIndexOf(".") + 1));
+  const suffix = previousSuffix + 1;
+  const tag = previousTag.slice(0, previousTag.lastIndexOf(".") + 1) + suffix;
+  const commit = createHash("sha1").update(`hotfix-commit-${suffix}`).digest("hex");
+  const tagObject = createHash("sha1")
+    .update(`hotfix-tag-${suffix}`)
+    .digest("hex");
+  const workflowID = 900 + suffix;
+  const releaseID = 100 + suffix;
+  const assetBase = 30 + suffix * 10;
+  const publishedAt = "2026-08-15T05:32:46Z";
+  const registry = registryFixture(tag);
+  for (const [reference, manifest] of registry.manifests) {
+    fixture.registry.manifests.set(reference, manifest);
+  }
+
+  const previous = fixtureReleaseLink(
+    fixture,
+    "hotfix",
+    previousTag,
+    previousCommit,
+    previousReceiptAsset,
+    previousWorkflowID,
+  );
+  const root =
+    fixture.receipt.hotfix_schema_version === 2
+      ? structuredClone(fixture.receipt.accepted_upstream_root)
+      : fixtureReleaseLink(
+          fixture,
+          "upstream",
+          fixture.baseTag!,
+          fixture.baseCommit!,
+          fixture.baseReceiptAsset!,
+          800,
+        );
+  const releaseArchiveAssets = makeReleaseArchiveAssets(
+    assetBase + 1,
+    tag,
+    `archive-hotfix-${suffix}`,
+    fixture.assetBytes,
+  );
+  const archiveAsset = releaseArchiveAssets.archive;
+  const checksumAsset = releaseArchiveAssets.checksum;
+  const releaseURL = `https://github.com/${REPOSITORY}/releases/tag/${tag}`;
+  const receipt: Record<string, any> = {
+    schema_version: 2,
+    sync_id: fixture.receipt.sync_id,
+    plan_fingerprint: fixture.receipt.plan_fingerprint,
+    main_commit: commit,
+    tag,
+    tag_commit: commit,
+    release_url: releaseURL,
+    release_assets: releaseArchiveAssets.names,
+    image: `${IMAGE}:${tag}`,
+    image_digest: registry.manifests.get(tag)!.digest,
+    platforms: ["linux/amd64", "linux/arm64"],
+    workflow_run_id: String(workflowID),
+    architecture_images: structuredClone(registry.architectureImages),
+    receipt_type: "hotfix-release",
+    hotfix_schema_version: 2,
+    previous_release: previous,
+    accepted_upstream_root: root,
+    upstream_state: structuredClone(fixture.receipt.upstream_state),
+    release_asset_digests: releaseArchiveAssets.digests,
+    release_workflow: {
+      path: ".github/workflows/hotfix-release.yml",
+      ref: `${REPOSITORY}/.github/workflows/hotfix-release.yml@refs/heads/main`,
+      commit,
+      run_id: String(workflowID),
+      run_attempt: "1",
+    },
+  };
+  const receiptAsset = makeAsset(
+    assetBase + 10,
+    "hotfix-release-receipt.json",
+    bytes(JSON.stringify(receipt)),
+    fixture.assetBytes,
+  );
+  const canonical: Record<string, any> = {
+    id: releaseID,
+    tag_name: tag,
+    html_url: releaseURL,
+    assets_url: `https://api.github.com/repos/${REPOSITORY}/releases/${releaseID}/assets`,
+    published_at: publishedAt,
+    draft: false,
+    prerelease: false,
+    target_commitish: "main",
+    author: structuredClone(bot),
+    assets: [...releaseArchiveAssets.archives, checksumAsset, receiptAsset],
+  };
+  fixture.values.set(`/repos/${REPOSITORY}/releases/${releaseID}`, canonical);
+  fixture.values.set(
+    `/repos/${REPOSITORY}/releases/tags/${tag}`,
+    structuredClone(canonical),
+  );
+  fixture.values.set(`/repos/${REPOSITORY}/releases/latest`, {
+    id: releaseID,
+    tag_name: tag,
+  });
+  fixture.values.set(`/repos/${REPOSITORY}/git/ref/tags/${tag}`, {
+    ref: `refs/tags/${tag}`,
+    object: { type: "tag", sha: tagObject },
+  });
+  fixture.values.set(`/repos/${REPOSITORY}/git/tags/${tagObject}`, {
+    sha: tagObject,
+    tag,
+    object: { type: "commit", sha: commit },
+    tagger: {
+      name: "cliproxy-hotfix-release[bot]",
+      email: "cliproxy-hotfix-release@users.noreply.github.com",
+      date: publishedAt,
+    },
+    message: `Hotfix release ${tag} after ${previousTag}\n`,
+  });
+  fixture.values.set(`/repos/${REPOSITORY}/commits/${commit}`, { sha: commit });
+  fixture.values.set(`/repos/${REPOSITORY}/commits/main`, { sha: commit });
+  fixture.values.set(`/repos/${REPOSITORY}/compare/${commit}...main`, {
+    status: "identical",
+  });
+  fixture.values.set(
+    `/repos/${REPOSITORY}/compare/${previousCommit}...${commit}`,
+    { status: "ahead" },
+  );
+  fixture.values.set(
+    `/repos/${REPOSITORY}/contents/.ccs-fork-upstream.env?ref=${commit}`,
+    encodedContent(fixture.stateBytes),
+  );
+  fixture.values.set(`/repos/${REPOSITORY}/actions/runs/${workflowID}`, {
+    id: workflowID,
+    repository: structuredClone(repository),
+    actor: structuredClone(owner),
+    path: ".github/workflows/hotfix-release.yml",
+    head_branch: "main",
+    head_sha: commit,
+    status: "completed",
+    conclusion: "success",
+    event: "workflow_dispatch",
+    run_attempt: 1,
+  });
+
+  const refreshReceipt = () => {
+    const content = bytes(JSON.stringify(receipt));
+    receiptAsset.size = content.length;
+    receiptAsset.digest = sha256(content);
+    fixture.assetBytes.set(receiptAsset.url, content);
+    const zip = storedZip({
+      "hotfix-release-receipt.json": content,
+      "independently-verified-receipt.json": content,
+      "final-plan.out": finalPlan(tag, commit, fixture.plusTag, fixture.originalTag),
+    });
+    const listing = fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${workflowID}/artifacts?per_page=100`,
+    );
+    const artifact = listing.artifacts[0];
+    artifact.size_in_bytes = zip.length;
+    artifact.digest = sha256(zip);
+    fixture.assetBytes.set(artifact.archive_download_url, zip);
+  };
+  const initialReceipt = bytes(JSON.stringify(receipt));
+  const zip = storedZip({
+    "hotfix-release-receipt.json": initialReceipt,
+    "independently-verified-receipt.json": initialReceipt,
+    "final-plan.out": finalPlan(tag, commit, fixture.plusTag, fixture.originalTag),
+  });
+  const artifactID = workflowID + 10000;
+  const artifactURL = `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${artifactID}/zip`;
+  fixture.assetBytes.set(artifactURL, zip);
+  fixture.values.set(
+    `/repos/${REPOSITORY}/actions/runs/${workflowID}/artifacts?per_page=100`,
+    {
+      total_count: 1,
+      artifacts: [
+        {
+          id: artifactID,
+          name: `hotfix-release-receipt-${workflowID}-1`,
+          digest: sha256(zip),
+          size_in_bytes: zip.length,
+          expired: false,
+          archive_download_url: artifactURL,
+          workflow_run: {
+            id: workflowID,
+            repository_id: REPOSITORY_ID,
+            head_repository_id: REPOSITORY_ID,
+            head_sha: commit,
+          },
+        },
+      ],
+    },
+  );
+  fixture.payload.release = {
+    ...fixture.payload.release,
+    id: releaseID,
+    tag_name: tag,
+    html_url: releaseURL,
+    assets_url: canonical.assets_url,
+    published_at: publishedAt,
+  };
+  Object.assign(fixture, {
+    canonical,
+    receipt,
+    receiptAsset,
+    checksumAsset,
+    archiveAsset,
+    currentTag: tag,
+    currentCommit: commit,
+    currentWorkflowID: workflowID,
+    refreshReceipt,
+  });
   return fixture;
 }
 
@@ -598,10 +1131,50 @@ function replaceHotfixFinalPlan(fixture: ReleaseFixture, plan: Uint8Array) {
     "final-plan.out": plan,
   });
   artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
+  fixture.assetBytes.set(artifact.archive_download_url, zip);
+}
+
+function replaceUpstreamRunState(fixture: ReleaseFixture, state: Uint8Array) {
+  const runID = 800;
+  const listing = fixture.values.get(
+    `/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`,
+  );
+  const artifact = listing.artifacts[0];
+  const receiptAsset = fixture.baseReceiptAsset ?? fixture.receiptAsset;
+  const receipt = fixture.assetBytes.get(receiptAsset.url)!;
+  const zip = storedZip({
+    "nested/upstream-sync-receipt.json": receipt,
+    "work/run-state.json": state,
+  });
+  artifact.size_in_bytes = zip.length;
+  artifact.digest = sha256(zip);
   fixture.assetBytes.set(artifact.archive_download_url, zip);
 }
 
 describe("upstream release provenance", () => {
+  test("accepts planner-sanitized linkage for source tags containing plus", () => {
+    const state = parseUpstreamState(
+      stateFile("v7.2.132-unstableneutron.0", "v7.2.127+meta"),
+    );
+    expect(state.PLUS_TAG).toBe("v7.2.127+meta");
+    expect(state.SYNC_ID).toBe("original-v7.2.132_plus-v7.2.127-meta");
+    expect(state.CANDIDATE_BRANCH).toBe(
+      `upstream-sync/${state.SYNC_ID}-${state.PLAN_FINGERPRINT.slice(0, 12)}`,
+    );
+  });
+
+  test("rejects planner-inconsistent release lines and unsafe suffixes", () => {
+    expect(() =>
+      parseUpstreamState(stateFile("v7.2.131-unstableneutron.0")),
+    ).toThrow("state release line differs");
+    expect(() =>
+      parseUpstreamState(
+        stateFile("v7.2.132-unstableneutron.9007199254740991"),
+      ),
+    ).toThrow("release tag suffix differs");
+  });
+
   test("accepts an exact verified upstream release", async () => {
     const fixture = releaseFixture();
     const result = await validate(fixture);
@@ -614,6 +1187,120 @@ describe("upstream release provenance", () => {
       commit: fixture.currentCommit,
       workflowRunID: fixture.currentWorkflowID,
       workflowRunAttempt: 1,
+    });
+  });
+
+  test("accepts an exact schema-3 upstream receipt with immutable asset identities", async () => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    await expect(validate(fixture)).resolves.toMatchObject({
+      kind: "upstream",
+      workflowRunID: fixture.currentWorkflowID,
+      workflowRunAttempt: 1,
+    });
+  });
+
+  test.each(["failure", "cancelled", "timed_out"] as const)(
+    "accepts schema-3 upstream evidence from an earlier %s attempt",
+    async (conclusion) => {
+      const fixture = releaseFixture();
+      upgradeCurrentUpstreamToSchema3(fixture);
+      fixture.values.get(
+        `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+      ).run_attempt = 2;
+      addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, conclusion);
+      await expect(validate(fixture)).resolves.toMatchObject({
+        kind: "upstream",
+        workflowRunAttempt: 2,
+      });
+    },
+  );
+
+  test("rejects schema-3 upstream evidence from an earlier successful attempt", async () => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "success");
+    await expect(validate(fixture)).rejects.toThrow("workflow run attempt differs");
+  });
+
+  test.each([
+    ["asset ID", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].id++;
+    }],
+    ["asset size", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].size++;
+    }],
+    ["asset digest", (f: ReleaseFixture) => {
+      const name = Object.keys(f.receipt.release_asset_identities)[0];
+      f.receipt.release_asset_identities[name].digest = `sha256:${"f".repeat(64)}`;
+    }],
+    ["workflow path", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.path = ".github/workflows/hotfix-release.yml";
+    }],
+    ["workflow ref", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.ref += "-wrong";
+    }],
+    ["workflow commit", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.commit = "f".repeat(40);
+    }],
+    ["workflow run", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.run_id = "999";
+    }],
+    ["workflow attempt", (f: ReleaseFixture) => {
+      f.receipt.release_workflow.run_attempt = "2";
+    }],
+  ])("rejects schema-3 upstream %s drift", async (_name, mutate) => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    mutate(fixture);
+    refreshUpstreamSchema3Evidence(fixture);
+    await expect(validate(fixture)).rejects.toThrow();
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies schema-3 prior-attempt HTTP %s evidence", async (status, errorClass) => {
+    const fixture = releaseFixture();
+    upgradeCurrentUpstreamToSchema3(fixture);
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/attempts/1`;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        return fixture.github.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => fixture.github.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
+  test("accepts a prerelease-derived nonzero upstream tag", async () => {
+    const fixture = releaseFixture("upstream", "v7.2.127-3", {
+      originalTag: "v7.1.45-0",
+      rootSuffix: 2,
+    });
+    await expect(validate(fixture)).resolves.toMatchObject({
+      kind: "upstream",
+      tag: "v7.1.45-0.unstableneutron.2",
     });
   });
 
@@ -666,6 +1353,52 @@ describe("upstream release provenance", () => {
   ])("final recheck rejects %s race", async (_name, mutate) => {
     const fixture=releaseFixture(), verified=await validate(fixture); mutate(fixture);
     await expect(revalidateRelease(verified,fixture.github,fixture.registry.client,signal)).rejects.toThrow();
+  });
+
+  test.each([
+    ["semantically equivalent tag object replacement", (fixture: ReleaseFixture) => {
+      const ref = fixture.values.get(
+        `/repos/${REPOSITORY}/git/ref/tags/${fixture.currentTag}`,
+      );
+      const original = fixture.values.get(
+        `/repos/${REPOSITORY}/git/tags/${ref.object.sha}`,
+      );
+      const replacementSHA = "e".repeat(40);
+      fixture.values.set(`/repos/${REPOSITORY}/git/tags/${replacementSHA}`, {
+        ...structuredClone(original),
+        sha: replacementSHA,
+      });
+      ref.object.sha = replacementSHA;
+    }],
+    ["semantically equivalent receipt asset replacement", (fixture: ReleaseFixture) => {
+      const content = fixture.assetBytes.get(fixture.receiptAsset.url)!;
+      fixture.receiptAsset.id += 1000;
+      fixture.receiptAsset.url = `https://api.github.com/repos/${REPOSITORY}/releases/assets/${fixture.receiptAsset.id}`;
+      fixture.assetBytes.set(fixture.receiptAsset.url, content);
+    }],
+    ["semantically equivalent workflow artifact replacement", (fixture: ReleaseFixture) => {
+      const listing = fixture.values.get(
+        `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      );
+      const artifact = listing.artifacts[0];
+      const content = fixture.assetBytes.get(artifact.archive_download_url)!;
+      artifact.id += 1000;
+      artifact.archive_download_url =
+        `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${artifact.id}/zip`;
+      fixture.assetBytes.set(artifact.archive_download_url, content);
+    }],
+  ])("final recheck rejects %s", async (_name, mutate) => {
+    const fixture = releaseFixture();
+    const verified = await validate(fixture);
+    mutate(fixture);
+    await expect(
+      revalidateRelease(
+        verified,
+        fixture.github,
+        fixture.registry.client,
+        signal,
+      ),
+    ).rejects.toThrow("snapshot drifted");
   });
 
   test.each([
@@ -844,11 +1577,19 @@ describe("upstream release provenance", () => {
     )).resolves.toBeDefined();
   });
 
-  test("rejects a stale retry even when receivedAt was fresh", async () => {
+  test("admits exact finalization after a delayed retry of an originally fresh delivery", async () => {
     const fixture = releaseFixture();
+    const completeAssets = fixture.canonical.assets;
+    fixture.canonical.assets = completeAssets.filter(
+      (asset: any) => asset !== fixture.receiptAsset,
+    );
+    await expect(
+      validate(fixture),
+    ).rejects.toBeInstanceOf(RetryableNotReady);
+    fixture.canonical.assets = completeAssets;
     await expect(
       validate(fixture, { now: () => Date.parse("2026-08-16T05:35:00Z") }),
-    ).rejects.toThrow("stale or future");
+    ).resolves.toBeDefined();
   });
 
   test("rejects a future published timestamp", async () => {
@@ -871,10 +1612,35 @@ describe("upstream release provenance", () => {
     await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
   });
 
+  test("keeps a fresh incomplete archive matrix retryable", async () => {
+    const fixture = releaseFixture();
+    fixture.canonical.assets = fixture.canonical.assets.filter(
+      (asset: any) => asset.name !== fixture.archiveAsset.name,
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
+  test("rejects renamed release archives", async () => {
+    const fixture = releaseFixture();
+    fixture.archiveAsset.name = fixture.archiveAsset.name.replace(
+      "linux_amd64",
+      "linux_x86_64",
+    );
+    await expect(validate(fixture)).rejects.toThrow("asset set differs");
+  });
+
   test("historical previous-release missing assets are permanent", async () => {
     const fixture = releaseFixture("hotfix");
     fixture.baseRelease!.assets = fixture.baseRelease!.assets.filter(
       (asset: any) => asset.name !== "upstream-sync-receipt.json",
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
+  });
+
+  test("historical previous-release incomplete archive matrices are permanent", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.baseRelease!.assets = fixture.baseRelease!.assets.filter(
+      (asset: any) => !asset.name.endsWith("_windows_amd64.zip"),
     );
     await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
   });
@@ -1017,6 +1783,13 @@ describe("upstream release provenance", () => {
 });
 
 describe("hotfix release provenance", () => {
+  test("accepts planner-sanitized source tags through legacy hotfix provenance", async () => {
+    const fixture = releaseFixture("hotfix", "v7.2.127+meta");
+    const result = await validate(fixture);
+    expect(result.kind).toBe("hotfix");
+    expect(result.syncID).toBe("original-v7.2.132_plus-v7.2.127-meta");
+  });
+
   test("accepts an exact hotfix anchored to an accepted upstream release", async () => {
     const fixture = releaseFixture("hotfix");
     const result = await validate(fixture);
@@ -1028,11 +1801,717 @@ describe("hotfix release provenance", () => {
     });
   });
 
+  test("accepts legacy and chained hotfixes anchored to a schema-3 upstream root", async () => {
+    const first = releaseFixture("hotfix");
+    upgradeBaseUpstreamToSchema3(first);
+    await expect(validate(first)).resolves.toMatchObject({ kind: "hotfix" });
+
+    const second = advanceHotfixFixture(first);
+    await expect(validate(second)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.2",
+    });
+  });
+
+  test.each(["failure", "cancelled", "timed_out"] as const)(
+    "accepts a schema-3 upstream root from an earlier %s attempt",
+    async (conclusion) => {
+      const fixture = releaseFixture("hotfix");
+      upgradeBaseUpstreamToSchema3(fixture);
+      fixture.values.get(`/repos/${REPOSITORY}/actions/runs/800`).run_attempt = 2;
+      addHotfixAttempt(fixture, 800, 1, conclusion);
+      await expect(validate(fixture)).resolves.toMatchObject({ kind: "hotfix" });
+    },
+  );
+
+  test("accepts nonzero upstream root -> schema-v1 hotfix -> schema-v2 hotfix", async () => {
+    const first = releaseFixture("hotfix", "v7.2.127-3", { rootSuffix: 4 });
+    await expect(validate(first)).resolves.toMatchObject({
+      tag: "v7.2.132-unstableneutron.5",
+    });
+
+    const second = advanceHotfixFixture(first);
+    await expect(validate(second)).resolves.toMatchObject({
+      tag: "v7.2.132-unstableneutron.6",
+    });
+  });
+
+  test("accepts prerelease-derived schema-v1 and schema-v2 hotfixes", async () => {
+    const first = releaseFixture("hotfix", "v7.2.127-3", {
+      originalTag: "v7.1.45-0",
+      rootSuffix: 1,
+    });
+    await expect(validate(first)).resolves.toMatchObject({
+      tag: "v7.1.45-0.unstableneutron.2",
+    });
+
+    const second = advanceHotfixFixture(first);
+    await expect(validate(second)).resolves.toMatchObject({
+      tag: "v7.1.45-0.unstableneutron.3",
+    });
+  });
+
+  test.each(["failure", "cancelled", "timed_out"] as const)("accepts immutable receipt evidence from an earlier %s attempt of the same successful run", async (conclusion) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, conclusion);
+    const result = await validate(fixture);
+    expect(result).toMatchObject({
+      kind: "hotfix",
+      workflowRunID: fixture.currentWorkflowID,
+      workflowRunAttempt: 2,
+    });
+  });
+
+  test("rejects immutable receipt evidence from an earlier successful attempt", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "success");
+    await expect(validate(fixture)).rejects.toThrow("workflow run attempt differs");
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies exact earlier-attempt HTTP %s evidence", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/attempts/1`;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
+  test("permanently rejects a missing authenticated prior-attempt artifact", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    fixture.values.set(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      { total_count: 0, artifacts: [] },
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RejectedDelivery);
+  });
+
+  test("keeps a missing current-attempt artifact retryable", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.set(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+      { total_count: 0, artifacts: [] },
+    );
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies authenticated prior-attempt artifact listing HTTP %s", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    const target = `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        if (path === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.get(path, requestSignal);
+      },
+      bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
+  test.each([
+    [404, RejectedDelivery],
+    [410, RejectedDelivery],
+    [429, GitHubHTTPError],
+    [500, GitHubHTTPError],
+  ] as const)("classifies authenticated prior-attempt artifact download HTTP %s", async (status, errorClass) => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(fixture, fixture.currentWorkflowID, 1, "failure");
+    const listing = fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}/artifacts?per_page=100`,
+    );
+    const target = listing.artifacts[0].archive_download_url;
+    const original = fixture.github;
+    const github: GitHubClient = {
+      get: (path, requestSignal) => original.get(path, requestSignal),
+      bytes: async (url, requestSignal) => {
+        if (url === target) {
+          throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+        }
+        return original.bytes(url, requestSignal);
+      },
+    };
+    await expect(
+      validateRelease(
+        fixture.payload,
+        receivedAt,
+        github,
+        fixture.registry.client,
+        signal,
+        { now },
+      ),
+    ).rejects.toBeInstanceOf(errorClass);
+  });
+
+  test("keeps exact failed-attempt hotfix evidence retryable until the same run succeeds", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${fixture.currentWorkflowID}`,
+    ).conclusion = "failure";
+    await expect(validate(fixture)).rejects.toBeInstanceOf(RetryableNotReady);
+  });
+
+  test("accepts consecutive schema-v2 hotfix chains through legacy suffix .1", async () => {
+    const second = advanceHotfixFixture(releaseFixture("hotfix"));
+    await expect(validate(second)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.2",
+    });
+    expect(second.registry.calls.filter((call) => call === "latest")).toHaveLength(1);
+
+    const third = advanceHotfixFixture(second);
+    await expect(validate(third)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.3",
+    });
+    expect(third.registry.calls.filter((call) => call === "latest")).toHaveLength(2);
+  });
+
+  test("pre-claim recheck has constant current-frontier work at maximum depth", async () => {
+    const counts = async (fixture: ReleaseFixture) => {
+      const verified = await validate(fixture);
+      let gets = 0;
+      let downloads = 0;
+      const github: GitHubClient = {
+        get: async (path, requestSignal) => {
+          gets++;
+          return fixture.github.get(path, requestSignal);
+        },
+        bytes: async (url, requestSignal) => {
+          downloads++;
+          return fixture.github.bytes(url, requestSignal);
+        },
+      };
+      fixture.registry.calls.length = 0;
+      await revalidateRelease(
+        verified,
+        github,
+        fixture.registry.client,
+        signal,
+      );
+      return { gets, downloads, manifests: fixture.registry.calls.length };
+    };
+
+    const first = await counts(releaseFixture("hotfix"));
+    const third = await counts(
+      advanceHotfixFixture(
+        advanceHotfixFixture(releaseFixture("hotfix")),
+      ),
+    );
+    expect(third).toEqual(first);
+  });
+
+  test("maximum-depth proof and recheck leave webhook deadline headroom", async () => {
+    const fixture = advanceHotfixFixture(
+      advanceHotfixFixture(releaseFixture("hotfix")),
+    );
+    const delay = () => new Promise((resolve) => setTimeout(resolve, 100));
+    const github: GitHubClient = {
+      get: async (path, requestSignal) => {
+        await delay();
+        return fixture.github.get(path, requestSignal);
+      },
+      bytes: async (url, requestSignal) => {
+        await delay();
+        return fixture.github.bytes(url, requestSignal);
+      },
+    };
+    const registry: RegistryClient = {
+      manifest: async (reference, requestSignal) => {
+        await delay();
+        return fixture.registry.client.manifest(reference, requestSignal);
+      },
+    };
+    const verified = await validateRelease(
+      fixture.payload,
+      receivedAt,
+      github,
+      registry,
+      signal,
+      { now },
+    );
+    await revalidateRelease(verified, github, registry, signal);
+  }, 25_000);
+
+  test("accepts historical parent evidence from an earlier attempt of its successful run", async () => {
+    const second = advanceHotfixFixture(releaseFixture("hotfix"));
+    const parentRunID = Number(second.receipt.previous_release.workflow.run_id);
+    second.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${parentRunID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(second, parentRunID, 1, "failure");
+    await expect(validate(second)).resolves.toMatchObject({
+      kind: "hotfix",
+      tag: "v7.2.132-unstableneutron.2",
+    });
+  });
+
+  test("rejects historical parent evidence from an earlier successful attempt", async () => {
+    const second = advanceHotfixFixture(releaseFixture("hotfix"));
+    const parentRunID = Number(second.receipt.previous_release.workflow.run_id);
+    second.values.get(
+      `/repos/${REPOSITORY}/actions/runs/${parentRunID}`,
+    ).run_attempt = 2;
+    addHotfixAttempt(second, parentRunID, 1, "success");
+    await expect(validate(second)).rejects.toThrow("workflow run attempt differs");
+  });
+
+  test.each([
+    ["receipt digest", (link: any) => (link.receipt.digest = `sha256:${"f".repeat(64)}`)],
+    ["receipt asset", (link: any) => (link.receipt.asset_id = "99999")],
+    ["artifact digest", (link: any) => (link.artifact.digest = `sha256:${"f".repeat(64)}`)],
+    ["artifact ID", (link: any) => (link.artifact.id = "99999")],
+    ["workflow run", (link: any) => (link.workflow.run_id = "99999")],
+    ["workflow attempt", (link: any) => (link.workflow.run_attempt = "2")],
+    ["workflow head", (link: any) => (link.workflow.head_sha = "f".repeat(40))],
+  ])("rejects recorded parent %s drift", async (_name, mutate) => {
+    const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+    mutate(fixture.receipt.previous_release);
+    fixture.refreshReceipt();
+    await expect(validate(fixture)).rejects.toThrow();
+  });
+
+  test.each([
+    ["tag", (root: any) => (root.tag = "v7.2.132-unstableneutron.9")],
+    ["commit", (root: any) => (root.commit = "f".repeat(40))],
+    ["receipt", (root: any) => (root.receipt.digest = `sha256:${"f".repeat(64)}`)],
+    ["artifact", (root: any) => (root.artifact.id = "99999")],
+  ])("rejects recorded accepted-root %s drift", async (_name, mutate) => {
+    const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+    mutate(fixture.receipt.accepted_upstream_root);
+    fixture.refreshReceipt();
+    await expect(validate(fixture)).rejects.toThrow();
+  });
+
+  test("rejects a chained suffix gap and a repeated chain commit", async () => {
+    const gap = advanceHotfixFixture(releaseFixture("hotfix"));
+    gap.receipt.previous_release.tag = "v7.2.132-unstableneutron.0";
+    gap.refreshReceipt();
+    await expect(validate(gap)).rejects.toThrow();
+
+    const cycle = advanceHotfixFixture(releaseFixture("hotfix"));
+    cycle.receipt.previous_release.commit = cycle.currentCommit;
+    cycle.values.set(
+      `/repos/${REPOSITORY}/compare/${cycle.currentCommit}...${cycle.currentCommit}`,
+      { status: "ahead" },
+    );
+    cycle.refreshReceipt();
+    await expect(validate(cycle)).rejects.toThrow("cycle");
+  });
+
+  test("rejects a hotfix chain beyond the recursion bound", async () => {
+    let fixture = releaseFixture("hotfix");
+    for (let suffix = 2; suffix <= 4; suffix++) {
+      fixture = advanceHotfixFixture(fixture);
+    }
+    await expect(validate(fixture)).rejects.toThrow("bound");
+  });
+
+  test.each([
+    ["draft", (release: any) => (release.draft = true)],
+    ["prerelease", (release: any) => (release.prerelease = true)],
+  ])("rejects a %s historical parent release", async (_name, mutate) => {
+    const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+    mutate(fixture.values.get(`/repos/${REPOSITORY}/releases/101`));
+    mutate(
+      fixture.values.get(
+        `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`,
+      ),
+    );
+    await expect(validate(fixture)).rejects.toThrow("historical release identity");
+  });
+
+  test("rejects missing or tampered historical parent release evidence", async () => {
+    const missing = advanceHotfixFixture(releaseFixture("hotfix"));
+    for (const release of [
+      missing.values.get(`/repos/${REPOSITORY}/releases/101`),
+      missing.values.get(
+        `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`,
+      ),
+    ]) {
+      release.assets = release.assets.filter(
+        (asset: any) => asset.name !== "hotfix-release-receipt.json",
+      );
+    }
+    await expect(validate(missing)).rejects.toThrow("historical release assets");
+
+    const checksum = advanceHotfixFixture(releaseFixture("hotfix"));
+    const historical = checksum.values.get(`/repos/${REPOSITORY}/releases/101`);
+    const checksumAsset = historical.assets.find(
+      (asset: any) => asset.name === "checksums.txt",
+    );
+    checksum.assetBytes.set(checksumAsset.url, bytes("tampered\n"));
+    await expect(validate(checksum)).rejects.toThrow("asset bytes digest");
+
+    const artifact = advanceHotfixFixture(releaseFixture("hotfix"));
+    const listing = artifact.values.get(
+      `/repos/${REPOSITORY}/actions/runs/900/artifacts?per_page=100`,
+    );
+    artifact.assetBytes.set(listing.artifacts[0].archive_download_url, bytes("tampered"));
+    await expect(validate(artifact)).rejects.toThrow();
+  });
+
+  test("rejects historical ancestry and schema-v1 replay after suffix .1", async () => {
+    const ancestry = advanceHotfixFixture(releaseFixture("hotfix"));
+    ancestry.values.set(
+      `/repos/${REPOSITORY}/compare/${ancestry.baseCommit}...${ancestry.receipt.previous_release.commit}`,
+      { status: "identical" },
+    );
+    await expect(validate(ancestry)).rejects.toThrow("historical ancestry");
+
+    const replay = advanceHotfixFixture(releaseFixture("hotfix"));
+    replay.receipt.hotfix_schema_version = 1;
+    replay.receipt.previous_release = {
+      tag: replay.baseTag,
+      commit: replay.baseCommit,
+    };
+    delete replay.receipt.accepted_upstream_root;
+    replay.refreshReceipt();
+    await expect(validate(replay)).rejects.toThrow("tag relationship");
+  });
+
+  test("rejects schema-v2 when the immediate parent is the upstream root", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.receipt.hotfix_schema_version = 2;
+    fixture.receipt.previous_release = fixtureReleaseLink(
+      fixture,
+      "upstream",
+      fixture.baseTag!,
+      fixture.baseCommit!,
+      fixture.baseReceiptAsset!,
+      800,
+    );
+    fixture.receipt.accepted_upstream_root = structuredClone(
+      fixture.receipt.previous_release,
+    );
+    fixture.refreshReceipt();
+    await expect(validate(fixture)).rejects.toThrow("previous release identity");
+  });
+
+  test("rejects cross-verifier root run-state, receipt-size, and schema-type drift", async () => {
+    const runStateDrift = releaseFixture("hotfix");
+    replaceUpstreamRunState(runStateDrift, bytes("{}"));
+    await expect(validate(runStateDrift)).rejects.toThrow("run state");
+
+    const rootFingerprintDrift = releaseFixture("hotfix");
+    const rootState = JSON.parse(
+      new TextDecoder().decode(
+        runState(
+          rootFingerprintDrift.baseReceipt!,
+          rootFingerprintDrift.baseCommit!,
+          rootFingerprintDrift.baseTag!,
+        ),
+      ),
+    );
+    rootState.final_plan.plan_fingerprint = "f".repeat(40);
+    replaceUpstreamRunState(
+      rootFingerprintDrift,
+      bytes(JSON.stringify(rootState)),
+    );
+    await expect(validate(rootFingerprintDrift)).rejects.toThrow("run state");
+
+    const sizeDrift = releaseFixture("hotfix");
+    for (const release of [
+      sizeDrift.values.get(`/repos/${REPOSITORY}/releases/101`),
+      sizeDrift.values.get(
+        `/repos/${REPOSITORY}/releases/tags/${sizeDrift.currentTag}`,
+      ),
+    ]) {
+      release.assets.find(
+        (asset: any) => asset.name === "hotfix-release-receipt.json",
+      ).size += 1;
+    }
+    await expect(validate(sizeDrift)).rejects.toThrow("asset bytes digest");
+
+    const schemaTypeDrift = releaseFixture("hotfix");
+    schemaTypeDrift.receipt.hotfix_schema_version = "1";
+    schemaTypeDrift.refreshReceipt();
+    await expect(validate(schemaTypeDrift)).rejects.toThrow("schema");
+  });
+
+  test.each([
+    ["accepted root", () => releaseFixture("hotfix"), "v7.2.132-unstableneutron.0"],
+    ["immediate hotfix parent", () => advanceHotfixFixture(releaseFixture("hotfix")), "v7.2.132-unstableneutron.1"],
+  ])("rejects canonical-vs-by-tag asset drift for the %s", async (_name, makeFixture, historicalTag) => {
+    const fixture = makeFixture();
+    const byTag = fixture.values.get(
+      `/repos/${REPOSITORY}/releases/tags/${historicalTag}`,
+    );
+    byTag.assets[0].size += 1;
+    await expect(validate(fixture)).rejects.toThrow("release identity differs");
+  });
+
+  test("accepts semantically exact root run state independent of JSON object order", async () => {
+    const fixture = releaseFixture("hotfix");
+    const reordered = JSON.parse(
+      new TextDecoder().decode(
+        runState(fixture.baseReceipt!, fixture.baseCommit!, fixture.baseTag!),
+      ),
+    );
+    reordered.release = {
+      architecture_images: reordered.release.architecture_images,
+      platforms: reordered.release.platforms,
+      image_digest: reordered.release.image_digest,
+      image: reordered.release.image,
+      assets: reordered.release.assets,
+      url: reordered.release.url,
+    };
+    replaceUpstreamRunState(fixture, bytes(JSON.stringify(reordered)));
+    await expect(validate(fixture)).resolves.toMatchObject({ kind: "hotfix" });
+  });
+
+  test.each([
+    [
+      "release",
+      (fixture: ReleaseFixture) =>
+        `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`,
+      false,
+    ],
+    [
+      "state",
+      (fixture: ReleaseFixture) =>
+        `/repos/${REPOSITORY}/contents/.ccs-fork-upstream.env?ref=${fixture.receipt.previous_release.commit}`,
+      false,
+    ],
+    ["workflow run", () => `/repos/${REPOSITORY}/actions/runs/900`, false],
+    [
+      "artifact listing",
+      () => `/repos/${REPOSITORY}/actions/runs/900/artifacts?per_page=100`,
+      false,
+    ],
+    [
+      "asset download",
+      (fixture: ReleaseFixture) => fixture.receipt.previous_release.receipt.digest,
+      true,
+    ],
+  ])(
+    "permanently rejects historical %s evidence lost with 404 or 410",
+    async (_name, target, download) => {
+      for (const status of [404, 410]) {
+        const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+        const targetValue = target(fixture);
+        const original = fixture.github;
+        const github: GitHubClient = {
+          get: async (path, requestSignal) => {
+            if (!download && path === targetValue) {
+              throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+            }
+            return original.get(path, requestSignal);
+          },
+          bytes: async (url, requestSignal) => {
+            const parentReceipt = fixture.values
+              .get(`/repos/${REPOSITORY}/releases/101`)
+              .assets.find(
+                (asset: any) => asset.name === "hotfix-release-receipt.json",
+              );
+            if (download && url === parentReceipt.url) {
+              throw new GitHubHTTPError(status, `GitHub asset returned ${status}`);
+            }
+            return original.bytes(url, requestSignal);
+          },
+        };
+        await expect(
+          validateRelease(
+            fixture.payload,
+            receivedAt,
+            github,
+            fixture.registry.client,
+            signal,
+            { now },
+          ),
+        ).rejects.toBeInstanceOf(RejectedDelivery);
+      }
+    },
+  );
+
+  test.each([[429], [500]])(
+    "keeps historical transient HTTP %s failures retryable",
+    async (status) => {
+      const fixture = advanceHotfixFixture(releaseFixture("hotfix"));
+      const original = fixture.github;
+      const github: GitHubClient = {
+        get: async (path, requestSignal) => {
+          if (
+            path ===
+            `/repos/${REPOSITORY}/releases/tags/v7.2.132-unstableneutron.1`
+          ) {
+            throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+          }
+          return original.get(path, requestSignal);
+        },
+        bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+      };
+      await expect(
+        validateRelease(
+          fixture.payload,
+          receivedAt,
+          github,
+          fixture.registry.client,
+          signal,
+          { now },
+        ),
+      ).rejects.toBeInstanceOf(GitHubHTTPError);
+    },
+  );
+
+  test.each([
+    ["schema-v1 root", () => releaseFixture("hotfix"), "v7.2.132-unstableneutron.0"],
+    ["schema-v2 parent", () => advanceHotfixFixture(releaseFixture("hotfix")), "v7.2.132-unstableneutron.1"],
+  ])(
+    "classifies %s historical registry HTTP failures",
+    async (_name, makeFixture, historicalTag) => {
+      for (const status of [404, 410, 429, 500]) {
+        const fixture = makeFixture();
+        const original = fixture.registry.client;
+        fixture.registry.client = {
+          manifest: (reference, requestSignal) => {
+            if (reference === historicalTag) {
+              throw new RegistryHTTPError(
+                status,
+                `registry returned ${status}`,
+              );
+            }
+            return original.manifest(reference, requestSignal);
+          },
+        };
+        const validation = validate(fixture);
+        if (status === 404 || status === 410) {
+          await expect(validation).rejects.toBeInstanceOf(RejectedDelivery);
+        } else {
+          await expect(validation).rejects.toBeInstanceOf(RegistryHTTPError);
+        }
+      }
+    },
+  );
+
+  test.each([
+    ["schema-v1", () => releaseFixture("hotfix")],
+    ["schema-v2", () => advanceHotfixFixture(releaseFixture("hotfix"))],
+  ])(
+    "classifies %s immediate-parent comparison HTTP failures",
+    async (_name, makeFixture) => {
+      for (const status of [404, 410, 429, 500]) {
+        const fixture = makeFixture();
+        const comparison = `/repos/${REPOSITORY}/compare/${fixture.receipt.previous_release.commit}...${fixture.currentCommit}`;
+        const original = fixture.github;
+        const github: GitHubClient = {
+          get: async (path, requestSignal) => {
+            if (path === comparison) {
+              throw new GitHubHTTPError(status, `GitHub API returned ${status}`);
+            }
+            return original.get(path, requestSignal);
+          },
+          bytes: (url, requestSignal) => original.bytes(url, requestSignal),
+        };
+        const validation = validateRelease(
+          fixture.payload,
+          receivedAt,
+          github,
+          fixture.registry.client,
+          signal,
+          { now },
+        );
+        if (status === 404 || status === 410) {
+          await expect(validation).rejects.toBeInstanceOf(RejectedDelivery);
+        } else {
+          await expect(validation).rejects.toBeInstanceOf(GitHubHTTPError);
+        }
+      }
+    },
+  );
+
   test.each([
     ["original_tag", "v7.2.131"],
     ["plus_tag", "v7.2.127-2"],
     ["pre_sync_head", "f".repeat(40)],
     ["base_fork_commit", "f".repeat(40)],
+    ["original_repository", "wrong/original"],
+    ["plus_repository", "wrong/plus"],
+    ["models_repository", "wrong/models"],
+    ["original_head", "f".repeat(40)],
+    ["plus_tag_head", "f".repeat(40)],
+    ["plus_head", "f".repeat(40)],
+    ["models_commit", "f".repeat(40)],
+    ["plus_head_included", "true"],
+    ["plus_head_already_represented", "false"],
+    ["plus_head_delta_paths", "internal/example.go"],
+    ["unsafe_plus_head_delta_paths", "README.md"],
+    ["block_reason", "unexpected"],
+    ["fork_tag_prefix", "v7.2.131-unstableneutron"],
+    ["latest_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["latest_fork_models_commit", "f".repeat(40)],
+    ["latest_fork_suffix", "9"],
+    ["next_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["expected_fork_tag", "v7.2.132-unstableneutron.9"],
+    ["safe_sync_id", "wrong"],
+    ["plan_fingerprint", "f".repeat(40)],
+    ["candidate_branch", "upstream-sync/wrong"],
+    ["snapshot_namespace", "refs/upstream-sync/wrong"],
+    ["original_snapshot_ref", "refs/upstream-sync/wrong/original"],
+    ["plus_tag_snapshot_ref", "refs/upstream-sync/wrong/plus-tag"],
+    ["plus_head_snapshot_ref", "refs/upstream-sync/wrong/plus-head"],
+    ["models_snapshot_ref", "refs/upstream-sync/wrong/models"],
+    ["target_drift_summary", "unexpected"],
+    ["has_changes", "true"],
+    ["target_drift", "true"],
+    ["blocked", "true"],
   ])("rejects a wrong final planner %s", async (key, wrongValue) => {
     const fixture = releaseFixture("hotfix");
     const plan = new TextDecoder()
@@ -1067,6 +2546,15 @@ describe("hotfix release provenance", () => {
       `/repos/${REPOSITORY}/compare/${fixture.baseCommit}...${fixture.currentCommit}`,
     ).status = "identical";
     await expect(validate(fixture)).rejects.toThrow("strictly ahead");
+  });
+
+  test("requires the accepted root commit to be strictly behind a schema-v1 suffix .1", async () => {
+    const fixture = releaseFixture("hotfix");
+    fixture.values.get(
+      `/repos/${REPOSITORY}/compare/${fixture.baseCommit}...${fixture.currentCommit}`,
+    ).status = "identical";
+    await expect(validate(fixture)).rejects.toThrow("strictly ahead");
+    expect(fixture.registry.calls.filter((call) => call === "latest")).toHaveLength(0);
   });
 
   test("rejects changed upstream state between base and hotfix", async () => {
@@ -1134,6 +2622,57 @@ describe("hotfix release provenance", () => {
 });
 
 describe("canonical registry verification", () => {
+  test("rejects an oversized manifest even when its digest matches", async () => {
+    const tag = "v1.2.3-unstableneutron.0";
+    const fixture = registryFixture(tag);
+    const oversized = new Uint8Array(MAXIMUM_REGISTRY_MANIFEST_BYTES + 1);
+    fixture.manifests.set(tag, {
+      bytes: oversized,
+      digest: sha256(oversized),
+      mediaType: indexMediaType,
+    });
+    await expect(
+      verifyRegistry(
+        fixture.client,
+        tag,
+        sha256(oversized),
+        fixture.architectureImages,
+        signal,
+      ),
+    ).rejects.toThrow("size differs");
+  });
+
+  test("accepts the shared shell registry descriptor fixture", async () => {
+    const tag = "v1.2.3-unstableneutron.0";
+    const fixture = registryFixture(tag);
+    const amd64 = fixture.architectureImages["linux/amd64"].digest;
+    const arm64 = fixture.architectureImages["linux/arm64"].digest;
+    const index = structuredClone(sharedRegistryIndex) as Record<string, any>;
+    for (const descriptor of index.manifests) {
+      const platform = `${descriptor.platform.os}/${descriptor.platform.architecture}`;
+      if (platform === "linux/amd64") descriptor.digest = amd64;
+      if (platform === "linux/arm64") descriptor.digest = arm64;
+      if (
+        platform === "unknown/unknown" &&
+        descriptor.annotations["vnd.docker.reference.digest"] ===
+          sharedRegistryIndex.manifests[0].digest
+      ) {
+        descriptor.annotations["vnd.docker.reference.digest"] = amd64;
+      }
+    }
+    fixture.index = index;
+    const expected = fixture.refreshIndex();
+    await expect(
+      verifyRegistry(
+        fixture.client,
+        tag,
+        expected,
+        fixture.architectureImages,
+        signal,
+      ),
+    ).resolves.toEqual({ amd64, arm64 });
+  });
+
   test("accepts exact tag, latest, platform, architecture tag, and receipt parity", async () => {
     const fixture = registryFixture("v1.2.3-unstableneutron.0");
     const result = await verifyRegistry(

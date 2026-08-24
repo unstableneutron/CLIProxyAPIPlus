@@ -34,29 +34,6 @@ on:
       platforms_json:
         description: JSON array of required published platforms
         value: ${{ jobs.publish.outputs.platforms_json }}
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing fork tag to publish
-        required: true
-        type: string
-      expected_commit:
-        description: Expected peeled tag commit; empty resolves from the tag
-        required: false
-        default: ''
-        type: string
-      publish_latest:
-        description: Also move latest; true preserves legacy direct dispatch behavior
-        required: false
-        default: true
-        type: boolean
-      mode:
-        description: Build platform images, publish the canonical manifest, or do both
-        required: true
-        default: full
-        type: choice
-        options: [full, build, publish]
-
 permissions:
   contents: read
   packages: write
@@ -132,9 +109,10 @@ jobs:
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
           EXPECTED_COMMIT="${EXPECTED_COMMIT_INPUT}"
-          if [ -z "${EXPECTED_COMMIT}" ]; then
-            EXPECTED_COMMIT="${TAG_COMMIT}"
-          fi
+          [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Expected commit must be an exact lowercase 40-character SHA." >&2
+            exit 1
+          }
           if [ "$(git rev-parse HEAD)" != "${EXPECTED_COMMIT}" ]; then
             echo "Checkout does not match expected commit ${EXPECTED_COMMIT}." >&2
             exit 1
@@ -165,6 +143,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Revalidate target immediately before platform push
+        env:
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+
       - name: Build and push platform by digest
         id: push
         # docker/build-push-action v7.3.0
@@ -183,6 +168,8 @@ jobs:
       - name: Export platform digest
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ steps.image.outputs.ref }}
           PLATFORM: ${{ matrix.platform }}
           TAG: ${{ inputs.tag }}
@@ -222,16 +209,49 @@ jobs:
             echo "Invalid ${PLATFORM} architecture digest: ${ARCHITECTURE_DIGEST}." >&2
             exit 1
           fi
+          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
           ARCH_TAG="${TAG}-${TAG_SUFFIX}"
           EXISTING_DIGEST=""
-          if EXISTING_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:${ARCH_TAG}" 2>/dev/null)"; then
+          EXISTING_INSPECT_FILE=$(mktemp)
+          trap 'rm -f "${EXISTING_INSPECT_FILE}"' EXIT
+          inspect_image_state() {
+            local reference=$1 present_output=$2 output output_lines
+            output=$(mktemp)
+            if docker buildx imagetools inspect "${reference}" > "${output}" 2>&1; then
+              cp "${output}" "${present_output}"
+              rm -f "${output}"
+              echo present
+              return 0
+            fi
+            output_lines=$(awk 'END { print NR }' "${output}")
+            if [ "${output_lines}" -eq 1 ] && grep -Eiq \
+              '^ERROR: .*(: 404 Not Found|: not found|: manifest unknown(: manifest unknown)?|: no such manifest)$' \
+              "${output}"; then
+              rm -f "${output}"
+              echo absent
+              return 0
+            fi
+            echo "Could not determine whether image identity ${reference} exists:" >&2
+            cat "${output}" >&2
+            rm -f "${output}"
+            return 1
+          }
+          IMAGE_STATE="$(inspect_image_state \
+            "${IMAGE}:${ARCH_TAG}" "${EXISTING_INSPECT_FILE}")"
+          if [ "${IMAGE_STATE}" = present ]; then
+            EXISTING_INSPECT="$(cat "${EXISTING_INSPECT_FILE}")"
             EXISTING_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${EXISTING_INSPECT}")"
+            if ! [[ "${EXISTING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Could not resolve existing architecture tag ${IMAGE}:${ARCH_TAG} to one digest." >&2
+              exit 1
+            fi
           fi
           if [ -n "${EXISTING_DIGEST}" ] && [ "${EXISTING_DIGEST}" != "${ARCHITECTURE_DIGEST}" ]; then
             echo "Architecture tag ${IMAGE}:${ARCH_TAG} already resolves to ${EXISTING_DIGEST}, expected ${ARCHITECTURE_DIGEST}." >&2
             exit 1
           fi
           if [ -z "${EXISTING_DIGEST}" ]; then
+            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
             docker buildx imagetools create \
               --prefer-index=false \
               --tag "${IMAGE}:${ARCH_TAG}" \
@@ -244,14 +264,41 @@ jobs:
             exit 1
           fi
           mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${TAG_SUFFIX}-${DIGEST#sha256:}-${ARCHITECTURE_DIGEST#sha256:}"
+          jq -S -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg tag "${TAG}" \
+            --arg commit "${EXPECTED_COMMIT}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg tag_suffix "${TAG_SUFFIX}" \
+            --arg platform "${PLATFORM}" \
+            --arg source_digest "${DIGEST}" \
+            --arg architecture_digest "${ARCHITECTURE_DIGEST}" '{
+              schema_version: 1,
+              repository: $repository,
+              tag: $tag,
+              commit: $commit,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              tag_suffix: $tag_suffix,
+              platform: $platform,
+              source_digest: $source_digest,
+              architecture_digest: $architecture_digest
+            }' > "${RUNNER_TEMP}/digests/docker-digest-evidence.json"
           echo "Published early architecture image ${IMAGE}:${ARCH_TAG}@${ARCHITECTURE_DIGEST}."
+
+      - name: Revalidate target immediately before digest evidence upload
+        env:
+          EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
 
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: docker-digests-${{ inputs.tag }}-${{ matrix.tag_suffix }}
-          path: ${{ runner.temp }}/digests/*
+          name: docker-digests-${{ inputs.tag }}-${{ github.run_attempt }}-${{ matrix.tag_suffix }}
+          path: ${{ runner.temp }}/digests/docker-digest-evidence.json
           if-no-files-found: error
           retention-days: 1
 
@@ -268,6 +315,12 @@ jobs:
       image_digest: ${{ steps.publish.outputs.image_digest }}
       platforms_json: ${{ steps.publish.outputs.platforms_json }}
     steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.expected_commit }}
+
       # docker/setup-buildx-action v4.2.0
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
 
@@ -278,16 +331,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # actions/download-artifact v8.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          pattern: docker-digests-${{ inputs.tag }}-*
-          path: ${{ runner.temp }}/digests
-          merge-multiple: true
+      - name: Select authenticated digest evidence attempt
+        id: evidence
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          TARGET_MATRIX: ${{ needs.validate.outputs.target_matrix }}
+        run: |
+          .github/scripts/select-docker-digest-evidence.sh \
+            "${TAG}" "${EXPECTED_COMMIT}" "${GITHUB_SHA}" "${TARGET_MATRIX}" \
+            "${RUNNER_TEMP}/digests"
 
       - name: Publish and verify multi-platform manifest
         id: publish
         env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLATFORMS_JSON: ${{ needs.validate.outputs.platforms_json }}
           PUBLISH_LATEST: ${{ inputs.publish_latest }}
           TAG: ${{ inputs.tag }}
@@ -295,22 +355,17 @@ jobs:
         run: |
           IMAGE="${GHCR_REGISTRY}/${GHCR_IMAGE_NAME}"
           IMAGE="${IMAGE,,}"
-          TAG_ARGS=(-t "${IMAGE}:${TAG}")
-          if [ "${PUBLISH_LATEST}" = true ]; then
-            TAG_ARGS+=(-t "${IMAGE}:latest")
-          fi
           SOURCES=()
           PLATFORMS=()
           EXPECTED_ARCHITECTURE_DIGESTS=()
           while IFS=$'\t' read -r TAG_SUFFIX PLATFORM; do
-            mapfile -t DIGEST_FILES < <(find "${RUNNER_TEMP}/digests" -type f -name "${TAG_SUFFIX}-*" -print | sort)
-            if [ "${#DIGEST_FILES[@]}" -ne 1 ]; then
-              echo "Expected one ${PLATFORM} platform digest, found ${#DIGEST_FILES[@]}." >&2
+            EVIDENCE_FILE="${RUNNER_TEMP}/digests/${TAG_SUFFIX}.json"
+            [ -f "${EVIDENCE_FILE}" ] || {
+              echo "Authenticated ${PLATFORM} digest evidence is missing." >&2
               exit 1
-            fi
-            DIGEST_PAYLOAD="${DIGEST_FILES[0]##*${TAG_SUFFIX}-}"
-            SOURCE_DIGEST="sha256:${DIGEST_PAYLOAD%%-*}"
-            ARCHITECTURE_DIGEST="sha256:${DIGEST_PAYLOAD#*-}"
+            }
+            SOURCE_DIGEST="$(jq -r '.source_digest' "${EVIDENCE_FILE}")"
+            ARCHITECTURE_DIGEST="$(jq -r '.architecture_digest' "${EVIDENCE_FILE}")"
             if ! [[ "${SOURCE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || \
                ! [[ "${ARCHITECTURE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "Invalid ${PLATFORM} source or architecture digest marker." >&2
@@ -330,13 +385,43 @@ jobs:
             echo "Docker source count does not match the declared target matrix." >&2
             exit 1
           fi
-          docker buildx imagetools create "${TAG_ARGS[@]}" "${SOURCES[@]}"
+          inspect_image_state() {
+            local reference=$1 present_output=$2 output output_lines
+            output=$(mktemp)
+            if docker buildx imagetools inspect "${reference}" > "${output}" 2>&1; then
+              cp "${output}" "${present_output}"
+              rm -f "${output}"
+              echo present
+              return 0
+            fi
+            output_lines=$(awk 'END { print NR }' "${output}")
+            if [ "${output_lines}" -eq 1 ] && grep -Eiq \
+              '^ERROR: .*(: 404 Not Found|: not found|: manifest unknown(: manifest unknown)?|: no such manifest)$' \
+              "${output}"; then
+              rm -f "${output}"
+              echo absent
+              return 0
+            fi
+            echo "Could not determine whether image identity ${reference} exists:" >&2
+            cat "${output}" >&2
+            rm -f "${output}"
+            return 1
+          }
+          EXISTING_CANONICAL=$(mktemp)
+          trap 'rm -f "${EXISTING_CANONICAL}"' EXIT
+          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+          CANONICAL_STATE="$(inspect_image_state "${IMAGE}:${TAG}" "${EXISTING_CANONICAL}")"
+          if [ "${CANONICAL_STATE}" = absent ]; then
+            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+            docker buildx imagetools create --tag "${IMAGE}:${TAG}" "${SOURCES[@]}"
+          fi
           IMAGE_INDEX="$(docker buildx imagetools inspect \
             "${IMAGE}:${TAG}" \
             --format '{{json .Manifest}}')"
           IMAGE_DIGEST="$(jq -r '.digest // empty' <<< "${IMAGE_INDEX}")"
-          if [ -z "${IMAGE_DIGEST}" ]; then
-            echo "Could not resolve published manifest digest." >&2
+          if ! jq -e -f .github/scripts/verify-registry-index.jq \
+            <<< "${IMAGE_INDEX}" >/dev/null; then
+            echo "Published manifest descriptor set differs from the release contract." >&2
             exit 1
           fi
           for INDEX in "${!PLATFORMS[@]}"; do
@@ -368,6 +453,10 @@ jobs:
             fi
           done
           if [ "${PUBLISH_LATEST}" = true ]; then
+            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+            docker buildx imagetools create \
+              --tag "${IMAGE}:latest" \
+              "${IMAGE}@${IMAGE_DIGEST}"
             LATEST_INSPECT="$(docker buildx imagetools inspect "${IMAGE}:latest")"
             LATEST_DIGEST="$(awk '$1 == "Digest:" { print $2; exit }' <<< "${LATEST_INSPECT}")"
             if [ "${LATEST_DIGEST}" != "${IMAGE_DIGEST}" ]; then

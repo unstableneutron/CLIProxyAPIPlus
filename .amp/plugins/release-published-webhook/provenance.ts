@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readZipBasenames } from "./zip";
+import releaseAssetContract from "../../../.github/release-asset-contract.json";
 
 export const REPOSITORY = "unstableneutron/CLIProxyAPIPlus";
 export const REPOSITORY_ID = 1247056725;
@@ -9,7 +10,7 @@ export const BOT_LOGIN = "github-actions[bot]";
 export const BOT_ID = 41898282;
 export const IMAGE = "ghcr.io/unstableneutron/cli-proxy-api-plus";
 
-const RELEASE_TAG = /^v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.[0-9]+$/;
+const RELEASE_TAG = /^v[0-9][0-9A-Za-z._+-]*[-.]unstableneutron\.(?:0|[1-9][0-9]*)$/;
 const SOURCE_TAG = /^v[0-9A-Za-z][0-9A-Za-z._+-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -19,6 +20,10 @@ const MAXIMUM_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAXIMUM_STATE_BYTES = 64_000;
 const MAXIMUM_METADATA_BYTES = 1_000_000;
 const MAXIMUM_ASSET_BYTES = 2_000_000_000;
+const MAXIMUM_HOTFIX_CHAIN_NODES = 3;
+export const MAXIMUM_GITHUB_JSON_BYTES = 1_000_000;
+export const MAXIMUM_GITHUB_DOWNLOAD_BYTES = 4_000_000;
+export const MAXIMUM_REGISTRY_MANIFEST_BYTES = 1_000_000;
 
 const UPSTREAM_WORKFLOW = ".github/workflows/upstream-sync-v2.yml";
 const HOTFIX_WORKFLOW = ".github/workflows/hotfix-release.yml";
@@ -57,6 +62,11 @@ const RECEIPT_CORE_KEYS = [
   "workflow_run_id",
   "architecture_images",
 ] as const;
+const RECEIPT_CORE_V3_KEYS = [
+  ...RECEIPT_CORE_KEYS,
+  "release_asset_identities",
+  "release_workflow",
+] as const;
 
 const HOTFIX_RECEIPT_KEYS = [
   ...RECEIPT_CORE_KEYS,
@@ -67,6 +77,8 @@ const HOTFIX_RECEIPT_KEYS = [
   "release_asset_digests",
   "release_workflow",
 ] as const;
+const HOTFIX_RECEIPT_V2_KEYS = [...HOTFIX_RECEIPT_KEYS, "accepted_upstream_root"] as const;
+const RELEASE_LINK_KEYS = ["tag", "commit", "receipt", "workflow", "artifact"] as const;
 
 const INDEX_MEDIA_TYPES = new Set([
   "application/vnd.oci.image.index.v1+json",
@@ -82,10 +94,32 @@ type JSONObject = Record<string, unknown>;
 
 export class RejectedDelivery extends Error {}
 export class RetryableNotReady extends Error {}
+export class RegistryHTTPError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RegistryHTTPError";
+  }
+}
+export class GitHubHTTPError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GitHubHTTPError";
+  }
+}
 
 export interface GitHubClient {
   get(path: string, signal: AbortSignal): Promise<unknown>;
-  bytes(url: string, signal: AbortSignal): Promise<Uint8Array>;
+  bytes(
+    url: string,
+    signal: AbortSignal,
+    maximumBytes: number,
+  ): Promise<Uint8Array>;
 }
 
 export interface RegistryManifest {
@@ -115,7 +149,12 @@ export interface VerifiedRelease {
   workflowRunID: number;
   workflowRunAttempt: number;
   /** Opaque inputs retained only for the immediate pre-claim resampling. */
-  revalidation: { payload: unknown; receivedAt: string; now: () => number };
+  revalidation: {
+    payload: unknown;
+    receivedAt: string;
+    now: () => number;
+    currentEvidence: string;
+  };
 }
 
 export interface ValidateReleaseOptions {
@@ -149,12 +188,87 @@ interface AnnotatedTag {
 }
 
 interface ReceiptCore {
+  schemaVersion: number;
   workflowRunID: number;
+  workflowRunAttempt?: number;
   imageDigest: string;
   architectureImages: JSONObject;
 }
 
 const PLAN_KEYS = ["original_tag","plus_tag","pre_sync_head","base_fork_commit","original_repository","plus_repository","models_repository","original_head","plus_tag_head","plus_head","models_commit","plus_head_included","plus_head_already_represented","plus_head_delta_paths","unsafe_plus_head_delta_paths","blocked","block_reason","fork_tag_prefix","latest_fork_tag","latest_fork_models_commit","latest_fork_suffix","next_fork_tag","expected_fork_tag","safe_sync_id","plan_fingerprint","candidate_branch","snapshot_namespace","original_snapshot_ref","plus_tag_snapshot_ref","plus_head_snapshot_ref","models_snapshot_ref","target_drift","target_drift_summary","has_changes"];
+
+function safeRefComponent(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
+function forkTagPrefixForSourceTag(sourceTag: string): string {
+  if (!SOURCE_TAG.test(sourceTag)) throw new RejectedDelivery("source tag differs");
+  return `${sourceTag}${sourceTag.includes("-") ? "." : "-"}unstableneutron`;
+}
+
+function releaseTagParts(tag: string): { prefix: string; suffix: number } {
+  if (!RELEASE_TAG.test(tag)) throw new RejectedDelivery("release tag grammar differs");
+  const separator = tag.lastIndexOf(".");
+  const suffix = Number(tag.slice(separator + 1));
+  if (!Number.isSafeInteger(suffix) || suffix >= Number.MAX_SAFE_INTEGER)
+    throw new RejectedDelivery("release tag suffix differs");
+  return {
+    prefix: tag.slice(0, separator),
+    suffix,
+  };
+}
+
+export function isReleaseTag(tag: string): boolean {
+  try {
+    releaseTagParts(tag);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function expectedReleaseArchives(tag: string): string[] {
+  releaseTagParts(tag);
+  const contract = releaseAssetContract as unknown as JSONObject;
+  if (
+    Object.keys(contract).sort().join() !==
+      ["archive_suffixes", "schema_version"].join() ||
+    contract.schema_version !== 1 ||
+    !Array.isArray(contract.archive_suffixes) ||
+    contract.archive_suffixes.length === 0 ||
+    new Set(contract.archive_suffixes).size !== contract.archive_suffixes.length ||
+    contract.archive_suffixes.some(
+      (suffix) =>
+        typeof suffix !== "string" ||
+        !/^[a-z0-9_-]+(?:\.tar\.gz|\.zip)$/.test(suffix),
+    )
+  ) {
+    throw new RejectedDelivery("release asset contract differs");
+  }
+  return contract.archive_suffixes.map(
+    (suffix) => `CLIProxyAPIPlus_${tag.slice(1)}_${suffix}`,
+  );
+}
+
+function expectedFinalPlanFingerprint(state: UpstreamState, tag: string, commit: string): string {
+  const input = [
+    `base_fork_commit=${commit}`,
+    `original_tag=${state.ORIGINAL_TAG}`,
+    `original_commit=${state.ORIGINAL_COMMIT}`,
+    `plus_tag=${state.PLUS_TAG}`,
+    `plus_tag_commit=${state.PLUS_TAG_COMMIT}`,
+    `plus_head_commit=${state.PLUS_HEAD_COMMIT}`,
+    `plus_head_included=${state.PLUS_HEAD_INCLUDED}`,
+    `models_commit=${state.MODELS_COMMIT}`,
+    `expected_fork_tag=${tag}`,
+    "",
+  ].join("\n");
+  const body = Buffer.from(input);
+  return createHash("sha1")
+    .update(`blob ${body.length}\0`)
+    .update(body)
+    .digest("hex");
+}
 
 function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, commit: string): void {
   let text: string;
@@ -171,6 +285,14 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
     sha(values[key], `final plan ${key}`);
   for (const key of ["plus_head_included","plus_head_already_represented","blocked","target_drift","has_changes"])
     if (values[key] !== "true" && values[key] !== "false") throw new RejectedDelivery("final plan boolean differs");
+  const tagParts = releaseTagParts(tag);
+  if (tagParts.prefix !== forkTagPrefixForSourceTag(state.ORIGINAL_TAG))
+    throw new RejectedDelivery("final plan release tag differs");
+  const suffix = tagParts.suffix;
+  const expectedFingerprint = expectedFinalPlanFingerprint(state, tag, commit);
+  const safeSyncID = safeRefComponent(state.SYNC_ID);
+  const expectedCandidate = `upstream-sync/${safeSyncID}-${expectedFingerprint.slice(0, 12)}`;
+  const snapshotNamespace = `refs/upstream-sync/${expectedFingerprint}`;
   if (values.original_tag !== state.ORIGINAL_TAG || values.plus_tag !== state.PLUS_TAG ||
       values.pre_sync_head !== commit || values.base_fork_commit !== commit ||
       values.original_repository !== state.ORIGINAL_REPOSITORY || values.plus_repository !== state.PLUS_REPOSITORY ||
@@ -178,6 +300,13 @@ function parseFinalPlan(bytes: Uint8Array, state: UpstreamState, tag: string, co
       values.plus_tag_head !== state.PLUS_TAG_COMMIT || values.plus_head !== state.PLUS_HEAD_COMMIT || values.models_commit !== state.MODELS_COMMIT ||
       values.plus_head_included !== state.PLUS_HEAD_INCLUDED || values.safe_sync_id !== state.SYNC_ID ||
       values.latest_fork_tag !== tag || values.expected_fork_tag !== tag || values.latest_fork_models_commit !== state.MODELS_COMMIT ||
+      values.plus_head_already_represented !== "true" || values.plus_head_delta_paths !== "" || values.unsafe_plus_head_delta_paths !== "" ||
+      values.block_reason !== "" || values.fork_tag_prefix !== tagParts.prefix || values.latest_fork_suffix !== String(suffix) ||
+      values.next_fork_tag !== `${tagParts.prefix}.${suffix + 1}` || values.plan_fingerprint !== expectedFingerprint ||
+      values.candidate_branch !== expectedCandidate || values.snapshot_namespace !== snapshotNamespace ||
+      values.original_snapshot_ref !== `${snapshotNamespace}/original` || values.plus_tag_snapshot_ref !== `${snapshotNamespace}/plus-tag` ||
+      values.plus_head_snapshot_ref !== `${snapshotNamespace}/plus-head` || values.models_snapshot_ref !== `${snapshotNamespace}/models` ||
+      values.target_drift_summary !== "" ||
       values.has_changes !== "false" || values.target_drift !== "false" || values.blocked !== "false")
     throw new RejectedDelivery("final plan identity differs");
 }
@@ -190,10 +319,30 @@ function validateRunState(bytes: Uint8Array, state: UpstreamState, receipt: JSON
   exactKeys(target,["base_fork_commit","original","plus","models_commit","sync_id","plan_fingerprint","expected_fork_tag","target_drift","blocked"],"run state target");
   exactKeys(candidate,["branch","sha","acceptable","validation_status"],"run state candidate"); exactKeys(repair,["imported","pr","sha"],"run state repair");
   exactKeys(final,["status","plan_fingerprint","has_changes","target_drift","blocked"],"run state final plan"); exactKeys(promotion,["commit","tag"],"run state promotion");
-  exactKeys(release,["url","assets","image","image_digest","platforms","architecture_images"],"run state release");
+  const releaseKeys = receipt.schema_version === 3
+    ? ["url","assets","image","image_digest","platforms","architecture_images","asset_identities"]
+    : ["url","assets","image","image_digest","platforms","architecture_images"];
+  exactKeys(release, releaseKeys, "run state release");
   const original=object(target.original,"run state original"), plus=object(target.plus,"run state plus"); exactKeys(original,["tag","commit"],"run state original"); exactKeys(plus,["tag","tag_commit","head","head_included"],"run state plus");
-  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || !SHA.test(string(final.plan_fingerprint,"final fingerprint")) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || JSON.stringify(release)!==JSON.stringify({url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images})) throw new RejectedDelivery("run state identity differs");
+  const expectedRelease: JSONObject = {url:receipt.release_url,assets:receipt.release_assets,image:receipt.image,image_digest:receipt.image_digest,platforms:receipt.platforms,architecture_images:receipt.architecture_images};
+  if (receipt.schema_version === 3) expectedRelease.asset_identities = receipt.release_asset_identities;
+  if (run.schema_version!==1 || run.state!=="released" || target.base_fork_commit!==state.BASE_FORK_COMMIT || original.tag!==state.ORIGINAL_TAG || original.commit!==state.ORIGINAL_COMMIT || plus.tag!==state.PLUS_TAG || plus.tag_commit!==state.PLUS_TAG_COMMIT || plus.head!==state.PLUS_HEAD_COMMIT || plus.head_included!==(state.PLUS_HEAD_INCLUDED==="true") || target.models_commit!==state.MODELS_COMMIT || target.sync_id!==state.SYNC_ID || target.plan_fingerprint!==state.PLAN_FINGERPRINT || target.expected_fork_tag!==tag || typeof target.target_drift!=="boolean" || target.blocked!==false || candidate.branch!==state.CANDIDATE_BRANCH || candidate.sha!==commit || candidate.acceptable!==true || candidate.validation_status!=="passed" || promotion.commit!==commit || promotion.tag!==tag || final.status!=="clean-noop" || final.plan_fingerprint!==expectedFinalPlanFingerprint(state, tag, commit) || final.has_changes!==false || final.target_drift!==false || final.blocked!==false || run.runtime_smoke!=="not_run" || run.vn3_deployed!==false || !sameJSON(release,expectedRelease)) throw new RejectedDelivery("run state identity differs");
   if (repair.imported===false ? (repair.pr!==null || repair.sha!==null) : (repair.imported!==true || !Number.isSafeInteger(repair.pr) || (repair.pr as number) <= 0 || repair.sha!==commit)) throw new RejectedDelivery("run state repair differs");
+}
+
+function sameJSON(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+      left.every((entry, index) => sameJSON(entry, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  const leftObject = left as JSONObject;
+  const rightObject = right as JSONObject;
+  const leftKeys = Object.keys(leftObject).sort();
+  const rightKeys = Object.keys(rightObject).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) =>
+    key === rightKeys[index] && sameJSON(leftObject[key], rightObject[key]));
 }
 
 function object(value: unknown, field: string): JSONObject {
@@ -317,14 +466,17 @@ function validateFreshness(
 ): void {
   const published = canonicalUtcTimestamp(publishedAt, false);
   const received = canonicalUtcTimestamp(receivedAt, true);
-  const ages = [received - published, now - published];
+  // Amp records receivedAt when it accepts the durable event and preserves it
+  // across at-least-once retries, so delayed finalization must not refresh it.
+  const deliveryAge = received - published;
+  const retryAge = now - received;
   if (
     !Number.isFinite(published) ||
     !Number.isFinite(received) ||
     !Number.isFinite(now) ||
-    ages.some(
-      (age) => age > MAXIMUM_RELEASE_AGE_MS || age < -MAXIMUM_CLOCK_SKEW_MS,
-    )
+    deliveryAge > MAXIMUM_RELEASE_AGE_MS ||
+    deliveryAge < -MAXIMUM_CLOCK_SKEW_MS ||
+    retryAge < -MAXIMUM_CLOCK_SKEW_MS
   ) {
     throw new RejectedDelivery("release timestamp is stale or future");
   }
@@ -416,8 +568,10 @@ export function parseUpstreamState(bytes: Uint8Array): UpstreamState {
   ) {
     throw new RejectedDelivery("state tag is invalid");
   }
+  if (releaseTagParts(state.EXPECTED_FORK_TAG).prefix !== forkTagPrefixForSourceTag(state.ORIGINAL_TAG))
+    throw new RejectedDelivery("state release line differs");
 
-  const syncID = `original-${state.ORIGINAL_TAG}_plus-${state.PLUS_TAG}`;
+  const syncID = `original-${safeRefComponent(state.ORIGINAL_TAG)}_plus-${safeRefComponent(state.PLUS_TAG)}`;
   const candidateBranch = `upstream-sync/${syncID}-${state.PLAN_FINGERPRINT.slice(0, 12)}`;
   if (state.SYNC_ID !== syncID || state.CANDIDATE_BRANCH !== candidateBranch) {
     throw new RejectedDelivery("state linkage differs");
@@ -531,6 +685,11 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && Buffer.from(a).equals(Buffer.from(b));
 }
 
+interface WorkflowArtifactResult {
+  files: Map<string, Uint8Array>;
+  identity: string;
+}
+
 async function workflowArtifact(
   client: GitHubClient,
   runID: number,
@@ -540,7 +699,8 @@ async function workflowArtifact(
   signal: AbortSignal,
   current: boolean,
   expectedHeadSHA: string,
-): Promise<Map<string, Uint8Array>> {
+  expected?: { id: number; digest: string; name: string },
+): Promise<WorkflowArtifactResult> {
   const response = object(await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}/artifacts?per_page=100`, signal), "workflow artifacts");
   if (!Array.isArray(response.artifacts) || !Number.isSafeInteger(response.total_count) || response.total_count !== response.artifacts.length)
     throw new RejectedDelivery("workflow artifact listing is malformed");
@@ -553,6 +713,7 @@ async function workflowArtifact(
   if (matches.length !== 1) throw new RejectedDelivery("workflow artifact is duplicated");
   const artifact = object(matches[0], "workflow artifact");
   const id = integer(artifact.id, "artifact ID"), size = integer(artifact.size_in_bytes, "artifact size");
+  const artifactDigest = digest(artifact.digest, "artifact digest");
   const run = object(artifact.workflow_run, "artifact workflow run");
   if (artifact.name !== expectedName || artifact.expired !== false || size < 1 || size > 4_000_000 ||
       artifact.archive_download_url !== `https://api.github.com/repos/${REPOSITORY}/actions/artifacts/${id}/zip` ||
@@ -560,8 +721,15 @@ async function workflowArtifact(
     if (artifact.expired === true && current) throw new RejectedDelivery("workflow artifact is expired");
     throw new RejectedDelivery("workflow artifact identity differs");
   }
-  const zip = await client.bytes(string(artifact.archive_download_url, "artifact archive URL"), signal);
+  if (expected && (expected.id !== id || expected.name !== expectedName || expected.digest !== artifactDigest))
+    throw new RejectedDelivery("workflow artifact receipt identity differs");
+  const zip = await client.bytes(
+    string(artifact.archive_download_url, "artifact archive URL"),
+    signal,
+    size,
+  );
   if (zip.length !== size) throw new RejectedDelivery("workflow artifact size differs");
+  if (digestBytes(zip) !== artifactDigest) throw new RejectedDelivery("workflow artifact digest differs");
   let files: Map<string, Uint8Array>;
   try { files = readZipBasenames(zip); } catch { throw new RejectedDelivery("workflow artifact ZIP is invalid"); }
   const receiptName = kind === "upstream" ? "upstream-sync-receipt.json" : "hotfix-release-receipt.json";
@@ -576,10 +744,27 @@ async function workflowArtifact(
     const independent = files.get("independently-verified-receipt.json");
     if (!independent || !equalBytes(independent, receiptBytes)) throw new RejectedDelivery("independent receipt bytes differ");
   }
-  return files;
+  return {
+    files,
+    identity: JSON.stringify({
+      id,
+      name: expectedName,
+      digest: artifactDigest,
+      size,
+      archiveURL: artifact.archive_download_url,
+      runID,
+      repositoryID: run.repository_id,
+      headRepositoryID: run.head_repository_id,
+      headSHA: run.head_sha,
+    }),
+  };
 }
 
-function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAssets {
+function classifyAssets(
+  release: JSONObject,
+  tag: string,
+  allowNotReady = true,
+): ReleaseAssets {
   if (!Array.isArray(release.assets))
     throw new RejectedDelivery("release assets differ");
   const all = release.assets.map(validateAsset);
@@ -591,11 +776,11 @@ function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAsset
     "upstream-sync-receipt.json",
     "hotfix-release-receipt.json",
   ]);
+  const expectedArchiveNames = expectedReleaseArchives(tag);
+  const expectedArchives = new Set(expectedArchiveNames);
   const receipts = all.filter((asset) => receiptNames.has(asset.name));
   const checksums = all.filter((asset) => asset.name === "checksums.txt");
-  const archives = all.filter((asset) =>
-    /^CLIProxyAPIPlus_[A-Za-z0-9._+-]+\.(?:tar\.gz|zip)$/.test(asset.name),
-  );
+  const archives = all.filter((asset) => expectedArchives.has(asset.name));
   const knownCount = receipts.length + checksums.length + archives.length;
   if (receipts.length > 1) {
     throw new RejectedDelivery("release must contain exactly one receipt");
@@ -605,7 +790,7 @@ function classifyAssets(release: JSONObject, allowNotReady = true): ReleaseAsset
   }
   if (
     checksums.length === 0 ||
-    archives.length === 0 ||
+    archives.length !== expectedArchiveNames.length ||
     receipts.length === 0
   ) {
     if (!allowNotReady)
@@ -632,7 +817,7 @@ async function downloadAsset(
 ): Promise<Uint8Array> {
   if (asset.size > maximumBytes)
     throw new RejectedDelivery("metadata asset size is invalid");
-  const bytes = await client.bytes(asset.url, signal);
+  const bytes = await client.bytes(asset.url, signal, asset.size);
   if (bytes.length !== asset.size || digestBytes(bytes) !== asset.digest) {
     throw new RejectedDelivery("asset bytes digest differs");
   }
@@ -704,10 +889,11 @@ function validateReceiptCore(
   release: JSONObject,
   commit: string,
   state: UpstreamState,
-  expectedAssets: string[],
+  assets: ReleaseAssets,
 ): ReceiptCore {
+  const schemaVersion = integer(receipt.schema_version, "receipt schema version");
   if (
-    receipt.schema_version !== 2 ||
+    (schemaVersion !== 2 && schemaVersion !== 3) ||
     receipt.sync_id !== state.SYNC_ID ||
     receipt.plan_fingerprint !== state.PLAN_FINGERPRINT ||
     receipt.main_commit !== commit ||
@@ -723,7 +909,7 @@ function validateReceiptCore(
   }
   compareSortedStrings(
     receipt.release_assets,
-    expectedAssets,
+    assets.nonReceipt.map((asset) => asset.name).sort(),
     "receipt assets",
   );
   compareSortedStrings(
@@ -735,8 +921,55 @@ function validateReceiptCore(
     receipt.architecture_images,
     string(release.tag_name, "release tag"),
   );
+  const workflowRunID = decimalInteger(receipt.workflow_run_id, "workflow run ID");
+  let workflowRunAttempt: number | undefined;
+  if (schemaVersion === 3) {
+    const identities = object(
+      receipt.release_asset_identities,
+      "release asset identities",
+    );
+    exactKeys(
+      identities,
+      assets.nonReceipt.map((asset) => asset.name),
+      "release asset identities",
+    );
+    for (const asset of assets.nonReceipt) {
+      const identity = object(
+        identities[asset.name],
+        `release asset identity ${asset.name}`,
+      );
+      exactKeys(identity, ["id", "size", "digest"], "release asset identity");
+      if (
+        integer(identity.id, "release asset ID") !== asset.id ||
+        integer(identity.size, "release asset size") !== asset.size ||
+        digest(identity.digest, "release asset digest") !== asset.digest
+      ) {
+        throw new RejectedDelivery("release asset identity differs");
+      }
+    }
+    const workflow = object(receipt.release_workflow, "release workflow receipt");
+    exactKeys(
+      workflow,
+      ["path", "ref", "commit", "run_id", "run_attempt"],
+      "release workflow receipt",
+    );
+    workflowRunAttempt = decimalInteger(
+      workflow.run_attempt,
+      "release workflow run attempt",
+    );
+    if (
+      workflow.path !== UPSTREAM_WORKFLOW ||
+      workflow.ref !== `${REPOSITORY}/${UPSTREAM_WORKFLOW}@refs/heads/main` ||
+      workflow.commit !== commit ||
+      decimalInteger(workflow.run_id, "release workflow run ID") !== workflowRunID
+    ) {
+      throw new RejectedDelivery("release workflow receipt differs");
+    }
+  }
   return {
-    workflowRunID: decimalInteger(receipt.workflow_run_id, "workflow run ID"),
+    schemaVersion,
+    workflowRunID,
+    workflowRunAttempt,
     imageDigest: digest(receipt.image_digest, "receipt image digest"),
     architectureImages,
   };
@@ -748,12 +981,26 @@ async function validateWorkflowRun(
   workflowPath: string,
   commit: string,
   signal: AbortSignal,
-  options: { hotfix: boolean; allowNotReady: boolean },
-): Promise<{ attempt: number; headSHA: string }> {
+  options: {
+    hotfix: boolean;
+    allowNotReady: boolean;
+    allowFailedHotfixEvidence?: boolean;
+    allowFailedUpstreamEvidence?: boolean;
+    exactAttempt?: number;
+    requireFailedHotfixEvidence?: boolean;
+    requireFailedUpstreamEvidence?: boolean;
+  },
+): Promise<{ attempt: number; headSHA: string; successful: boolean }> {
+  const endpoint = options.exactAttempt === undefined
+    ? `/repos/${REPOSITORY}/actions/runs/${runID}`
+    : `/repos/${REPOSITORY}/actions/runs/${runID}/attempts/${options.exactAttempt}`;
   const run = object(
-    await client.get(`/repos/${REPOSITORY}/actions/runs/${runID}`, signal),
+    await client.get(endpoint, signal),
     "workflow run",
   );
+  if (integer(run.id, "workflow run ID") !== runID) {
+    throw new RejectedDelivery("workflow run ID differs");
+  }
   repository(run.repository, "workflow repository");
   identity(run.actor, OWNER_LOGIN, OWNER_ID, "User", "workflow actor");
   if (run.status === "queued" || run.status === "in_progress") {
@@ -761,11 +1008,24 @@ async function validateWorkflowRun(
       throw new RetryableNotReady("release workflow is not complete");
     throw new RejectedDelivery("release workflow is incomplete");
   }
+  const successful = run.conclusion === "success";
+  const recoverableHotfixFailure =
+    options.hotfix &&
+    options.allowFailedHotfixEvidence === true &&
+    ["failure", "cancelled", "timed_out"].includes(
+      string(run.conclusion, "workflow conclusion"),
+    );
+  const recoverableUpstreamFailure =
+    !options.hotfix &&
+    options.allowFailedUpstreamEvidence === true &&
+    ["failure", "cancelled", "timed_out"].includes(
+      string(run.conclusion, "workflow conclusion"),
+    );
   if (
     run.path !== workflowPath ||
     run.head_branch !== "main" ||
     run.status !== "completed" ||
-    run.conclusion !== "success"
+    (!successful && !recoverableHotfixFailure && !recoverableUpstreamFailure)
   ) {
     throw new RejectedDelivery("workflow run identity differs");
   }
@@ -778,7 +1038,14 @@ async function validateWorkflowRun(
     throw new RejectedDelivery("workflow event differs");
   }
   const attempt = integer(run.run_attempt, "workflow run attempt");
-  if (attempt < 1) throw new RejectedDelivery("workflow run attempt differs");
+  if (
+    attempt < 1 ||
+    (options.exactAttempt !== undefined && attempt !== options.exactAttempt) ||
+    ((options.requireFailedHotfixEvidence === true ||
+      options.requireFailedUpstreamEvidence === true) && successful)
+  ) {
+    throw new RejectedDelivery("workflow run attempt differs");
+  }
 
   const runHeadSHA = sha(run.head_sha, "workflow head SHA");
   if (options.hotfix) {
@@ -796,14 +1063,16 @@ async function validateWorkflowRun(
       throw new RejectedDelivery("workflow head is not an ancestor");
     }
   }
-  return { attempt, headSHA: runHeadSHA };
+  return { attempt, headSHA: runHeadSHA, successful };
 }
 
 function parseManifest(manifest: RegistryManifest, field: string): JSONObject {
   if (
-    !DIGEST.test(manifest.digest) ||
-    digestBytes(manifest.bytes) !== manifest.digest
-  ) {
+    manifest.bytes.length < 1 ||
+    manifest.bytes.length > MAXIMUM_REGISTRY_MANIFEST_BYTES
+  )
+    throw new RejectedDelivery(`${field} size differs`);
+  if (!DIGEST.test(manifest.digest) || digestBytes(manifest.bytes) !== manifest.digest) {
     throw new RejectedDelivery(`${field} digest differs`);
   }
   return object(parseJSON(manifest.bytes, field), field);
@@ -995,11 +1264,29 @@ function validateCanonicalReleaseIdentity(
 }
 
 function nextHotfixTag(baseTag: string): string {
-  const match = /^(v[0-9]+\.[0-9]+\.[0-9]+-unstableneutron\.)([0-9]+)$/.exec(
-    baseTag,
-  );
-  if (!match) throw new RejectedDelivery("previous release tag differs");
-  return `${match[1]}${Number(match[2]) + 1}`;
+  const { prefix, suffix } = releaseTagParts(baseTag);
+  return `${prefix}.${suffix + 1}`;
+}
+
+interface ReleaseLink {
+  tag: string; commit: string;
+  receipt: { name: string; id: number; digest: string };
+  workflow: { path: string; runID: number; attempt: number; headSHA: string };
+  artifact: { id: number; name: string; digest: string };
+}
+
+function releaseLink(value: unknown, kind: "upstream" | "hotfix", field: string): ReleaseLink {
+  const link = object(value, field); exactKeys(link, RELEASE_LINK_KEYS, field);
+  const receipt = object(link.receipt, `${field} receipt`), workflow = object(link.workflow, `${field} workflow`), artifact = object(link.artifact, `${field} artifact`);
+  exactKeys(receipt, ["name", "asset_id", "digest"], `${field} receipt`);
+  exactKeys(workflow, ["path", "run_id", "run_attempt", "head_sha"], `${field} workflow`);
+  exactKeys(artifact, ["id", "name", "digest"], `${field} artifact`);
+  const runID = decimalInteger(workflow.run_id, `${field} workflow run ID`), attempt = decimalInteger(workflow.run_attempt, `${field} workflow attempt`);
+  const expectedKind = kind === "upstream" ? "upstream-sync" : "hotfix-release";
+  const result = { tag: string(link.tag, `${field} tag`), commit: sha(link.commit, `${field} commit`), receipt: { name: string(receipt.name, `${field} receipt name`), id: decimalInteger(receipt.asset_id, `${field} receipt asset ID`), digest: digest(receipt.digest, `${field} receipt digest`) }, workflow: { path: string(workflow.path, `${field} workflow path`), runID, attempt, headSHA: sha(workflow.head_sha, `${field} workflow head SHA`) }, artifact: { id: decimalInteger(artifact.id, `${field} artifact ID`), name: string(artifact.name, `${field} artifact name`), digest: digest(artifact.digest, `${field} artifact digest`) } };
+  if (result.receipt.name !== `${expectedKind}-receipt.json` || result.workflow.path !== (kind === "upstream" ? UPSTREAM_WORKFLOW : HOTFIX_WORKFLOW) || result.artifact.name !== `${expectedKind}-receipt-${runID}-${attempt}`)
+    throw new RejectedDelivery(`${field} identity differs`);
+  return result;
 }
 
 async function validatePreviousUpstreamRelease(
@@ -1010,6 +1297,7 @@ async function validatePreviousUpstreamRelease(
   currentStateBytes: Uint8Array,
   currentState: UpstreamState,
   signal: AbortSignal,
+  expected?: ReleaseLink,
 ): Promise<void> {
   const byTag = object(
     await client.get(
@@ -1037,7 +1325,8 @@ async function validatePreviousUpstreamRelease(
     release.prerelease !== false ||
     byTag.prerelease !== release.prerelease ||
     release.target_commitish !== "main" ||
-    byTag.target_commitish !== release.target_commitish
+    byTag.target_commitish !== release.target_commitish ||
+    !sameJSON(byTag.assets, release.assets)
   ) {
     throw new RejectedDelivery("previous release identity differs");
   }
@@ -1063,7 +1352,7 @@ async function validatePreviousUpstreamRelease(
     throw new RejectedDelivery("previous upstream state differs");
   }
 
-  const assets = classifyAssets(release, false);
+  const assets = classifyAssets(release, baseTag, false);
   await validateChecksums(client, assets, signal);
   if (
     assets.receipts.length !== 1 ||
@@ -1077,18 +1366,24 @@ async function validatePreviousUpstreamRelease(
         signal,
         MAXIMUM_METADATA_BYTES,
       );
+  if (expected && (expected.tag !== baseTag || expected.commit !== baseCommit || expected.receipt.id !== assets.receipts[0].id || expected.receipt.name !== assets.receipts[0].name || expected.receipt.digest !== assets.receipts[0].digest))
+    throw new RejectedDelivery("recorded upstream root identity differs");
   const receipt = object(
     parseJSON(previousReceiptBytes, "previous receipt"),
     "previous receipt",
   );
-  exactKeys(receipt, RECEIPT_CORE_KEYS, "previous receipt");
-  const expectedAssets = assets.nonReceipt.map((asset) => asset.name).sort();
+  const previousSchema = integer(receipt.schema_version, "previous receipt schema");
+  exactKeys(
+    receipt,
+    previousSchema === 3 ? RECEIPT_CORE_V3_KEYS : RECEIPT_CORE_KEYS,
+    "previous receipt",
+  );
   const core = validateReceiptCore(
     receipt,
     release,
     baseCommit,
     previousState.state,
-    expectedAssets,
+    assets,
   );
   const previousRun = await validateWorkflowRun(
     client,
@@ -1101,8 +1396,29 @@ async function validatePreviousUpstreamRelease(
       allowNotReady: false,
     },
   );
-  const previousArtifact = await workflowArtifact(client, core.workflowRunID, previousRun.attempt, "upstream", previousReceiptBytes, signal, false, previousRun.headSHA);
-  const runState = previousArtifact.get("run-state.json");
+  const evidenceAttempt = core.workflowRunAttempt ?? previousRun.attempt;
+  if (evidenceAttempt > previousRun.attempt)
+    throw new RejectedDelivery("previous release workflow attempt differs");
+  if (evidenceAttempt < previousRun.attempt) {
+    await validateWorkflowRun(
+      client,
+      core.workflowRunID,
+      UPSTREAM_WORKFLOW,
+      baseCommit,
+      signal,
+      {
+        hotfix: false,
+        allowNotReady: false,
+        allowFailedUpstreamEvidence: true,
+        exactAttempt: evidenceAttempt,
+        requireFailedUpstreamEvidence: true,
+      },
+    );
+  }
+  if (expected && (expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== evidenceAttempt || expected.workflow.headSHA !== previousRun.headSHA))
+    throw new RejectedDelivery("recorded upstream root workflow differs");
+  const previousArtifact = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "upstream", previousReceiptBytes, signal, false, previousRun.headSHA, expected?.artifact);
+  const runState = previousArtifact.files.get("run-state.json");
   if (!runState) throw new RejectedDelivery("historical run state is unavailable");
   validateRunState(runState, previousState.state, receipt, baseCommit, baseTag);
   await verifyRegistry(
@@ -1117,13 +1433,87 @@ async function validatePreviousUpstreamRelease(
   );
 }
 
-export async function validateRelease(
+async function historicalEvidence<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (
+      (error instanceof GitHubHTTPError || error instanceof RegistryHTTPError) &&
+      (error.status === 404 || error.status === 410)
+    ) {
+      throw new RejectedDelivery("historical release evidence is unavailable");
+    }
+    throw error;
+  }
+}
+
+async function validateHistoricalHotfix(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
+  return historicalEvidence(() => validateHistoricalHotfixEvidence(client, registry, expected, root, stateBytes, state, signal, seen, depth));
+}
+
+async function validateHistoricalHotfixEvidence(client: GitHubClient, registry: RegistryClient, expected: ReleaseLink, root: ReleaseLink, stateBytes: Uint8Array, state: UpstreamState, signal: AbortSignal, seen: Set<string>, depth: number): Promise<void> {
+  if (depth >= MAXIMUM_HOTFIX_CHAIN_NODES || seen.has(expected.tag) || seen.has(expected.commit)) throw new RejectedDelivery("hotfix chain cycle or bound exceeded");
+  seen.add(expected.tag); seen.add(expected.commit);
+  const byTag = object(await client.get(`/repos/${REPOSITORY}/releases/tags/${encodeURIComponent(expected.tag)}`, signal), "historical release");
+  const id = integer(byTag.id, "historical release ID"), release = object(await client.get(`/repos/${REPOSITORY}/releases/${id}`, signal), "canonical historical release");
+  if (release.id !== id || release.tag_name !== expected.tag || byTag.tag_name !== expected.tag || release.html_url !== `https://github.com/${REPOSITORY}/releases/tag/${expected.tag}` || byTag.html_url !== release.html_url || release.assets_url !== `https://api.github.com/repos/${REPOSITORY}/releases/${id}/assets` || byTag.assets_url !== release.assets_url || release.published_at !== byTag.published_at || release.draft !== false || byTag.draft !== false || release.prerelease !== false || byTag.prerelease !== false || release.target_commitish !== "main" || byTag.target_commitish !== "main" || !sameJSON(byTag.assets, release.assets)) throw new RejectedDelivery("historical release identity differs");
+  identity(release.author, BOT_LOGIN, BOT_ID, "Bot", "historical release author"); identity(byTag.author, BOT_LOGIN, BOT_ID, "Bot", "historical tag release author");
+  const tag = await fetchAnnotatedTag(client, expected.tag, signal); if (tag.commit !== expected.commit) throw new RejectedDelivery("historical tag commit differs");
+  const historicalState = await readStateAt(client, expected.commit, signal); if (!equalBytes(historicalState.bytes, stateBytes) || historicalState.state.SYNC_ID !== state.SYNC_ID || historicalState.state.PLAN_FINGERPRINT !== state.PLAN_FINGERPRINT) throw new RejectedDelivery("hotfix changed upstream state");
+  const assets = classifyAssets(release, expected.tag, false); await validateChecksums(client, assets, signal);
+  if (assets.receipts[0].name !== "hotfix-release-receipt.json" || assets.receipts[0].id !== expected.receipt.id || assets.receipts[0].digest !== expected.receipt.digest) throw new RejectedDelivery("recorded parent receipt identity differs");
+  const receiptBytes = await downloadAsset(client, assets.receipts[0], signal, MAXIMUM_METADATA_BYTES), receipt = object(parseJSON(receiptBytes, "historical receipt"), "historical receipt");
+  if (receipt.receipt_type !== "hotfix-release") throw new RejectedDelivery("historical hotfix receipt type differs");
+  const version = integer(receipt.hotfix_schema_version, "historical hotfix schema version"); exactKeys(receipt, version === 2 ? HOTFIX_RECEIPT_V2_KEYS : HOTFIX_RECEIPT_KEYS, "historical receipt");
+  const core = validateReceiptCore(receipt, release, expected.commit, historicalState.state, assets);
+  validateTagger(tag, "hotfix", expected.tag, string(object(receipt.previous_release, "previous release").tag, "previous release tag"));
+  const upstreamState = object(receipt.upstream_state, "upstream state receipt"); exactKeys(upstreamState, ["sync_id", "plan_fingerprint", "sha256"], "upstream state receipt"); if (upstreamState.sync_id !== state.SYNC_ID || upstreamState.plan_fingerprint !== state.PLAN_FINGERPRINT || upstreamState.sha256 !== digestBytes(stateBytes).slice(7) || !SHA256.test(string(upstreamState.sha256, "upstream state digest"))) throw new RejectedDelivery("hotfix upstream state receipt differs");
+  const assetDigests = object(receipt.release_asset_digests, "release asset digests"), wanted = Object.fromEntries(assets.nonReceipt.map(a => [a.name, a.digest])); exactKeys(assetDigests, Object.keys(wanted), "release asset digests"); if (Object.entries(wanted).some(([name, value]) => assetDigests[name] !== value)) throw new RejectedDelivery("release asset digests differ");
+  const workflowReceipt = object(receipt.release_workflow, "release workflow receipt"); exactKeys(workflowReceipt, ["path", "ref", "commit", "run_id", "run_attempt"], "release workflow receipt"); if (workflowReceipt.path !== HOTFIX_WORKFLOW || workflowReceipt.ref !== `${REPOSITORY}/${HOTFIX_WORKFLOW}@refs/heads/main` || workflowReceipt.commit !== expected.commit || decimalInteger(workflowReceipt.run_id, "release workflow run ID") !== core.workflowRunID) throw new RejectedDelivery("release workflow receipt differs");
+  const run = await validateWorkflowRun(client, core.workflowRunID, HOTFIX_WORKFLOW, expected.commit, signal, { hotfix: true, allowNotReady: false });
+  const evidenceAttempt = decimalInteger(workflowReceipt.run_attempt, "release workflow attempt");
+  if (evidenceAttempt > run.attempt || expected.workflow.runID !== core.workflowRunID || expected.workflow.attempt !== evidenceAttempt || expected.workflow.headSHA !== run.headSHA) throw new RejectedDelivery("recorded parent workflow differs");
+  if (evidenceAttempt < run.attempt) {
+    await validateWorkflowRun(
+      client,
+      core.workflowRunID,
+      HOTFIX_WORKFLOW,
+      expected.commit,
+      signal,
+      {
+        hotfix: true,
+        allowNotReady: false,
+        allowFailedHotfixEvidence: true,
+        exactAttempt: evidenceAttempt,
+        requireFailedHotfixEvidence: true,
+      },
+    );
+  }
+  const artifact = await workflowArtifact(client, core.workflowRunID, evidenceAttempt, "hotfix", receiptBytes, signal, false, run.headSHA, expected.artifact); const plan = artifact.files.get("final-plan.out"); if (!plan) throw new RejectedDelivery("historical final plan is unavailable"); parseFinalPlan(plan, historicalState.state, expected.tag, expected.commit);
+  await verifyRegistry(registry, expected.tag, core.imageDigest, core.architectureImages, signal, { requireLatestParity: false });
+  const previousRaw = object(receipt.previous_release, "previous release");
+  if (version === 1) {
+    exactKeys(previousRaw, ["tag", "commit"], "previous release"); const parentTag = string(previousRaw.tag, "previous release tag"), parentCommit = sha(previousRaw.commit, "previous release commit");
+    if (parentTag !== root.tag || parentCommit !== root.commit || nextHotfixTag(parentTag) !== expected.tag) throw new RejectedDelivery("schema-v1 hotfix must directly follow the accepted upstream root");
+    const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${parentCommit}...${expected.commit}`, signal), "historical comparison");
+    if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
+    await validatePreviousUpstreamRelease(client, registry, root.tag, root.commit, stateBytes, state, signal, root);
+  } else if (version === 2) {
+    const previous = releaseLink(previousRaw, "hotfix", "previous release"), recordedRoot = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+    if (previous.tag === root.tag || JSON.stringify(recordedRoot) !== JSON.stringify(root) || nextHotfixTag(previous.tag) !== expected.tag) throw new RejectedDelivery("hotfix parent or root identity differs");
+    const comparison = object(await client.get(`/repos/${REPOSITORY}/compare/${previous.commit}...${expected.commit}`, signal), "historical comparison"); if (comparison.status !== "ahead") throw new RejectedDelivery("historical ancestry mismatch");
+    await validateHistoricalHotfix(client, registry, previous, root, stateBytes, state, signal, seen, depth + 1);
+  } else throw new RejectedDelivery("hotfix receipt schema differs");
+}
+
+async function validateReleaseSnapshot(
   payloadValue: unknown,
   receivedAt: string,
   client: GitHubClient,
   registry: RegistryClient,
   signal: AbortSignal,
   options: ValidateReleaseOptions = {},
+  currentFrontierOnly = false,
 ): Promise<VerifiedRelease> {
   const payload = object(payloadValue, "payload");
   if (payload.action !== "published" && payload.action !== "released")
@@ -1199,7 +1589,7 @@ export async function validateRelease(
   }
 
   const currentState = await readStateAt(client, commit, signal);
-  const assets = classifyAssets(canonical);
+  const assets = classifyAssets(canonical, tag);
   await validateChecksums(client, assets, signal);
   if (assets.receipts.length === 0) {
     throw new RetryableNotReady("release receipt is not attached yet");
@@ -1221,19 +1611,26 @@ export async function validateRelease(
     receiptAsset.name === "upstream-sync-receipt.json" ? "upstream" : "hotfix";
   exactKeys(
     receipt,
-    kind === "upstream" ? RECEIPT_CORE_KEYS : HOTFIX_RECEIPT_KEYS,
+    kind === "upstream"
+      ? receipt.schema_version === 3
+        ? RECEIPT_CORE_V3_KEYS
+        : RECEIPT_CORE_KEYS
+      : receipt.hotfix_schema_version === 2
+        ? HOTFIX_RECEIPT_V2_KEYS
+        : HOTFIX_RECEIPT_KEYS,
     "release receipt",
   );
 
-  const expectedAssets = assets.nonReceipt.map((asset) => asset.name).sort();
   const core = validateReceiptCore(
     receipt,
     canonical,
     commit,
     currentState.state,
-    expectedAssets,
+    assets,
   );
   let workflowRunAttempt: number;
+  let workflowEvidence: string;
+  let artifactEvidence: string;
 
   if (kind === "upstream") {
     if (currentState.state.EXPECTED_FORK_TAG !== tag) {
@@ -1249,25 +1646,73 @@ export async function validateRelease(
       { hotfix: false, allowNotReady: true },
     );
     workflowRunAttempt = workflowRun.attempt;
-    const artifact = await workflowArtifact(client, core.workflowRunID, workflowRunAttempt, "upstream", receiptBytes, signal, true, workflowRun.headSHA);
-    const runState = artifact.get("run-state.json");
+    const evidenceAttempt = core.workflowRunAttempt ?? workflowRunAttempt;
+    workflowEvidence = JSON.stringify({
+      runID: core.workflowRunID,
+      attempt: workflowRun.attempt,
+      evidenceAttempt,
+      headSHA: workflowRun.headSHA,
+      successful: workflowRun.successful,
+    });
+    if (evidenceAttempt > workflowRunAttempt) {
+      throw new RejectedDelivery("release workflow attempt differs");
+    }
+    if (evidenceAttempt < workflowRunAttempt) {
+      await historicalEvidence(() =>
+        validateWorkflowRun(
+          client,
+          core.workflowRunID,
+          UPSTREAM_WORKFLOW,
+          commit,
+          signal,
+          {
+            hotfix: false,
+            allowNotReady: false,
+            allowFailedUpstreamEvidence: true,
+            exactAttempt: evidenceAttempt,
+            requireFailedUpstreamEvidence: true,
+          },
+        ),
+      );
+    }
+    const readArtifact = () => workflowArtifact(
+      client,
+      core.workflowRunID,
+      evidenceAttempt,
+      "upstream",
+      receiptBytes,
+      signal,
+      evidenceAttempt === workflowRunAttempt,
+      workflowRun.headSHA,
+    );
+    const artifact = evidenceAttempt < workflowRunAttempt
+      ? await historicalEvidence(readArtifact)
+      : await readArtifact();
+    artifactEvidence = artifact.identity;
+    const runState = artifact.files.get("run-state.json");
     if (!runState) throw new RejectedDelivery("run state artifact is missing");
     validateRunState(runState, currentState.state, receipt, commit, tag);
   } else {
     if (
       receipt.receipt_type !== "hotfix-release" ||
-      receipt.hotfix_schema_version !== 1
+      (receipt.hotfix_schema_version !== 1 && receipt.hotfix_schema_version !== 2)
     ) {
       throw new RejectedDelivery("hotfix receipt schema differs");
     }
     const previous = object(receipt.previous_release, "previous release");
-    exactKeys(previous, ["tag", "commit"], "previous release");
-    const baseTag = string(previous.tag, "previous release tag");
-    const baseCommit = sha(previous.commit, "previous release commit");
+    let baseTag: string, baseCommit: string, parentLink: ReleaseLink | undefined, rootLink: ReleaseLink | undefined;
+    if (receipt.hotfix_schema_version === 1) {
+      exactKeys(previous, ["tag", "commit"], "previous release");
+      baseTag = string(previous.tag, "previous release tag"); baseCommit = sha(previous.commit, "previous release commit");
+    } else {
+      parentLink = releaseLink(previous, "hotfix", "previous release"); rootLink = releaseLink(receipt.accepted_upstream_root, "upstream", "accepted upstream root");
+      baseTag = parentLink.tag; baseCommit = parentLink.commit;
+      if (rootLink.tag !== currentState.state.EXPECTED_FORK_TAG || parentLink.tag === rootLink.tag || releaseTagParts(tag).prefix !== releaseTagParts(rootLink.tag).prefix) throw new RejectedDelivery("accepted upstream root identity differs");
+    }
     if (
       !RELEASE_TAG.test(baseTag) ||
       nextHotfixTag(baseTag) !== tag ||
-      currentState.state.EXPECTED_FORK_TAG !== baseTag
+      (receipt.hotfix_schema_version === 1 ? currentState.state.EXPECTED_FORK_TAG !== baseTag : false)
     ) {
       throw new RejectedDelivery("hotfix tag relationship differs");
     }
@@ -1340,9 +1785,11 @@ export async function validateRelease(
     }
 
     const baseComparison = object(
-      await client.get(
-        `/repos/${REPOSITORY}/compare/${baseCommit}...${commit}`,
-        signal,
+      await historicalEvidence(() =>
+        client.get(
+          `/repos/${REPOSITORY}/compare/${baseCommit}...${commit}`,
+          signal,
+        ),
       ),
       "hotfix base comparison",
     );
@@ -1351,31 +1798,73 @@ export async function validateRelease(
         "hotfix commit is not strictly ahead of its base",
       );
     }
-    await validatePreviousUpstreamRelease(
-      client,
-      registry,
-      baseTag,
-      baseCommit,
-      currentState.bytes,
-      currentState.state,
-      signal,
-    );
+    if (!currentFrontierOnly) {
+      if (receipt.hotfix_schema_version === 1) await historicalEvidence(() => validatePreviousUpstreamRelease(client, registry, baseTag, baseCommit, currentState.bytes, currentState.state, signal));
+      else await validateHistoricalHotfix(client, registry, parentLink!, rootLink!, currentState.bytes, currentState.state, signal, new Set([tag, commit]), 1);
+    }
     const workflowRun = await validateWorkflowRun(
       client,
       core.workflowRunID,
       HOTFIX_WORKFLOW,
       commit,
       signal,
-      { hotfix: true, allowNotReady: true },
+      {
+        hotfix: true,
+        allowNotReady: true,
+        allowFailedHotfixEvidence: true,
+      },
     );
     workflowRunAttempt = workflowRun.attempt;
-    if (workflowRunAttempt !== releaseWorkflowAttempt) {
+    workflowEvidence = JSON.stringify({
+      runID: core.workflowRunID,
+      attempt: workflowRun.attempt,
+      evidenceAttempt: releaseWorkflowAttempt,
+      headSHA: workflowRun.headSHA,
+      successful: workflowRun.successful,
+    });
+    if (releaseWorkflowAttempt > workflowRunAttempt) {
       throw new RejectedDelivery("release workflow attempt differs");
     }
-    const artifact = await workflowArtifact(client, core.workflowRunID, workflowRunAttempt, "hotfix", receiptBytes, signal, true, workflowRun.headSHA);
-    const finalPlan = artifact.get("final-plan.out");
+    if (releaseWorkflowAttempt < workflowRunAttempt) {
+      await historicalEvidence(() =>
+        validateWorkflowRun(
+          client,
+          core.workflowRunID,
+          HOTFIX_WORKFLOW,
+          commit,
+          signal,
+          {
+            hotfix: true,
+            allowNotReady: false,
+            allowFailedHotfixEvidence: true,
+            exactAttempt: releaseWorkflowAttempt,
+            requireFailedHotfixEvidence: true,
+          },
+        ),
+      );
+    }
+    const readArtifact = () => workflowArtifact(
+      client,
+      core.workflowRunID,
+      releaseWorkflowAttempt,
+      "hotfix",
+      receiptBytes,
+      signal,
+      releaseWorkflowAttempt === workflowRunAttempt,
+      workflowRun.headSHA,
+    );
+    const artifact = releaseWorkflowAttempt < workflowRunAttempt
+      ? await historicalEvidence(readArtifact)
+      : await readArtifact();
+    artifactEvidence = artifact.identity;
+    const finalPlan = artifact.files.get("final-plan.out");
     if (!finalPlan) throw new RejectedDelivery("final plan artifact is missing");
     parseFinalPlan(finalPlan, currentState.state, tag, commit);
+    if (!workflowRun.successful) {
+      throw new RetryableNotReady(
+        "hotfix finalization awaits a successful rerun",
+      );
+    }
   }
 
   const architectures = await verifyRegistry(
@@ -1385,6 +1874,20 @@ export async function validateRelease(
     core.architectureImages,
     signal,
   );
+  const currentEvidence = JSON.stringify({
+    tagObjectSHA: annotatedTag.tagObjectSHA,
+    assets: assets.all
+      .map(({ id, name, url, size, digest: assetDigest }) => ({
+        id,
+        name,
+        url,
+        size,
+        digest: assetDigest,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    workflow: workflowEvidence,
+    artifact: artifactEvidence,
+  });
   return {
     repository: REPOSITORY,
     repositoryID: REPOSITORY_ID,
@@ -1401,11 +1904,34 @@ export async function validateRelease(
     workflowPath: kind === "upstream" ? UPSTREAM_WORKFLOW : HOTFIX_WORKFLOW,
     workflowRunID: core.workflowRunID,
     workflowRunAttempt,
-    revalidation: { payload: structuredClone(payloadValue), receivedAt, now: options.now ?? Date.now },
+    revalidation: {
+      payload: structuredClone(payloadValue),
+      receivedAt,
+      now: options.now ?? Date.now,
+      currentEvidence,
+    },
   };
 }
 
-/** Re-sample every mutable source immediately before a durable claim. */
+export function validateRelease(
+  payloadValue: unknown,
+  receivedAt: string,
+  client: GitHubClient,
+  registry: RegistryClient,
+  signal: AbortSignal,
+  options: ValidateReleaseOptions = {},
+): Promise<VerifiedRelease> {
+  return validateReleaseSnapshot(
+    payloadValue,
+    receivedAt,
+    client,
+    registry,
+    signal,
+    options,
+  );
+}
+
+/** Re-sample the current mutable release frontier before an external side effect. */
 export async function revalidateRelease(
   verified: VerifiedRelease,
   client: GitHubClient,
@@ -1414,11 +1940,17 @@ export async function revalidateRelease(
 ): Promise<void> {
   let current: VerifiedRelease;
   try {
-    current = await validateRelease(verified.revalidation.payload, verified.revalidation.receivedAt, client, registry, signal, { now: verified.revalidation.now });
+    current = await validateReleaseSnapshot(verified.revalidation.payload, verified.revalidation.receivedAt, client, registry, signal, { now: verified.revalidation.now }, true);
   } catch (error) {
     if (error instanceof RetryableNotReady)
       throw new RejectedDelivery("release snapshot drifted before claim");
     throw error;
+  }
+  if (
+    current.revalidation.currentEvidence !==
+    verified.revalidation.currentEvidence
+  ) {
+    throw new RejectedDelivery("release snapshot drifted before claim");
   }
   const snapshot = ({ revalidation: _ignored, ...value }: VerifiedRelease) => value;
   if (JSON.stringify(snapshot(current)) !== JSON.stringify(snapshot(verified)))
