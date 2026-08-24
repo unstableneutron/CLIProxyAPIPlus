@@ -1027,6 +1027,7 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${workflow}" "--clobber"
   assert_contains "${workflow}" "resume_release:"
   assert_contains "${workflow}" "Validate represented release resumption"
+  assert_contains "${workflow}" '($resume == "true" and (.state == "OPEN" or .state == "MERGED"))'
   assert_contains "${workflow}" "Represented release is not the exact receipt-free staged asset set."
   assert_contains "${workflow}" "MAIN_STATE=descendant"
   assert_contains "${workflow}" "needs.candidate.outputs.resume_release != 'true'"
