@@ -38,9 +38,10 @@ CANONICAL_FILE=$(mktemp)
 RESPONSE=$(mktemp)
 ARTIFACT_FILE=$(mktemp)
 ARTIFACT_ZIP=$(mktemp)
+SOURCE_RUN_FILE=$(mktemp)
 EXTRACTED=$(mktemp -d)
 rm -rf "${EXTRACTED}"
-trap 'rm -f "${RELEASE_FILE}" "${RELEASE_LIST_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}"; rm -rf "${EXTRACTED}"' EXIT
+trap 'rm -f "${RELEASE_FILE}" "${RELEASE_LIST_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}" "${SOURCE_RUN_FILE}"; rm -rf "${EXTRACTED}"' EXIT
 
 fetch_release() {
   : > "${RESPONSE}"
@@ -93,6 +94,7 @@ fi
 ARTIFACT_ID=${INPUT_ARTIFACT_ID}
 ARTIFACT_NAME=${INPUT_ARTIFACT_NAME}
 ARTIFACT_DIGEST=${INPUT_ARTIFACT_DIGEST}
+ADOPTED_EVIDENCE=false
 if [ "${release_exists}" = true ]; then
   BODY=$(jq -er '.body | select(type == "string")' "${RELEASE_FILE}") \
     || die "release ${TAG} lacks staged evidence"
@@ -112,8 +114,13 @@ if [ "${release_exists}" = true ]; then
   ARTIFACT_ID=$(jq -r '.artifact_id' <<< "${EVIDENCE}")
   ARTIFACT_NAME=$(jq -r '.artifact_name' <<< "${EVIDENCE}")
   ARTIFACT_DIGEST=$(jq -r '.artifact_digest' <<< "${EVIDENCE}")
-  [ "$(jq -r '.workflow_run_id' <<< "${EVIDENCE}")" = "${WORKFLOW_RUN_ID}" ] \
-    || die "release ${TAG} staged evidence belongs to another workflow run"
+  EVIDENCE_RUN_ID=$(jq -r '.workflow_run_id' <<< "${EVIDENCE}")
+  if [ "${EVIDENCE_RUN_ID}" != "${WORKFLOW_RUN_ID}" ]; then
+    [ "${ALLOWED_RECEIPT_NAME}" = upstream-sync-receipt.json ] \
+      || die "release ${TAG} staged evidence belongs to another workflow run"
+    WORKFLOW_RUN_ID=${EVIDENCE_RUN_ID}
+    ADOPTED_EVIDENCE=true
+  fi
 fi
 
 [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || die "staged artifact ID is invalid"
@@ -122,6 +129,31 @@ fi
   || die "staged artifact name is invalid"
 ARTIFACT_ATTEMPT=${BASH_REMATCH[1]}
 gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}" > "${ARTIFACT_FILE}"
+if [ "${ADOPTED_EVIDENCE}" = true ]; then
+  WORKFLOW_HEAD_SHA=$(jq -er '
+    .workflow_run.head_sha |
+    select(type == "string" and test("^[0-9a-f]{40}$"))
+  ' "${ARTIFACT_FILE}") || die "staged artifact source head is invalid"
+  gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${WORKFLOW_RUN_ID}" \
+    > "${SOURCE_RUN_FILE}"
+  jq -e \
+    --arg head "${WORKFLOW_HEAD_SHA}" \
+    --argjson run_id "${WORKFLOW_RUN_ID}" '
+      .id == $run_id and .path == ".github/workflows/upstream-sync-v2.yml" and
+      .event == "workflow_dispatch" and .head_branch == "main" and
+      .head_sha == $head and .status == "completed" and .conclusion == "failure" and
+      .actor.login == "unstableneutron" and .actor.type == "User" and
+      .repository.full_name == "unstableneutron/CLIProxyAPIPlus"
+    ' "${SOURCE_RUN_FILE}" >/dev/null \
+    || die "staged artifact source workflow identity differs"
+  SOURCE_STATUS=$(gh api \
+    "/repos/${GITHUB_REPOSITORY}/compare/${WORKFLOW_HEAD_SHA}...${EXPECTED_COMMIT}" \
+    --jq .status)
+  case "${SOURCE_STATUS}" in
+    identical|ahead) ;;
+    *) die "release commit is not descended from the staged artifact source" ;;
+  esac
+fi
 jq -e \
   --arg name "${ARTIFACT_NAME}" \
   --arg digest "${ARTIFACT_DIGEST}" \
