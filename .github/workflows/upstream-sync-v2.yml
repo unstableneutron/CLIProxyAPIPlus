@@ -174,13 +174,14 @@ jobs:
             --json baseRefName,headRefName,headRefOid,isDraft,mergeable,reviewDecision,state,statusCheckRollup)"
           if ! jq -e \
             --arg ref "${REPAIR_REF}" \
+            --arg resume "${RESUME_RELEASE}" \
             --arg sha "${REPAIR_SHA}" '
-              .state == "OPEN" and
+              (($resume == "true" and (.state == "OPEN" or .state == "MERGED")) or
+               ($resume != "true" and .state == "OPEN" and .mergeable == "MERGEABLE")) and
               .isDraft == false and
               .baseRefName == "main" and
               .headRefName == $ref and
               .headRefOid == $sha and
-              .mergeable == "MERGEABLE" and
               (.reviewDecision // "") != "CHANGES_REQUESTED" and
               ((.statusCheckRollup // []) | length) > 0 and
               all((.statusCheckRollup // [])[];
@@ -188,7 +189,7 @@ jobs:
                 ($status == "SUCCESS" or $status == "NEUTRAL" or $status == "SKIPPED")
               )
             ' <<< "${PR_JSON}" >/dev/null; then
-            echo "Repair PR ${REPAIR_PR} is not an exact, mergeable, review-clean, fully checked match for ${REPAIR_SHA}." >&2
+            echo "Repair PR ${REPAIR_PR} is not an exact, review-clean, fully checked match for ${REPAIR_SHA}." >&2
             exit 1
           fi
           {
