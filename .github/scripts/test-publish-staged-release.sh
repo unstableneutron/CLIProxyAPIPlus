@@ -83,12 +83,19 @@ done
 
 case "${method}:${path}" in
   GET:/repos/*/releases/tags/*)
-    if [ ! -f "${STUB_RELEASE_FILE}" ]; then
+    if [ ! -f "${STUB_RELEASE_FILE}" ] || [ "${STUB_HIDE_DRAFT_FROM_TAG:-false}" = true ]; then
       [ "${include}" = true ] && printf 'HTTP/2 404 Not Found\n\n'
       exit 1
     fi
     [ "${include}" = true ] && printf 'HTTP/2 200 OK\n\n'
     cat "${STUB_RELEASE_FILE}"
+    ;;
+  GET:/repos/*/releases?per_page=100)
+    if [ -f "${STUB_RELEASE_FILE}" ]; then
+      jq -n --slurpfile release "${STUB_RELEASE_FILE}" '[$release]'
+    else
+      printf '[[]]\n'
+    fi
     ;;
   GET:/repos/*/releases/900)
     cat "${STUB_RELEASE_FILE}"
@@ -300,6 +307,14 @@ test_fresh_and_every_partial_draft_boundary() {
   expected_count=$(expected_release_assets_json "${TAG}" | jq length)
   [ "$(jq '.assets | length' "${root}/release.json")" -eq "${expected_count}" ] \
     || fail "fresh release matrix is incomplete"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  write_release "${root}" true 0
+  run_publisher "${root}" STUB_HIDE_DRAFT_FROM_TAG=true >/dev/null
+  [ "$(jq -r '.draft' "${root}/release.json")" = false ] \
+    || fail "list-only draft release remained unpublished"
   rm -rf "${root}"
 
   for count in $(seq 0 9); do
