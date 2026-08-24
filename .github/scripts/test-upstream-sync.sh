@@ -886,6 +886,10 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "upstream-sync-receipt.json"
   assert_contains "${workflow}" "run-state.json"
   assert_contains "${workflow}" "Require final fetched no-op plan"
+  # shellcheck disable=SC2016 # Final verification shell variables are asserted literally.
+  assert_contains "${workflow}" '--main-policy "${MAIN_POLICY}"'
+  # shellcheck disable=SC2016 # Final verification shell variables are asserted literally.
+  assert_contains "${workflow}" 'git merge-base --is-ancestor "${PROMOTED_COMMIT}" origin/main'
   assert_contains "${workflow}" 'FINAL_HAS_CHANGES}'
   assert_contains "${workflow}" 'FINAL_TARGET_DRIFT}'
   assert_contains "${workflow}" 'FINAL_BLOCKED}'
