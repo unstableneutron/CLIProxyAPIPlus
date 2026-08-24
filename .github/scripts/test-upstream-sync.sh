@@ -1008,13 +1008,16 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${docker}" "setup-qemu-action"
   assert_not_contains "${docker}" "Refresh models catalog"
 
-  assert_contains "${recovery}" "Reject Unsafe Release Recovery"
-  assert_contains "${recovery}" "contents: read"
-  assert_contains "${recovery}" "publish a new immutable identity instead."
-  assert_not_contains "${recovery}" "contents: write"
+  assert_contains "${recovery}" "Recover Existing Upstream Release Tag"
+  assert_contains "${recovery}" "actions: read"
+  assert_contains "${recovery}" "contents: write"
+  assert_contains "${recovery}" "source_run_attempt:"
+  assert_contains "${recovery}" "staged_artifact_digest:"
+  assert_contains "${recovery}" 'one("release / publish"; "failure")'
+  assert_contains "${recovery}" "publish-staged-release.sh"
+  assert_contains "${recovery}" "RELEASE_MAIN_POLICY: descendant"
+  assert_contains "${recovery}" "Rerun the source Upstream Sync v2 workflow to complete acceptance."
   assert_not_contains "${recovery}" "packages: write"
-  assert_not_contains "${recovery}" "gh release"
-  assert_not_contains "${recovery}" "docker"
   assert_not_contains "${recovery}" "--clobber"
 
   assert_contains "${workflow}" "receipt_name: upstream-sync-receipt.json"

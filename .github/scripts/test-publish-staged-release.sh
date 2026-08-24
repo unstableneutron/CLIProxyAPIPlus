@@ -405,7 +405,7 @@ test_reuses_pinned_evidence_and_rejects_drift() {
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"
-  expect_failure "${root}" "tag or main moved" STUB_MOVE_AFTER_COMMIT_CHECKS=2
+  expect_failure "${root}" "tag moved" STUB_MOVE_AFTER_COMMIT_CHECKS=2
   rm -rf "${root}"
 }
 
