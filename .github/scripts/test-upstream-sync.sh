@@ -955,6 +955,10 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${release}" "workflow_dispatch:"
   assert_contains "${release}" "stage-release-assets.sh"
   assert_contains "${release}" "publish-staged-release.sh"
+  # shellcheck disable=SC2016 # Workflow expressions are asserted literally.
+  assert_contains "${release}" 'ref: ${{ github.workflow_sha }}'
+  # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
+  assert_contains "${release}" '"${RUNNER_TEMP}/publication-scripts/publish-staged-release.sh"'
   # shellcheck disable=SC2016 # GitHub expressions and shell variables are asserted literally.
   assert_contains "${release}" 'artifact_digest: ${{ steps.staged_identity.outputs.artifact_digest }}'
   # shellcheck disable=SC2016 # Shell variable is asserted literally.
@@ -981,8 +985,10 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${docker}" "publish_latest:"
   assert_not_contains "${docker}" "workflow_dispatch:"
   assert_contains "${docker}" "main_policy:"
+  # shellcheck disable=SC2016 # Workflow expressions are asserted literally.
+  assert_contains "${docker}" 'ref: ${{ github.workflow_sha }}'
   # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
-  assert_contains "${docker}" 'revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"'
+  assert_contains "${docker}" '"${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"'
   assert_contains "${docker}" "full|build|publish"
   assert_contains "${docker}" "Expected commit must be an exact lowercase 40-character SHA."
   assert_contains "${release}" "Expected commit must be an exact lowercase 40-character SHA."
