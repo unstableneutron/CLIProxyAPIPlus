@@ -1016,7 +1016,7 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${recovery}" 'one("release / publish"; "failure")'
   assert_contains "${recovery}" "publish-staged-release.sh"
   assert_contains "${recovery}" "RELEASE_MAIN_POLICY: descendant"
-  assert_contains "${recovery}" "Rerun the source Upstream Sync v2 workflow to complete acceptance."
+  assert_contains "${recovery}" "resume_release=true and the original repair ref"
   assert_not_contains "${recovery}" "packages: write"
   assert_not_contains "${recovery}" "--clobber"
 
@@ -1025,6 +1025,11 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${workflow}" "requires an absent receipt identity"
   assert_contains "${workflow}" "Attach immutable receipt after complete evidence publication"
   assert_not_contains "${workflow}" "--clobber"
+  assert_contains "${workflow}" "resume_release:"
+  assert_contains "${workflow}" "Validate represented release resumption"
+  assert_contains "${workflow}" "Represented release is not the exact receipt-free staged asset set."
+  assert_contains "${workflow}" "MAIN_STATE=descendant"
+  assert_contains "${workflow}" "needs.candidate.outputs.resume_release != 'true'"
   local upstream_artifact_line upstream_receipt_line
   # shellcheck disable=SC2016 # GitHub expression is asserted literally.
   upstream_artifact_line=$(grep -nF 'name: upstream-sync-receipt-${{ github.run_id }}-${{ github.run_attempt }}' \

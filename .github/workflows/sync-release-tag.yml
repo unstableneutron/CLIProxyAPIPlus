@@ -2,8 +2,8 @@ name: Recover Existing Upstream Release Tag
 run-name: Recover upstream release ${{ inputs.tag }} from run ${{ inputs.source_run_id }} attempt ${{ inputs.source_run_attempt }}
 
 # Resumes release-asset publication only from the exact staged artifact of a
-# failed Upstream Sync v2 attempt. The original run must still be rerun to
-# publish Docker identities, attach its receipt, and become accepted evidence.
+# failed Upstream Sync v2 attempt. A current Upstream Sync v2 run in guarded
+# resume mode must then publish Docker identities and attach the receipt.
 
 on:
   workflow_dispatch:
@@ -275,4 +275,4 @@ jobs:
             "${{ needs.validate.outputs.artifact_digest }}" \
             "${{ needs.validate.outputs.source_run_id }}" \
             "${{ needs.validate.outputs.source_head }}"
-          echo "Recovered release assets from the exact failed-run artifact. Rerun the source Upstream Sync v2 workflow to complete acceptance." >> "${GITHUB_STEP_SUMMARY}"
+          echo "Recovered exact release assets. Dispatch the current Upstream Sync v2 workflow with resume_release=true and the original repair ref, SHA, fingerprint, and PR to complete acceptance." >> "${GITHUB_STEP_SUMMARY}"
