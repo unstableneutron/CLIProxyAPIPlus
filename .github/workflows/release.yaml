@@ -11,6 +11,11 @@ on:
         description: Commit the tag and release must represent
         required: true
         type: string
+      main_policy:
+        description: Required relation from the release commit to current main
+        required: false
+        default: exact
+        type: string
       receipt_name:
         description: The only provenance receipt kind this caller may attach
         required: true
@@ -57,11 +62,16 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           EXPECTED_COMMIT_INPUT: ${{ inputs.expected_commit }}
+          MAIN_POLICY: ${{ inputs.main_policy }}
           RECEIPT_NAME: ${{ inputs.receipt_name }}
         run: |
           case "${RECEIPT_NAME}" in
             upstream-sync-receipt.json|hotfix-release-receipt.json) ;;
             *) echo "Unsupported receipt kind ${RECEIPT_NAME}." >&2; exit 1 ;;
+          esac
+          case "${MAIN_POLICY}" in
+            exact|descendant) ;;
+            *) echo "Unsupported main policy ${MAIN_POLICY}." >&2; exit 1 ;;
           esac
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
@@ -174,6 +184,7 @@ jobs:
           STAGED_ARTIFACT_DIGEST: ${{ needs.stage.outputs.artifact_digest }}
           STAGED_ARTIFACT_ID: ${{ needs.stage.outputs.artifact_id }}
           STAGED_ARTIFACT_NAME: ${{ needs.stage.outputs.artifact_name }}
+          RELEASE_MAIN_POLICY: ${{ inputs.main_policy }}
         run: |
           .github/scripts/publish-staged-release.sh \
             "${TAG}" "${EXPECTED_COMMIT}" "${EXPECTED_RECEIPT}" \

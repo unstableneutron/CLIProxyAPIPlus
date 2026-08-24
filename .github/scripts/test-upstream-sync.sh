@@ -980,9 +980,15 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${docker}" "workflow_call:"
   assert_contains "${docker}" "publish_latest:"
   assert_not_contains "${docker}" "workflow_dispatch:"
+  assert_contains "${docker}" "main_policy:"
+  # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
+  assert_contains "${docker}" 'revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"'
   assert_contains "${docker}" "full|build|publish"
   assert_contains "${docker}" "Expected commit must be an exact lowercase 40-character SHA."
   assert_contains "${release}" "Expected commit must be an exact lowercase 40-character SHA."
+  assert_contains "${release}" "main_policy:"
+  # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
+  assert_contains "${release}" 'RELEASE_MAIN_POLICY: ${{ inputs.main_policy }}'
   assert_contains "${docker}" "target_matrix="
   assert_contains "${docker}" '(.tag_suffix == (.platform'
   assert_contains "${docker}" '"runner":"ubuntu-24.04-arm"'
@@ -1027,9 +1033,12 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_not_contains "${workflow}" "--clobber"
   assert_contains "${workflow}" "resume_release:"
   assert_contains "${workflow}" "Validate represented release resumption"
+  # shellcheck disable=SC2016 # Workflow jq variables are asserted literally.
   assert_contains "${workflow}" '($resume == "true" and (.state == "OPEN" or .state == "MERGED"))'
   assert_contains "${workflow}" "Represented release is not the exact receipt-free staged asset set."
   assert_contains "${workflow}" "MAIN_STATE=descendant"
+  # shellcheck disable=SC2016 # GitHub expressions are asserted literally.
+  assert_contains "${workflow}" 'main_policy: ${{ needs.promote.outputs.main_policy }}'
   assert_contains "${workflow}" "needs.candidate.outputs.resume_release != 'true'"
   local upstream_artifact_line upstream_receipt_line
   # shellcheck disable=SC2016 # GitHub expression is asserted literally.

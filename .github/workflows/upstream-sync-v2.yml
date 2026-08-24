@@ -965,6 +965,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       commit: ${{ steps.tag.outputs.commit }}
+      main_policy: ${{ needs.candidate.outputs.resume_release == 'true' && 'descendant' || 'exact' }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       # actions/checkout v7.0.0
@@ -1063,6 +1064,7 @@ jobs:
     with:
       tag: ${{ needs.promote.outputs.tag }}
       expected_commit: ${{ needs.promote.outputs.commit }}
+      main_policy: ${{ needs.promote.outputs.main_policy }}
       receipt_name: upstream-sync-receipt.json
     secrets: inherit
 
@@ -1073,6 +1075,7 @@ jobs:
     with:
       tag: ${{ needs.promote.outputs.tag }}
       expected_commit: ${{ needs.promote.outputs.commit }}
+      main_policy: ${{ needs.promote.outputs.main_policy }}
       mode: build
     secrets: inherit
 
@@ -1086,6 +1089,7 @@ jobs:
     with:
       tag: ${{ needs.promote.outputs.tag }}
       expected_commit: ${{ needs.promote.outputs.commit }}
+      main_policy: ${{ needs.promote.outputs.main_policy }}
       publish_latest: true
       mode: publish
     secrets: inherit
@@ -1214,9 +1218,10 @@ jobs:
       - name: Revalidate target before immutable receipt evidence upload
         env:
           EXPECTED_COMMIT: ${{ needs.promote.outputs.commit }}
+          MAIN_POLICY: ${{ needs.promote.outputs.main_policy }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.promote.outputs.tag }}
-        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${MAIN_POLICY}"
 
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -1231,6 +1236,7 @@ jobs:
       - name: Attach immutable receipt after complete evidence publication
         env:
           EXPECTED_COMMIT: ${{ needs.promote.outputs.commit }}
+          MAIN_POLICY: ${{ needs.promote.outputs.main_policy }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.promote.outputs.tag }}
         run: |
@@ -1240,7 +1246,7 @@ jobs:
             echo "A receipt identity appeared after upstream finalization preflight." >&2
             exit 1
           fi
-          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}"
+          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${MAIN_POLICY}"
           gh release upload "${TAG}" upstream-sync-receipt.json \
             --repo "${GITHUB_REPOSITORY}"
           mkdir published-upstream-receipt
