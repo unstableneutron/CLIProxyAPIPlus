@@ -33,13 +33,14 @@ esac
 EXPECTED_ASSETS=$(expected_release_assets_json "${TAG}") \
   || die "could not derive expected assets for ${TAG}"
 RELEASE_FILE=$(mktemp)
+RELEASE_LIST_FILE=$(mktemp)
 CANONICAL_FILE=$(mktemp)
 RESPONSE=$(mktemp)
 ARTIFACT_FILE=$(mktemp)
 ARTIFACT_ZIP=$(mktemp)
 EXTRACTED=$(mktemp -d)
 rm -rf "${EXTRACTED}"
-trap 'rm -f "${RELEASE_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}"; rm -rf "${EXTRACTED}"' EXIT
+trap 'rm -f "${RELEASE_FILE}" "${RELEASE_LIST_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}"; rm -rf "${EXTRACTED}"' EXIT
 
 fetch_release() {
   : > "${RESPONSE}"
@@ -58,7 +59,27 @@ fetch_release() {
   fi
   mapfile -t statuses < <(sed -nE 's/^HTTP\/[0-9.]+ ([0-9]{3})( .*)?\r?$/\1/p' "${RESPONSE}")
   if [ "${#statuses[@]}" -eq 1 ] && [ "${statuses[0]}" = 404 ]; then
-    return 4
+    gh api --paginate --slurp \
+      "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RELEASE_LIST_FILE}"
+    local matches
+    matches=$(jq -c --arg tag "${TAG}" \
+      '[.[][] | select(.tag_name == $tag)]' "${RELEASE_LIST_FILE}")
+    case "$(jq 'length' <<< "${matches}")" in
+      0) return 4 ;;
+      1) ;;
+      *) die "release ${TAG} is duplicated" ;;
+    esac
+    jq '.[0]' <<< "${matches}" > "${RELEASE_FILE}"
+    local release_id
+    release_id=$(jq -er '.id | select(type == "number" and floor == . and . > 0 and . <= 9007199254740991)' "${RELEASE_FILE}") \
+      || die "release ${TAG} ID is invalid"
+    gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${CANONICAL_FILE}"
+    diff -u \
+      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${RELEASE_FILE}") \
+      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${CANONICAL_FILE}") >/dev/null \
+      || die "canonical draft release ${TAG} differs from its list entry"
+    cp "${CANONICAL_FILE}" "${RELEASE_FILE}"
+    return 0
   fi
   cat "${RESPONSE}" >&2
   die "could not determine release state for ${TAG}"
