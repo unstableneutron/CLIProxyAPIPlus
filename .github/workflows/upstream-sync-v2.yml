@@ -1,5 +1,5 @@
 name: Upstream Sync v2
-run-name: Upstream Sync v2 [event=${{ github.event_name }} mode=${{ inputs.mode }} force_candidate=${{ inputs.force_candidate }} repair_ref=${{ inputs.repair_ref }} repair_sha=${{ inputs.repair_sha }} repair_fingerprint=${{ inputs.repair_fingerprint }} repair_pr=${{ inputs.repair_pr }}]
+run-name: Upstream Sync v2 [event=${{ github.event_name }} mode=${{ inputs.mode }} force_candidate=${{ inputs.force_candidate }} resume_release=${{ inputs.resume_release }} repair_ref=${{ inputs.repair_ref }} repair_sha=${{ inputs.repair_sha }} repair_fingerprint=${{ inputs.repair_fingerprint }} repair_pr=${{ inputs.repair_pr }}]
 
 # Candidate-first upstream synchronization. One exact plan is materialized,
 # recorded, validated, and either retained for review or promoted unchanged.
@@ -17,6 +17,11 @@ on:
         options: [shadow, promote]
       force_candidate:
         description: Shadow-only candidate build when selected refs are represented
+        required: false
+        default: false
+        type: boolean
+      resume_release:
+        description: Resume publication for an exact represented repair candidate
         required: false
         default: false
         type: boolean
@@ -66,14 +71,15 @@ jobs:
       (github.event_name == 'schedule' || github.actor == 'unstableneutron')
     runs-on: ubuntu-24.04
     outputs:
-      acceptable: ${{ steps.result.outputs.acceptable }}
-      base_fork_commit: ${{ steps.plan.outputs.base_fork_commit }}
-      candidate_branch: ${{ steps.plan.outputs.candidate_branch }}
-      candidate_sha: ${{ steps.result.outputs.candidate_sha }}
-      expected_fork_tag: ${{ steps.plan.outputs.expected_fork_tag }}
-      has_changes: ${{ steps.plan.outputs.has_changes }}
-      plan_fingerprint: ${{ steps.plan.outputs.plan_fingerprint }}
-      sync_id: ${{ steps.plan.outputs.safe_sync_id }}
+      acceptable: ${{ steps.effective.outputs.acceptable }}
+      base_fork_commit: ${{ steps.effective.outputs.base_fork_commit }}
+      candidate_branch: ${{ steps.effective.outputs.candidate_branch }}
+      candidate_sha: ${{ steps.effective.outputs.candidate_sha }}
+      expected_fork_tag: ${{ steps.effective.outputs.expected_fork_tag }}
+      has_changes: ${{ steps.effective.outputs.has_changes }}
+      plan_fingerprint: ${{ steps.effective.outputs.plan_fingerprint }}
+      resume_release: ${{ steps.effective.outputs.resume_release }}
+      sync_id: ${{ steps.effective.outputs.sync_id }}
     steps:
       # actions/checkout v7.0.0
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -117,23 +123,32 @@ jobs:
           REPAIR_PR: ${{ inputs.repair_pr }}
           REPAIR_REF_INPUT: ${{ inputs.repair_ref }}
           REPAIR_SHA: ${{ inputs.repair_sha }}
+          RESUME_RELEASE: ${{ inputs.resume_release }}
         run: |
           if [ -z "${REPAIR_REF_INPUT}" ] && \
              [ -z "${REPAIR_SHA}" ] && \
              [ -z "${REPAIR_FINGERPRINT}" ] && \
-             [ -z "${REPAIR_PR}" ]; then
-            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+             [ -z "${REPAIR_PR}" ] && \
+             [ "${RESUME_RELEASE}" != true ]; then
+            {
+              echo "enabled=false"
+              echo "resume_release=false"
+            } >> "${GITHUB_OUTPUT}"
             exit 0
-          fi
-          if [ "${HAS_CHANGES}" != true ]; then
-            echo "A repair candidate cannot be imported when the exact target is already represented." >&2
-            exit 1
           fi
           if [ -z "${REPAIR_REF_INPUT}" ] || \
              [ -z "${REPAIR_SHA}" ] || \
              [ -z "${REPAIR_FINGERPRINT}" ] || \
              [ -z "${REPAIR_PR}" ]; then
             echo "repair_ref, repair_sha, repair_fingerprint, and repair_pr must be supplied together." >&2
+            exit 1
+          fi
+          if [ "${RESUME_RELEASE}" = true ] && [ "${HAS_CHANGES}" != false ]; then
+            echo "Release resumption requires an already represented exact target." >&2
+            exit 1
+          fi
+          if [ "${RESUME_RELEASE}" != true ] && [ "${HAS_CHANGES}" != true ]; then
+            echo "A repair candidate cannot be imported when the exact target is already represented." >&2
             exit 1
           fi
           if ! [[ "${REPAIR_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -148,7 +163,8 @@ jobs:
             echo "repair_pr must be a pull request number." >&2
             exit 1
           fi
-          if [ "${REPAIR_FINGERPRINT}" != "${PLAN_FINGERPRINT}" ]; then
+          if [ "${RESUME_RELEASE}" != true ] && \
+             [ "${REPAIR_FINGERPRINT}" != "${PLAN_FINGERPRINT}" ]; then
             echo "Repair fingerprint ${REPAIR_FINGERPRINT} does not match live plan ${PLAN_FINGERPRINT}." >&2
             exit 1
           fi
@@ -178,6 +194,7 @@ jobs:
           {
             echo "enabled=true"
             echo "repair_ref=${REPAIR_REF}"
+            echo "resume_release=${RESUME_RELEASE}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Report represented target
@@ -194,7 +211,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify represented release receipt
-        if: steps.plan.outputs.has_changes == 'false'
+        if: steps.plan.outputs.has_changes == 'false' && inputs.resume_release != true
         env:
           EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -482,6 +499,148 @@ jobs:
           fi
           echo "Verified existing release receipt for ${EXPECTED_FORK_TAG}." >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Validate represented release resumption
+        id: resume
+        if: steps.plan.outputs.has_changes == 'false' && inputs.resume_release == true
+        env:
+          EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_MODELS_COMMIT: ${{ steps.plan.outputs.models_commit }}
+          PLAN_ORIGINAL_COMMIT: ${{ steps.plan.outputs.original_head }}
+          PLAN_PLUS_HEAD_COMMIT: ${{ steps.plan.outputs.plus_head }}
+          PLAN_PLUS_HEAD_INCLUDED: ${{ steps.plan.outputs.plus_head_included }}
+          PLAN_PLUS_TAG_COMMIT: ${{ steps.plan.outputs.plus_tag_head }}
+          REPAIR_FINGERPRINT: ${{ inputs.repair_fingerprint }}
+          REPAIR_REF: ${{ steps.repair_request.outputs.repair_ref }}
+          REPAIR_SHA: ${{ inputs.repair_sha }}
+        run: |
+          [ "${{ inputs.mode }}" = promote ] \
+            || { echo "Release resumption requires promote mode." >&2; exit 1; }
+          IMPORT_REF="refs/upstream-sync-resume/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git fetch --force origin "refs/heads/${REPAIR_REF}:${IMPORT_REF}"
+          ACTUAL_SHA="$(git rev-parse "${IMPORT_REF}^{commit}")"
+          [ "${ACTUAL_SHA}" = "${REPAIR_SHA}" ] \
+            || { echo "Release-resumption ref moved." >&2; exit 1; }
+          CURRENT_MAIN="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "${REPAIR_SHA}" "${CURRENT_MAIN}" \
+            || { echo "Current main is not descended from the represented candidate." >&2; exit 1; }
+
+          STATE_FILE="${SYNC_WORK_DIR}/resume-state.env"
+          git show "${REPAIR_SHA}:.ccs-fork-upstream.env" > "${STATE_FILE}"
+          state_value() {
+            awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${STATE_FILE}"
+          }
+          STATE_SCHEMA="$(state_value SCHEMA_VERSION)"
+          STATE_SYNC_ID="$(state_value SYNC_ID)"
+          STATE_FINGERPRINT="$(state_value PLAN_FINGERPRINT)"
+          STATE_BASE_FORK_COMMIT="$(state_value BASE_FORK_COMMIT)"
+          STATE_ORIGINAL_TAG="$(state_value ORIGINAL_TAG)"
+          STATE_ORIGINAL_COMMIT="$(state_value ORIGINAL_COMMIT)"
+          STATE_PLUS_TAG="$(state_value PLUS_TAG)"
+          STATE_PLUS_TAG_COMMIT="$(state_value PLUS_TAG_COMMIT)"
+          STATE_PLUS_HEAD_COMMIT="$(state_value PLUS_HEAD_COMMIT)"
+          STATE_PLUS_HEAD_INCLUDED="$(state_value PLUS_HEAD_INCLUDED)"
+          STATE_MODELS_COMMIT="$(state_value MODELS_COMMIT)"
+          STATE_EXPECTED_FORK_TAG="$(state_value EXPECTED_FORK_TAG)"
+          STATE_CANDIDATE_BRANCH="$(state_value CANDIDATE_BRANCH)"
+          if [ "${STATE_SCHEMA}" != 2 ] || \
+             [ "${STATE_FINGERPRINT}" != "${REPAIR_FINGERPRINT}" ] || \
+             [ "${STATE_EXPECTED_FORK_TAG}" != "${EXPECTED_FORK_TAG}" ] || \
+             [ "${STATE_CANDIDATE_BRANCH}" != "${REPAIR_REF}" ] || \
+             [ "${STATE_ORIGINAL_COMMIT}" != "${PLAN_ORIGINAL_COMMIT}" ] || \
+             [ "${STATE_PLUS_TAG_COMMIT}" != "${PLAN_PLUS_TAG_COMMIT}" ] || \
+             [ "${STATE_PLUS_HEAD_COMMIT}" != "${PLAN_PLUS_HEAD_COMMIT}" ] || \
+             [ "${STATE_PLUS_HEAD_INCLUDED}" != "${PLAN_PLUS_HEAD_INCLUDED}" ] || \
+             [ "${STATE_MODELS_COMMIT}" != "${PLAN_MODELS_COMMIT}" ] || \
+             ! git merge-base --is-ancestor "${STATE_BASE_FORK_COMMIT}" "${REPAIR_SHA}"; then
+            echo "Represented candidate state does not match the exact selected target." >&2
+            exit 1
+          fi
+
+          git fetch --force origin "refs/tags/${EXPECTED_FORK_TAG}:refs/tags/${EXPECTED_FORK_TAG}"
+          TAG_COMMIT="$(git rev-parse "refs/tags/${EXPECTED_FORK_TAG}^{}")"
+          [ "${TAG_COMMIT}" = "${REPAIR_SHA}" ] \
+            || { echo "Represented release tag differs from the repair commit." >&2; exit 1; }
+          # shellcheck source=/dev/null
+          source .github/scripts/release-assets.sh
+          EXPECTED_ASSETS="$(expected_release_assets_json "${EXPECTED_FORK_TAG}")"
+          RELEASE_JSON="$(gh release view "${EXPECTED_FORK_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,targetCommitish,assets)"
+          jq -e \
+            --arg tag "${EXPECTED_FORK_TAG}" \
+            --argjson expected "${EXPECTED_ASSETS}" '
+              .tagName == $tag and .isDraft == false and .isPrerelease == false and
+              .targetCommitish == "main" and
+              ([.assets[].name] | sort) == ($expected | sort) and
+              all(.assets[];
+                (.digest | type) == "string" and
+                (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                (.size | type) == "number" and .size > 0)
+            ' <<< "${RELEASE_JSON}" >/dev/null \
+            || { echo "Represented release is not the exact receipt-free staged asset set." >&2; exit 1; }
+
+          jq -n \
+            --arg base_fork_commit "${STATE_BASE_FORK_COMMIT}" \
+            --arg original_tag "${STATE_ORIGINAL_TAG}" \
+            --arg original_commit "${STATE_ORIGINAL_COMMIT}" \
+            --arg plus_tag "${STATE_PLUS_TAG}" \
+            --arg plus_tag_commit "${STATE_PLUS_TAG_COMMIT}" \
+            --arg plus_head "${STATE_PLUS_HEAD_COMMIT}" \
+            --arg plus_head_included "${STATE_PLUS_HEAD_INCLUDED}" \
+            --arg models_commit "${STATE_MODELS_COMMIT}" \
+            --arg sync_id "${STATE_SYNC_ID}" \
+            --arg plan_fingerprint "${STATE_FINGERPRINT}" \
+            --arg candidate_branch "${STATE_CANDIDATE_BRANCH}" \
+            --arg candidate_sha "${REPAIR_SHA}" \
+            --arg expected_fork_tag "${STATE_EXPECTED_FORK_TAG}" \
+            --arg repair_pr "${{ inputs.repair_pr }}" '{
+              schema_version: 1,
+              state: "candidate_validated",
+              target: {
+                base_fork_commit: $base_fork_commit,
+                original: {tag: $original_tag, commit: $original_commit},
+                plus: {
+                  tag: $plus_tag,
+                  tag_commit: $plus_tag_commit,
+                  head: $plus_head,
+                  head_included: ($plus_head_included == "true")
+                },
+                models_commit: $models_commit,
+                sync_id: $sync_id,
+                plan_fingerprint: $plan_fingerprint,
+                expected_fork_tag: $expected_fork_tag,
+                target_drift: false,
+                blocked: false
+              },
+              candidate: {
+                branch: $candidate_branch,
+                sha: $candidate_sha,
+                acceptable: true,
+                validation_status: "passed"
+              },
+              repair: {
+                imported: true,
+                pr: ($repair_pr | tonumber),
+                sha: $candidate_sha
+              },
+              final_plan: {status: "pending_external_verification"},
+              runtime_smoke: "not_run",
+              vn3_deployed: false
+            }' > "${SYNC_WORK_DIR}/run-state.json"
+          {
+            echo "acceptable=true"
+            echo "base_fork_commit=${STATE_BASE_FORK_COMMIT}"
+            echo "candidate_branch=${STATE_CANDIDATE_BRANCH}"
+            echo "candidate_sha=${REPAIR_SHA}"
+            echo "expected_fork_tag=${STATE_EXPECTED_FORK_TAG}"
+            echo "has_changes=true"
+            echo "plan_fingerprint=${STATE_FINGERPRINT}"
+            echo "resume_release=true"
+            echo "sync_id=${STATE_SYNC_ID}"
+            echo "validation_status=passed"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Materialize target-specific candidate
         id: materialize
         if: steps.plan.outputs.has_changes == 'true' && steps.repair_request.outputs.enabled != 'true'
@@ -616,6 +775,46 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           cat "${SYNC_WORK_DIR}/report/candidate.md" >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Select effective candidate identity
+        id: effective
+        if: always()
+        env:
+          NORMAL_ACCEPTABLE: ${{ steps.result.outputs.acceptable }}
+          NORMAL_BASE_FORK_COMMIT: ${{ steps.plan.outputs.base_fork_commit }}
+          NORMAL_CANDIDATE_BRANCH: ${{ steps.plan.outputs.candidate_branch }}
+          NORMAL_CANDIDATE_SHA: ${{ steps.result.outputs.candidate_sha }}
+          NORMAL_EXPECTED_FORK_TAG: ${{ steps.plan.outputs.expected_fork_tag }}
+          NORMAL_HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+          NORMAL_PLAN_FINGERPRINT: ${{ steps.plan.outputs.plan_fingerprint }}
+          NORMAL_SYNC_ID: ${{ steps.plan.outputs.safe_sync_id }}
+          RESUME_RELEASE: ${{ steps.resume.outputs.resume_release }}
+        run: |
+          if [ "${RESUME_RELEASE}" = true ]; then
+            {
+              echo "acceptable=${{ steps.resume.outputs.acceptable }}"
+              echo "base_fork_commit=${{ steps.resume.outputs.base_fork_commit }}"
+              echo "candidate_branch=${{ steps.resume.outputs.candidate_branch }}"
+              echo "candidate_sha=${{ steps.resume.outputs.candidate_sha }}"
+              echo "expected_fork_tag=${{ steps.resume.outputs.expected_fork_tag }}"
+              echo "has_changes=${{ steps.resume.outputs.has_changes }}"
+              echo "plan_fingerprint=${{ steps.resume.outputs.plan_fingerprint }}"
+              echo "resume_release=true"
+              echo "sync_id=${{ steps.resume.outputs.sync_id }}"
+            } >> "${GITHUB_OUTPUT}"
+          else
+            {
+              echo "acceptable=${NORMAL_ACCEPTABLE}"
+              echo "base_fork_commit=${NORMAL_BASE_FORK_COMMIT}"
+              echo "candidate_branch=${NORMAL_CANDIDATE_BRANCH}"
+              echo "candidate_sha=${NORMAL_CANDIDATE_SHA}"
+              echo "expected_fork_tag=${NORMAL_EXPECTED_FORK_TAG}"
+              echo "has_changes=${NORMAL_HAS_CHANGES}"
+              echo "plan_fingerprint=${NORMAL_PLAN_FINGERPRINT}"
+              echo "resume_release=false"
+              echo "sync_id=${NORMAL_SYNC_ID}"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Publish candidate branch with a fingerprint lease
         if: always() && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.candidate_sha != ''
         env:
@@ -720,7 +919,7 @@ jobs:
       # validate the artifact without racing the workflow.
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always() && steps.plan.outputs.has_changes == 'true'
+        if: always() && (steps.plan.outputs.has_changes == 'true' || steps.resume.outputs.resume_release == 'true')
         with:
           name: upstream-sync-v2-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SYNC_WORK_DIR }}
@@ -792,6 +991,7 @@ jobs:
           BASE_FORK_COMMIT: ${{ needs.candidate.outputs.base_fork_commit }}
           CANDIDATE_SHA: ${{ needs.candidate.outputs.candidate_sha }}
           PLAN_FINGERPRINT: ${{ needs.candidate.outputs.plan_fingerprint }}
+          RESUME_RELEASE: ${{ needs.candidate.outputs.resume_release }}
         run: |
           if [ "$(git rev-parse HEAD)" != "${CANDIDATE_SHA}" ]; then
             echo "Checked-out candidate does not match validated SHA ${CANDIDATE_SHA}." >&2
@@ -808,8 +1008,11 @@ jobs:
             MAIN_STATE=base
           elif [ "${MAIN_SHA}" = "${CANDIDATE_SHA}" ]; then
             MAIN_STATE=candidate
+          elif [ "${RESUME_RELEASE}" = true ] && \
+               git merge-base --is-ancestor "${CANDIDATE_SHA}" "${MAIN_SHA}"; then
+            MAIN_STATE=descendant
           else
-            echo "origin/main moved to ${MAIN_SHA}; expected ${BASE_FORK_COMMIT} or retry candidate ${CANDIDATE_SHA}." >&2
+            echo "origin/main moved to an identity outside the validated promotion boundary." >&2
             exit 1
           fi
           if ! git merge-base --is-ancestor "${BASE_FORK_COMMIT}" "${CANDIDATE_SHA}"; then
@@ -819,6 +1022,7 @@ jobs:
           echo "main_state=${MAIN_STATE}" >> "${GITHUB_OUTPUT}"
 
       - name: Recheck exact source freshness
+        if: needs.candidate.outputs.resume_release != 'true'
         env:
           ALLOW_FORK_BASE_DRIFT: ${{ steps.identity.outputs.main_state == 'candidate' }}
         run: |
