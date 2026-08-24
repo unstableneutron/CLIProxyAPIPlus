@@ -1,24 +1,53 @@
-name: Reject Unsafe Release Recovery
+name: Recover Existing Upstream Release Tag
+run-name: Recover upstream release ${{ inputs.tag }} from run ${{ inputs.source_run_id }} attempt ${{ inputs.source_run_attempt }}
 
-# Accepted upstream releases are immutable provenance roots. Rebuilding assets
-# or manufacturing a replacement receipt in a different workflow would create
-# evidence that upstream-sync and release webhook verification must reject.
+# Resumes release-asset publication only from the exact staged artifact of a
+# failed Upstream Sync v2 attempt. The original run must still be rerun to
+# publish Docker identities, attach its receipt, and become accepted evidence.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing accepted fork tag (diagnostic only)
+        description: Existing accepted upstream-sync tag to recover
         required: true
         type: string
       expected_commit:
-        description: Expected peeled tag commit (diagnostic only)
-        required: false
-        default: ''
+        description: Exact peeled tag commit
+        required: true
+        type: string
+      expected_sync_id:
+        description: SYNC_ID recorded at the tag
+        required: true
+        type: string
+      expected_plan_fingerprint:
+        description: PLAN_FINGERPRINT recorded at the tag
+        required: true
+        type: string
+      source_run_id:
+        description: Failed Upstream Sync v2 run that staged the assets
+        required: true
+        type: string
+      source_run_attempt:
+        description: Failed run attempt that staged the assets
+        required: true
+        type: string
+      source_workflow_head_sha:
+        description: Exact head SHA recorded by the failed source run
+        required: true
+        type: string
+      staged_artifact_id:
+        description: Exact staged-release artifact ID
+        required: true
+        type: string
+      staged_artifact_digest:
+        description: Canonical sha256 digest of the staged artifact
+        required: true
         type: string
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 concurrency:
   group: release-publication
@@ -28,11 +57,222 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  reject:
+  validate:
+    if: github.repository == 'unstableneutron/CLIProxyAPIPlus' && github.actor == 'unstableneutron'
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_digest: ${{ steps.identity.outputs.artifact_digest }}
+      artifact_id: ${{ steps.identity.outputs.artifact_id }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      commit: ${{ steps.identity.outputs.commit }}
+      source_head: ${{ steps.identity.outputs.source_head }}
+      source_run_id: ${{ steps.identity.outputs.source_run_id }}
+      tag: ${{ steps.identity.outputs.tag }}
+    steps:
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Validate immutable failed-run recovery identity
+        id: identity
+        env:
+          ARTIFACT_DIGEST: ${{ inputs.staged_artifact_digest }}
+          ARTIFACT_ID: ${{ inputs.staged_artifact_id }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          EXPECTED_FINGERPRINT: ${{ inputs.expected_plan_fingerprint }}
+          EXPECTED_SYNC_ID: ${{ inputs.expected_sync_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_HEAD: ${{ inputs.source_workflow_head_sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected_commit must be an exact lowercase commit." >&2
+            exit 1
+          }
+          [[ "${EXPECTED_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected_plan_fingerprint must be an exact lowercase hash." >&2
+            exit 1
+          }
+          [[ "${SOURCE_HEAD}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "source_workflow_head_sha must be an exact lowercase commit." >&2
+            exit 1
+          }
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "source_run_id must be a positive decimal integer." >&2
+            exit 1
+          }
+          [[ "${SOURCE_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "source_run_attempt must be a positive decimal integer." >&2
+            exit 1
+          }
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "staged_artifact_id must be a positive decimal integer." >&2
+            exit 1
+          }
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "staged_artifact_digest must be canonical sha256." >&2
+            exit 1
+          }
+          [[ "${TAG}" =~ ^v[0-9][0-9A-Za-z._+-]*[-.]unstableneutron\.0$ ]] || {
+            echo "Only an upstream root tag can be recovered." >&2
+            exit 1
+          }
+          [ -n "${EXPECTED_SYNC_ID}" ] || {
+            echo "expected_sync_id is required." >&2
+            exit 1
+          }
+
+          git fetch --quiet origin main "refs/tags/${TAG}:refs/tags/${TAG}"
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{}")"
+          MAIN_COMMIT="$(git rev-parse origin/main)"
+          [ "${TAG_COMMIT}" = "${EXPECTED_COMMIT}" ] || {
+            echo "Tag ${TAG} does not resolve to ${EXPECTED_COMMIT}." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "${EXPECTED_COMMIT}" "${MAIN_COMMIT}" || {
+            echo "main is not descended from the accepted tag commit." >&2
+            exit 1
+          }
+
+          TAG_STATE="$(mktemp)"
+          trap 'rm -f "${TAG_STATE}"' EXIT
+          git show "${EXPECTED_COMMIT}:.ccs-fork-upstream.env" > "${TAG_STATE}"
+          cmp -s "${TAG_STATE}" .ccs-fork-upstream.env || {
+            echo "main changed the accepted upstream state." >&2
+            exit 1
+          }
+          state_value() {
+            awk -F= -v key="$1" '$1 == key { print $2; exit }' "${TAG_STATE}"
+          }
+          [ "$(state_value EXPECTED_FORK_TAG)" = "${TAG}" ] || {
+            echo "Tag is not the root recorded by the accepted upstream state." >&2
+            exit 1
+          }
+          [ "$(state_value SYNC_ID)" = "${EXPECTED_SYNC_ID}" ] || {
+            echo "SYNC_ID differs from the accepted upstream state." >&2
+            exit 1
+          }
+          [ "$(state_value PLAN_FINGERPRINT)" = "${EXPECTED_FINGERPRINT}" ] || {
+            echo "PLAN_FINGERPRINT differs from the accepted upstream state." >&2
+            exit 1
+          }
+
+          ALLOWED_DELTA='^(\.github/scripts/(publish-staged-release|revalidate-release-target|test-publish-staged-release|test-revalidate-release-target|test-upstream-sync|test-hotfix-release)\.sh|\.github/workflows/(release\.yaml|sync-release-tag\.yml))$'
+          UNEXPECTED_DELTA="$(git diff --name-only "${EXPECTED_COMMIT}..${MAIN_COMMIT}" | grep -Ev "${ALLOWED_DELTA}" || true)"
+          [ -z "${UNEXPECTED_DELTA}" ] || {
+            echo "main contains non-recovery changes after the accepted tag:" >&2
+            printf '%s\n' "${UNEXPECTED_DELTA}" >&2
+            exit 1
+          }
+
+          RUN_FILE="$(mktemp)"
+          JOBS_FILE="$(mktemp)"
+          ARTIFACT_FILE="$(mktemp)"
+          trap 'rm -f "${TAG_STATE}" "${RUN_FILE}" "${JOBS_FILE}" "${ARTIFACT_FILE}"' EXIT
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/attempts/${SOURCE_ATTEMPT}" \
+            > "${RUN_FILE}"
+          jq -e \
+            --arg head "${SOURCE_HEAD}" \
+            --argjson attempt "${SOURCE_ATTEMPT}" \
+            --argjson run_id "${SOURCE_RUN_ID}" '
+              .id == $run_id and .run_attempt == $attempt and
+              .path == ".github/workflows/upstream-sync-v2.yml" and
+              .event == "workflow_dispatch" and .head_branch == "main" and
+              .head_sha == $head and .status == "completed" and
+              .conclusion == "failure" and
+              .actor.login == "unstableneutron" and .actor.type == "User" and
+              .repository.full_name == "unstableneutron/CLIProxyAPIPlus"
+            ' "${RUN_FILE}" >/dev/null || {
+            echo "Source workflow run identity differs." >&2
+            exit 1
+          }
+          SOURCE_STATUS="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/compare/${SOURCE_HEAD}...${EXPECTED_COMMIT}" \
+            --jq .status)"
+          case "${SOURCE_STATUS}" in
+            identical|ahead) ;;
+            *)
+              echo "Accepted commit is not descended from the source workflow head." >&2
+              exit 1
+              ;;
+          esac
+
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/attempts/${SOURCE_ATTEMPT}/jobs?per_page=100" \
+            > "${JOBS_FILE}"
+          jq -e '
+            def one($name; $conclusion):
+              [.jobs[] | select(.name == $name and .conclusion == $conclusion)] | length == 1;
+            one("candidate"; "success") and
+            one("promote"; "success") and
+            one("release / stage"; "success") and
+            one("release / publish"; "failure") and
+            ([.jobs[] | select(.name | startswith("docker_build / build (")) |
+              select(.conclusion == "success")] | length == 2) and
+            ([.jobs[] | select(.conclusion == "failure") | .name] == ["release / publish"])
+          ' "${JOBS_FILE}" >/dev/null || {
+            echo "Source workflow did not stop at the recoverable release publication boundary." >&2
+            exit 1
+          }
+
+          ARTIFACT_NAME="staged-release-assets-${SOURCE_RUN_ID}-${SOURCE_ATTEMPT}"
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}" \
+            > "${ARTIFACT_FILE}"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --arg head "${SOURCE_HEAD}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --argjson artifact_id "${ARTIFACT_ID}" \
+            --argjson run_id "${SOURCE_RUN_ID}" '
+              .id == $artifact_id and .name == $name and .digest == $digest and
+              .expired == false and .size_in_bytes > 0 and
+              .workflow_run.id == $run_id and
+              .workflow_run.repository_id == 1247056725 and
+              .workflow_run.head_repository_id == 1247056725 and
+              .workflow_run.head_sha == $head
+            ' "${ARTIFACT_FILE}" >/dev/null || {
+            echo "Staged artifact identity differs." >&2
+            exit 1
+          }
+
+          {
+            echo "artifact_digest=${ARTIFACT_DIGEST}"
+            echo "artifact_id=${ARTIFACT_ID}"
+            echo "artifact_name=${ARTIFACT_NAME}"
+            echo "commit=${EXPECTED_COMMIT}"
+            echo "source_head=${SOURCE_HEAD}"
+            echo "source_run_id=${SOURCE_RUN_ID}"
+            echo "tag=${TAG}"
+          } >> "${GITHUB_OUTPUT}"
+
+  publish:
+    needs: validate
     runs-on: ubuntu-24.04
     steps:
-      - name: Reject mutation of immutable release provenance
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Resume exact staged release publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_MAIN_POLICY: descendant
         run: |
-          echo "Accepted-release recovery is disabled: immutable tags, release assets, receipts, Actions artifacts, and GHCR identities must not be regenerated or overwritten." >&2
-          echo "Use a separately reviewed guarded policy to publish a new immutable identity instead." >&2
-          exit 1
+          .github/scripts/publish-staged-release.sh \
+            "${{ needs.validate.outputs.tag }}" \
+            "${{ needs.validate.outputs.commit }}" \
+            upstream-sync-receipt.json \
+            "${{ needs.validate.outputs.artifact_id }}" \
+            "${{ needs.validate.outputs.artifact_name }}" \
+            "${{ needs.validate.outputs.artifact_digest }}" \
+            "${{ needs.validate.outputs.source_run_id }}" \
+            "${{ needs.validate.outputs.source_head }}"
+          echo "Recovered release assets from the exact failed-run artifact. Rerun the source Upstream Sync v2 workflow to complete acceptance." >> "${GITHUB_STEP_SUMMARY}"

@@ -331,13 +331,12 @@ test_workflow_contract_is_fail_closed() {
   # shellcheck disable=SC2016 # Workflow shell expressions are asserted literally.
   assert_contains "${WORKFLOW}" 'plan_value "${FINAL_PLAN}" next_fork_tag'
   # shellcheck disable=SC2016 # The workflow shell expression is asserted literally.
-  assert_contains "${RECOVERY_WORKFLOW}" "Reject Unsafe Release Recovery"
-  assert_contains "${RECOVERY_WORKFLOW}" "contents: read"
-  assert_contains "${RECOVERY_WORKFLOW}" "publish a new immutable identity instead."
-  assert_not_contains "${RECOVERY_WORKFLOW}" "contents: write"
+  assert_contains "${RECOVERY_WORKFLOW}" "Recover Existing Upstream Release Tag"
+  assert_contains "${RECOVERY_WORKFLOW}" "source_run_attempt:"
+  assert_contains "${RECOVERY_WORKFLOW}" "staged_artifact_digest:"
+  assert_contains "${RECOVERY_WORKFLOW}" 'one("release / publish"; "failure")'
+  assert_contains "${RECOVERY_WORKFLOW}" "RELEASE_MAIN_POLICY: descendant"
   assert_not_contains "${RECOVERY_WORKFLOW}" "packages: write"
-  assert_not_contains "${RECOVERY_WORKFLOW}" "gh release"
-  assert_not_contains "${RECOVERY_WORKFLOW}" "docker"
   assert_not_contains "${RECOVERY_WORKFLOW}" "--clobber"
   assert_contains "${UPSTREAM_WORKFLOW}" "hotfix-release-receipt.json"
   assert_contains "${UPSTREAM_WORKFLOW}" "verify-hotfix-release.sh"

@@ -20,6 +20,7 @@ INPUT_ARTIFACT_NAME=$5
 INPUT_ARTIFACT_DIGEST=$6
 WORKFLOW_RUN_ID=$7
 WORKFLOW_HEAD_SHA=$8
+RELEASE_MAIN_POLICY=${RELEASE_MAIN_POLICY:-exact}
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || die "expected commit is invalid"
 [[ "${WORKFLOW_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || die "workflow head SHA is invalid"
@@ -167,12 +168,8 @@ EVIDENCE=$(jq -Scn \
 EXPECTED_BODY="<!-- cliproxy-staged-release:v1 ${EVIDENCE} -->"
 
 revalidate_target() {
-  local tag_commit main_commit
-  tag_commit=$(gh api "/repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
-  main_commit=$(gh api "/repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
-  if [ "${tag_commit}" != "${EXPECTED_COMMIT}" ] || [ "${main_commit}" != "${EXPECTED_COMMIT}" ]; then
-    die "tag or main moved before release mutation"
-  fi
+  "${SCRIPT_DIR}/revalidate-release-target.sh" \
+    "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
 }
 
 validate_release() {
