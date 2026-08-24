@@ -403,7 +403,6 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 	return strings.TrimSpace(currentToken.AccessToken), nil
 }
-
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()

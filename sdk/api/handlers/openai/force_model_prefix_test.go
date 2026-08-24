@@ -32,7 +32,7 @@ func (e *forceModelPrefixCaptureExecutor) Identifier() string { return "codex" }
 func (e *forceModelPrefixCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	e.calls++
 	e.captureRequest(auth, req, opts)
-	return coreexecutor.Response{Payload: []byte(`{"id":"resp-test","object":"chat.completion","choices":[]}`)}, nil
+	return coreexecutor.Response{Payload: []byte(`{"id":"resp-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)}, nil
 }
 
 func (e *forceModelPrefixCaptureExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {

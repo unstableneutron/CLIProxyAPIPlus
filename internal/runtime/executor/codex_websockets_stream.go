@@ -555,6 +555,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateErr = wsErr
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
+					unlockStreamSession()
 				}
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -572,8 +573,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				if sess != nil {
-					unlockStreamSession()
 					e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
+					unlockStreamSession()
 				}
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
@@ -589,7 +590,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
 			if eventType == "response.output_item.done" {
 				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 			}
@@ -620,6 +621,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 				if isCodexWebsocketTerminalEvent(eventType) || isTerminalEvent {
+					if (isCodexWebsocketFailureTerminalEvent(eventType) || eventType == "error") && sess != nil {
+						e.invalidateUpstreamConn(sess, conn, "terminal_error", nil)
+						unlockStreamSession()
+					}
 					return
 				}
 				continue
@@ -642,7 +647,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					return
 				}
 			}
-			if isCodexWebsocketTerminalEvent(eventType) {
+			if isCodexWebsocketTerminalEvent(eventType) || isTerminalEvent {
 				return
 			}
 		}

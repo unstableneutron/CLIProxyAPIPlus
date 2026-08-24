@@ -2737,6 +2737,50 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
+func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
+	var userIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "key-123",
+		"base_url":   server.URL,
+		"cloak_mode": "always",
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	for i := range 2 {
+		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("claude"),
+		}); err != nil {
+			t.Fatalf("Execute call %d error: %v", i, err)
+		}
+	}
+
+	if len(userIDs) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(userIDs))
+	}
+	if userIDs[0] == "" || userIDs[1] == "" {
+		t.Fatal("expected user_id to be populated")
+	}
+	if userIDs[0] == userIDs[1] {
+		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
+	}
+	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
+		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	}
+}
+
 func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2755,7 +2799,7 @@ func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   "claude-3-5-sonnet",
 			Payload: payload,
@@ -4300,7 +4344,7 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	}
 }
 
-func TestClaudeExecutor_CustomBaseURLPreservesBodyByDefault(t *testing.T) {
+func TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -4685,23 +4729,30 @@ func TestApplyCloaking_EmptyCredentialModeRespectsDefaultAndGlobalPrecedence(t *
 	tests := []struct {
 		name        string
 		cfg         *config.Config
+		auth        *cliproxyauth.Auth
 		wantCloaked bool
 	}{
 		{
-			name:        "default auto mode applies cloaking",
+			name:        "default mode preserves the caller without cloaking (v7.2.136 upstream sync)",
 			cfg:         &config.Config{},
-			wantCloaked: true,
+			wantCloaked: false,
 		},
 		{
 			name:        "global disable mode overrides an empty credential mode",
 			cfg:         &config.Config{DisableClaudeCloakMode: true},
 			wantCloaked: false,
 		},
+		{
+			name:        "credential auto mode still applies cloaking",
+			cfg:         &config.Config{},
+			auth:        &cliproxyauth.Auth{Attributes: map[string]string{"cloak_mode": "auto"}},
+			wantCloaked: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, &cliproxyauth.Auth{}, payload, "test-key", false, false)
+			got, gotCloaked, errCloaking := applyCloaking(context.Background(), tt.cfg, tt.auth, payload, "test-key", false, false)
 			if errCloaking != nil {
 				t.Fatalf("applyCloaking() error = %v", errCloaking)
 			}
@@ -5765,18 +5816,24 @@ func TestApplyClaudeHeaders_StreamTransportNegotiation(t *testing.T) {
 	}
 }
 
-func TestApplyClaudeHeaders_DefaultPreservesCallerBetas(t *testing.T) {
+func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
 	incoming := http.Header{"Anthropic-Beta": []string{"caller-only-beta"}}
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-caller-betas"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "key-caller-betas",
+		"cloak_mode": "always",
+	}}
 	body := []byte(`{"model":"claude-opus-4-6"}`)
 
-	// Default API-key mode preserves caller betas on direct Anthropic.
+	// Direct Anthropic must not echo a beta real Claude Code never sends.
 	directReq := newClaudeHeaderTestRequest(t, incoming)
 	if errApply := applyClaudeHeaders(directReq, auth, "key-caller-betas", false, nil, body, nil, incoming, false); errApply != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errApply)
 	}
-	if got := directReq.Header.Get("Anthropic-Beta"); got != "caller-only-beta" {
-		t.Fatalf("Anthropic-Beta = %q, want caller beta on api.anthropic.com", got)
+	if got := directReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "caller-only-beta") {
+		t.Fatalf("Anthropic-Beta = %q, want caller beta dropped on api.anthropic.com", got)
+	}
+	if got, want := directReq.Header.Get("Anthropic-Beta"), claudeCodeCLIBetas(body, nil, false); got != want {
+		t.Fatalf("Anthropic-Beta = %q, want exactly the CLI baseline %q", got, want)
 	}
 
 	// Other Anthropic-compatible upstreams keep caller betas functional.

@@ -117,7 +117,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, websocket.ErrCloseSent
 			}
 
-			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg, nil)
+			errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, errMsg)
 			if wrote {
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -172,7 +172,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						}
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, websocket.ErrCloseSent
 					}
-					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg, payloads[i])
+					errorPayload, wrote, errTerminate := writeResponsesWebsocketTerminalError(writer, wsTimelineLog, payloadErrMsg)
 					if wrote {
 						log.Infof(
 							"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -236,7 +236,6 @@ func writeResponsesWebsocketTerminalError(
 	writer *responsesWebsocketWriter,
 	wsTimelineLog websocketTimelineAppender,
 	errMsg *interfaces.ErrorMessage,
-	payload []byte,
 ) ([]byte, bool, error) {
 	if !shouldExposeResponsesUpstreamError(errMsg) {
 		// Keep the upstream reason in the request-log timeline even though the client
@@ -252,13 +251,10 @@ func writeResponsesWebsocketTerminalError(
 		return nil, false, websocket.ErrCloseSent
 	}
 
-	if len(payload) == 0 {
-		var errBuild error
-		payload, errBuild = buildResponsesWebsocketErrorPayload(errMsg)
-		if errBuild != nil {
-			_, _ = writer.closeWithoutError()
-			return nil, false, errBuild
-		}
+	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	if errBuild != nil {
+		_, _ = writer.closeWithoutError()
+		return nil, false, errBuild
 	}
 
 	wrote, errClose := writer.closeWithPayload(payload)
@@ -552,6 +548,7 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
+		errMsg = sanitizeOpenAIErrorMessage(errMsg)
 		if errMsg.StatusCode > 0 {
 			status = errMsg.StatusCode
 			errText = http.StatusText(status)
@@ -573,21 +570,23 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
-		headers := []byte(`{}`)
-		hasHeaders := false
-		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
-				continue
+	if errMsg != nil {
+		// Preserve only sanitized upstream headers as response headers and never
+		// echo them under a raw "headers" field. Filtering removes hop-by-hop,
+		// reserved, and gateway-identity headers.
+		filtered := handlers.FilterUpstreamHeaders(errMsg.Headers)
+		if len(errMsg.Headers) > 0 {
+			headers := []byte(`{}`)
+			for key, values := range filtered {
+				if len(values) == 0 {
+					continue
+				}
+				headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
+				headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
+				if errSet != nil {
+					return nil, errSet
+				}
 			}
-			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
-			if errSet != nil {
-				return nil, errSet
-			}
-			hasHeaders = true
-		}
-		if hasHeaders {
 			payload, errSet = sjson.SetRawBytes(payload, "headers", headers)
 			if errSet != nil {
 				return nil, errSet
@@ -597,10 +596,46 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 
 	if len(body) > 0 && json.Valid(body) {
 		errorNode := gjson.GetBytes(body, "error")
-		if errorNode.Exists() {
-			payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
+		if !errorNode.Exists() || !errorNode.IsObject() {
+			errorNode = gjson.GetBytes(body, "response.error")
+		}
+		if errorNode.Exists() && errorNode.IsObject() {
+			errObj := []byte(`{}`)
+			copied := false
+			for _, field := range []string{"type", "code", "message", "param"} {
+				v := errorNode.Get(field)
+				if !v.Exists() || v.Type == gjson.Null {
+					continue
+				}
+				errObj, _ = sjson.SetBytes(errObj, field, v.Value())
+				copied = true
+			}
+			if copied {
+				payload, errSet = sjson.SetRawBytes(payload, "error", errObj)
+			} else {
+				payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
+			}
 		} else {
-			payload, errSet = sjson.SetRawBytes(payload, "error", body)
+			root := gjson.ParseBytes(body)
+			if root.IsObject() {
+				errObj := []byte(`{}`)
+				copied := false
+				for _, field := range []string{"type", "code", "message", "param"} {
+					v := root.Get(field)
+					if !v.Exists() || v.Type == gjson.Null {
+						continue
+					}
+					errObj, _ = sjson.SetBytes(errObj, field, v.Value())
+					copied = true
+				}
+				if copied {
+					payload, errSet = sjson.SetRawBytes(payload, "error", errObj)
+				} else {
+					payload, errSet = sjson.SetRawBytes(payload, "error", body)
+				}
+			} else {
+				payload, errSet = sjson.SetRawBytes(payload, "error", body)
+			}
 		}
 		if errSet != nil {
 			return nil, errSet

@@ -1390,25 +1390,18 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesSSEEventLines(t 
 		t.Fatalf("expected non-nil channels")
 	}
 
-	var got []string
+	var got []byte
 	for chunk := range dataChan {
-		got = append(got, string(chunk))
+		got = append(got, chunk...)
 	}
-
 	for msg := range errChan {
 		if msg != nil {
 			t.Fatalf("unexpected error: %+v", msg)
 		}
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("expected 2 forwarded chunks, got %d: %#v", len(got), got)
-	}
-	if got[0] != "event: response.completed" {
-		t.Fatalf("unexpected first chunk: %q", got[0])
-	}
-	expectedData := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
-	if got[1] != expectedData {
-		t.Fatalf("unexpected second chunk.\nGot:  %q\nWant: %q", got[1], expectedData)
+	expected := "event: response.completeddata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
+	if string(got) != expected {
+		t.Fatalf("unexpected forwarded stream.\nGot:  %q\nWant: %q", string(got), expected)
 	}
 }

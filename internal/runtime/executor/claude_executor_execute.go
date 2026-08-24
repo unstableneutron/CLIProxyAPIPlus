@@ -129,10 +129,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if cpaOwnsCacheControl {
 			body = ensureCacheControl(body)
 		}
-
-		// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-		// Cloaking and ensureCacheControl may push the total over 4 when the client
-		// already sends multiple cache_control blocks.
 		body = enforceCacheControlLimit(body, 4)
 
 		// Native selects the 1h cache pool only for OAuth credentials and pairs it with
@@ -153,7 +149,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 		body = normalizeCacheControlTTL(body)
 	}
-
 	// Payload rules and other request processing may rewrite stream. Keep the
 	// upstream body, transport headers, and response parser on one authority.
 	// Native non-stream Haiku helper requests omit stream rather than sending

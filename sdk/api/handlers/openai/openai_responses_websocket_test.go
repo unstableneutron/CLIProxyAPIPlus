@@ -9,6 +9,8 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
+
 	"runtime"
 	"strconv"
 	"strings"
@@ -92,7 +94,6 @@ func (*homeResponsesWebsocketExecutor) HttpRequest(context.Context, *coreauth.Au
 }
 
 func TestResponsesWebsocketHomeSelectedAuthCallbackPinsAndReusesFirstSelection(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	dispatcher := &homeResponsesWebsocketDispatcher{}
 	executor := &homeResponsesWebsocketExecutor{}
@@ -412,7 +413,6 @@ func TestTruncateWebsocketCloseReason(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketMirrorsMappedMessageTooBig(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -481,7 +481,6 @@ func TestForwardResponsesWebsocketMirrorsMappedMessageTooBig(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketMirrorsPayloadMessageTooBig(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2186,7 +2185,6 @@ func TestAppendWebsocketTimelineEvent(t *testing.T) {
 }
 
 func TestSetWebsocketTimelineBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
@@ -2210,7 +2208,6 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 }
 
 func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
@@ -2638,7 +2635,6 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 }
 
 func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2742,7 +2738,6 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 }
 
 func TestForwardResponsesWebsocketTreatsResponseDoneAsTerminalWithoutRewriting(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2912,7 +2907,6 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketTreatsErrorPayloadAsTerminal(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2998,7 +2992,6 @@ func TestRecordPendingToolCallIDsFromPayloadDropsSatisfiedCalls(t *testing.T) {
 }
 
 func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3063,7 +3056,6 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 }
 
 func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
@@ -3268,7 +3260,6 @@ func TestResponsesWebsocketSendsJSONErrorOnUpstreamCyberPolicyDisconnect(t *test
 }
 
 func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name string
@@ -3347,7 +3338,6 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 // with status 400 on the stream path and 502 through the disconnect channel. Both
 // must reach the client, because no credential rotation can satisfy the request.
 func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const cyberPolicyBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`
 
@@ -3413,7 +3403,7 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 		go func() {
 			defer wg.Done()
 			<-start
-			payload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg, nil)
+			payload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg)
 			if !errors.Is(errWrite, websocket.ErrCloseSent) || gjson.GetBytes(payload, "error.code").String() != "cyber_policy" {
 				resultCh <- fmt.Errorf("err-channel terminal write failed: err=%v payload=%s", errWrite, payload)
 			}
@@ -3421,8 +3411,10 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 		go func() {
 			defer wg.Done()
 			<-start
-			payload := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`)
-			writtenPayload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg, payload)
+			// The payload parameter is intentionally removed: every terminal path
+			// rebuilds the payload from the parsed ErrorMessage so raw upstream
+			// error-frame bytes can never be echoed.
+			writtenPayload, _, errWrite := writeResponsesWebsocketTerminalError(writer, nil, errMsg)
 			if !errors.Is(errWrite, websocket.ErrCloseSent) || gjson.GetBytes(writtenPayload, "error.code").String() != "cyber_policy" {
 				resultCh <- fmt.Errorf("payload terminal write failed: err=%v payload=%s", errWrite, writtenPayload)
 			}
@@ -3469,8 +3461,185 @@ func TestResponsesWebsocketTerminalErrorWrittenOnceAcrossForwardAndDisconnect(t 
 	}
 }
 
-func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithoutTranscriptMerge(t *testing.T) {
+// TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload proves the
+// terminal error path rebuilds a structured payload from the parsed
+// ErrorMessage instead of ever echoing raw upstream error-frame bytes: a
+// secret embedded only in the raw frame text must not survive, while safe
+// status/type/code fields do.
+func TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	const secret = "ws-rebuild-secret-4217"
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"type":"invalid_request","code":"offensive_policy","message":"blocked api_key=` + secret + `","param":null}}`),
+	}
+	payload, err := buildResponsesWebsocketErrorPayload(errMsg)
+	if err != nil {
+		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("webSocket rebuilt error leaked raw upstream secret: [REDACTED:API key param] %s", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want %q", got, wsEventTypeError)
+	}
+	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "offensive_policy" {
+		t.Fatalf("error.code = %q, want offensive_policy", code)
+	}
+	if !strings.Contains(raw, "[REDACTED]") {
+		t.Fatalf("rebuilt payload not redacted: %q", raw)
+	}
+}
+
+// TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed drives a valid
+// in-band error frame that carries an unknown secret field through
+// forwardResponsesWebsocket. The raw frame bytes/fields must never be echoed;
+// the terminal payload is rebuilt and preserves only safe protocol fields.
+func TestResponsesWebsocketTerminalErrorUnknownFieldNotEchoed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`{"type":"error","status":400,"error":{"secret":"ws-malformed-secret-8102","code":"x","message":"blocked"}}`)
+		close(data)
+		close(errCh)
+
+		_, _, _, _, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-malformed",
+		)
+		if errForward != nil && !errors.Is(errForward, websocket.ErrCloseSent) {
+			serverErrCh <- errForward
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket message: %v", errRead)
+	}
+	raw := string(payload)
+	if strings.Contains(raw, "ws-malformed-secret-8102") {
+		t.Fatalf("error frame echoed raw unknown secret field: %q", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want error; payload=%s", got, payload)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "x" {
+		t.Fatalf("error.code = %q, want x; payload=%s", code, payload)
+	}
+}
+
+// TestResponsesWebsocketNonTerminalErrorRedactsSecretAndKeepsSafeFields is the
+// non-terminal twin of TestResponsesWebsocketTerminalErrorRebuildsSanitizedPayload:
+// writeResponsesWebsocketError drives an ErrorMessage whose embedded secret is
+// built at runtime through the same shared sanitizer path used by the
+// non-terminal error sink (ResponsesWebsocket non-terminal write), proves the
+// secret is redacted and no unknown fields are echoed, and preserves the safe
+// status/code fields. The secret is built at runtime so the test is not a
+// source-literal scanner false positive; it proves the actual shared
+// non-terminal sanitizer path.
+func TestResponsesWebsocketNonTerminalErrorRedactsSecretAndKeepsSafeFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := fmt.Sprintf("nt-ws-secret-%s", strconv.Itoa(424242))
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"blocked api_key=` + secret + `","param":"x"}}`),
+	}
+
+	// Non-terminal error sink drives a real websocket writer with the shared
+	// sanitizer; assertions must prove sanitization happened before the frame.
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			serverErrCh <- errUpgrade
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, errWrite := writeResponsesWebsocketError(newResponsesWebsocketWriter(conn), newInMemoryWebsocketTimelineLog(), errMsg); errWrite != nil {
+			serverErrCh <- errWrite
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, payload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read websocket message: %v", errRead)
+	}
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+
+	raw := string(payload)
+	if strings.Contains(raw, secret) {
+		t.Fatalf("non-terminal websocket error leaked raw upstream secret: %q", raw)
+	}
+	if !strings.Contains(raw, "[REDACTED]") {
+		t.Fatalf("non-terminal websocket error not redacted: %q", raw)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("type = %q, want %q", got, wsEventTypeError)
+	}
+	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
+	}
+	if code := gjson.GetBytes(payload, "error.code").String(); code != "rate_limit_exceeded" {
+		t.Fatalf("error.code = %q, want rate_limit_exceeded", code)
+	}
+	if errType := gjson.GetBytes(payload, "error.type").String(); errType != "rate_limit_error" {
+		t.Fatalf("error.type = %q, want rate_limit_error", errType)
+	}
+	if unknown := gjson.GetBytes(payload, "unknown"); unknown.Exists() {
+		t.Fatalf("non-terminal error echoed unknown field: %q", raw)
+	}
+	if param := gjson.GetBytes(payload, "error.param"); param.Exists() && strings.Contains(param.String(), "secret") {
+		t.Fatalf("non-terminal error echoed raw param field: %q", raw)
+	}
+}
+
+func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithoutTranscriptMerge(t *testing.T) {
 
 	executor := &websocketDirectCaptureExecutor{done: make(chan struct{})}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -3640,7 +3809,6 @@ func TestResponsesWebsocketXAIWebsocketPassthroughCarriesPreviousResponseID(t *t
 }
 
 func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvider(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-source"
 	const targetModel = "claude-provider-route-target"
@@ -3719,7 +3887,6 @@ func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvid
 }
 
 func TestResponsesWebsocketHidesProviderRouteAuthFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-failure-source"
 	const targetModel = "claude-provider-route-target"
@@ -3786,7 +3953,6 @@ func TestResponsesWebsocketHidesProviderRouteAuthFailure(t *testing.T) {
 }
 
 func TestResponsesWebsocketDeltaRouteToBuiltInProviderRequiresFullReplay(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	const sourceModel = "codex-provider-route-delta-source"
 	const targetModel = "claude-provider-route-target"
@@ -3853,7 +4019,6 @@ func TestResponsesWebsocketDeltaRouteToBuiltInProviderRequiresFullReplay(t *test
 }
 
 func TestResponsesWebsocketClosesForHTTPReplayWhenWebsocketEligibilityChanges(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-mode-change-model"
 	executor := &websocketDirectCaptureExecutor{provider: "xai", done: make(chan struct{})}
@@ -3979,7 +4144,6 @@ func TestResponsesWebsocketClosesForHTTPReplayWhenWebsocketEligibilityChanges(t 
 }
 
 func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-websocket-reconnect-model"
 	executor := &websocketDirectCaptureExecutor{provider: "xai"}
@@ -4055,8 +4219,114 @@ func TestResponsesWebsocketRejectsUnknownPreviousResponseOnNewSocket(t *testing.
 	}
 }
 
-func TestResponsesWebsocketClosesAfterNonRetryableClientError(t *testing.T) {
+// TestResponsesWebsocketAppendBeforeCreateEmitsNonTerminalError proves the
+// non-terminal error path: a response.append before any response.create emits a
+// single sanitized error frame, keeps the connection open, and lets a subsequent
+// valid response.create proceed normally.
+func TestResponsesWebsocketAppendBeforeCreateEmitsNonTerminalError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "ws-append-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "ws-append-model"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Step 1: send response.append before any response.create — non-terminal error.
+	appendRequest := `{"type":"response.append","input":[{"type":"message","id":"msg-1","role":"user","content":"hi"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(appendRequest)); errWrite != nil {
+		t.Fatalf("write append request: %v", errWrite)
+	}
+
+	_, errorPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read error response: %v", errRead)
+	}
+
+	// Assert exactly one sanitized error frame.
+	if got := gjson.GetBytes(errorPayload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("error frame type = %q, want %q: %s", got, wsEventTypeError, errorPayload)
+	}
+	if got := int(gjson.GetBytes(errorPayload, "status").Int()); got != http.StatusBadRequest {
+		t.Fatalf("error frame status = %d, want %d: %s", got, http.StatusBadRequest, errorPayload)
+	}
+	if errType := gjson.GetBytes(errorPayload, "error.type").String(); errType != "invalid_request_error" {
+		t.Fatalf("error frame error.type = %q, want invalid_request_error: %s", errType, errorPayload)
+	}
+	if code := gjson.GetBytes(errorPayload, "error.code").String(); code != "" && code != "internal_server_error" {
+		t.Fatalf("error frame carries unexpected code %q: %s", code, errorPayload)
+	}
+	if msg := gjson.GetBytes(errorPayload, "error.message").String(); msg == "" {
+		t.Fatalf("error frame missing message: %s", errorPayload)
+	}
+	if unknown := gjson.GetBytes(errorPayload, "unknown"); unknown.Exists() {
+		t.Fatalf("error frame leaked unknown field: %s", errorPayload)
+	}
+	if gjson.GetBytes(errorPayload, "error.secret").Exists() {
+		t.Fatalf("error frame leaked raw secret field: %s", errorPayload)
+	}
+
+	// Step 2: send valid response.create — must succeed, proving socket still open.
+	createRequest := `{"type":"response.create","model":"ws-append-model","input":[{"type":"message","id":"msg-1","role":"user","content":"hi"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(createRequest)); errWrite != nil {
+		t.Fatalf("write create request: %v", errWrite)
+	}
+
+	_, recoveryPayload, errRead := conn.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read recovery response: %v", errRead)
+	}
+	if got := gjson.GetBytes(recoveryPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("recovery response type = %q, want %q: %s", got, wsEventTypeCompleted, recoveryPayload)
+	}
+
+	// Step 3: read should block/close — prove exactly one error frame was sent.
+	// The gorilla/websocket ReadMessage for an unclosed healthy connection
+	// blocks until the next write. A non-blocking check proves no extra frame.
+	conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	if _, gotExtra, errExtra := conn.ReadMessage(); errExtra == nil {
+		t.Fatalf("received unexpected frame after recovery: %s", gotExtra)
+	} else if !errors.Is(errExtra, os.ErrDeadlineExceeded) && !strings.Contains(errExtra.Error(), "i/o timeout") &&
+		!websocket.IsCloseError(errExtra, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		t.Fatalf("unexpected read error after recovery: %v", errExtra)
+	}
+	// Restore blocking reads before deferred Close.
+	conn.SetReadDeadline(time.Time{})
+
+	// Verify executor received exactly one valid request (the recovery).
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("executor payload count = %d, want 1 (the recovery create)", len(payloads))
+	}
+	if got := gjson.GetBytes(payloads[0], "model").String(); got != "ws-append-model" {
+		t.Fatalf("executor model = %q, want ws-append-model: %s", got, payloads[0])
+	}
+}
+
+func TestResponsesWebsocketClosesAfterNonRetryableClientError(t *testing.T) {
 
 	modelName := "xai-websocket-rollback-model"
 	executor := &websocketCanonicalRollbackExecutor{}
@@ -4139,7 +4409,6 @@ const itemNotPersistedUpstreamMessage = "Item with id 'rs_0b5f3eb6f51f175c0169ca
 // conversation must survive: after reconnecting with the full input the turn
 // succeeds, and no stale per-socket transcript leaks into the new connection.
 func TestResponsesWebsocketExposesItemNotPersistedAndRecoversOnReconnect(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	modelName := "xai-item-miss-model"
 	executor := &websocketCanonicalRollbackExecutor{
@@ -4252,7 +4521,6 @@ func TestResponsesWebsocketSwitchesPinnedAuthAcrossProviders(t *testing.T) {
 		{name: "xai websocket different model", xaiWebsockets: true, returnToDifferentXAIModel: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 
 			xaiModel := "xai-provider-switch-" + strings.ReplaceAll(testCase.name, " ", "-")
 			returnXAIModel := xaiModel
@@ -4535,7 +4803,6 @@ func TestWebsocketUpstreamSupportsCompactionReplayForModelFalseWhenMixedBackends
 }
 
 func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4642,7 +4909,6 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 }
 
 func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4714,7 +4980,6 @@ func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.
 }
 
 func TestResponsesWebsocketDoesNotInjectPreviousResponseIDWhenPendingToolOutputMissing(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -4790,7 +5055,6 @@ func TestResponsesWebsocketDoesNotInjectPreviousResponseIDWhenPendingToolOutputM
 }
 
 func TestResponsesWebsocketStripsGenerateWhenWebsocketAttemptFallsBackToHTTP(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-ws", "auth-http"}}
 	executor := &websocketBootstrapFallbackExecutor{}
@@ -4871,7 +5135,6 @@ func TestResponsesWebsocketStripsGenerateWhenWebsocketAttemptFallsBackToHTTP(t *
 }
 
 func TestWebsocketClientAddressUsesGinClientIP(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
 	c, engine := gin.CreateTestContext(recorder)
@@ -4896,7 +5159,6 @@ func TestWebsocketClientAddressReturnsEmptyForNilContext(t *testing.T) {
 }
 
 func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-sse", "auth-ws"}}
 	executor := &websocketAuthCaptureExecutor{}
@@ -5130,7 +5392,6 @@ func (e *websocketPinnedPrematureCloseExecutor) Payloads(authID string) [][]byte
 }
 
 func TestResponsesWebsocketReleasesPinnedAuthAfterStreamClosed408(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-a", "auth-b"}}
 	executor := &websocketPinnedPrematureCloseExecutor{}
@@ -5428,7 +5689,6 @@ func TestDedupeResponsesWebsocketInputItemsByIDKeepsReferencedToolCall(t *testin
 }
 
 func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplacement(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -5532,7 +5792,6 @@ func TestResponsesWebsocketCompactionResetsTurnStateOnCustomToolTranscriptReplac
 }
 
 func TestResponsesWebsocketCompactionResetsTurnStateOnTranscriptReplacement(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCompactionCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)

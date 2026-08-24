@@ -35,7 +35,7 @@ func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *
 }
 
 func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader(t *testing.T) {
-	TestClaudeExecutor_CustomBaseURLOmitsCCHByDefault(t)
+	TestClaudeExecutor_OfficialAPIKeyDefaultPreservesCallerCCH(t)
 }
 
 func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) {

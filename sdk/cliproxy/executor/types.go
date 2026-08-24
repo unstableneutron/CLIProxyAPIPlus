@@ -57,7 +57,10 @@ const (
 	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
 	// so OnResult keys the session cache identically to how selection read it.
 	SessionAffinityProviderMetadataKey = "session_affinity_provider"
-	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
+	// SessionAffinityModelMetadataKey carries the normalized model argument used by
+	// SessionAffinitySelector.Pick to build the session cache key, before any
+	// executor/model-pool/home upstream rewrite, so OnResult keys the session cache
+	// identically to how selection read it.
 	SessionAffinityModelMetadataKey = "session_affinity_model"
 )
 
@@ -125,6 +128,9 @@ type RequestTerminatedError struct {
 	HTTPStatus int
 	Header     http.Header
 	Body       []byte
+	// Trusted reports that the termination originated locally (plugin/interceptor)
+	// rather than from an untrusted upstream. Zero value false is the safe default.
+	Trusted bool
 }
 
 func (e *RequestTerminatedError) Error() string {

@@ -359,12 +359,12 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_DefaultDisabledPassthrough(t
 	if result == nil {
 		t.Fatal("expected non-nil result in default unbuffered mode")
 	}
-	_, streamErr := drainChunks(result)
-	if streamErr == nil {
-		t.Fatal("expected stream error in chunks for default unbuffered mode")
+	combined, streamErr := drainChunks(result)
+	if streamErr != nil {
+		t.Fatalf("default unbuffered mode must pass the upstream terminal frame through: %v", streamErr)
 	}
-	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want %d while buffering is disabled", got, http.StatusBadGateway)
+	if !strings.Contains(combined, "server_is_overloaded") {
+		t.Fatalf("default unbuffered mode dropped the upstream terminal frame: %s", combined)
 	}
 }
 

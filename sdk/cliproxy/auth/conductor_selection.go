@@ -745,7 +745,7 @@ func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (boo
 	if !blocked {
 		return true, time.Time{}
 	}
-	if auth == nil || next.IsZero() || reason == blockReasonDisabled {
+	if auth == nil || reason == blockReasonDisabled {
 		return false, time.Time{}
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
@@ -767,8 +767,11 @@ func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (boo
 				continue
 			}
 			matchedBlocked = true
-			if stateNext.IsZero() || !credentialRetryRoundStateEligible(state.LastError, state.Quota.Exceeded) {
+			if !credentialRetryRoundStateEligible(state.LastError, state.Quota.Exceeded) {
 				return false, time.Time{}
+			}
+			if stateNext.IsZero() {
+				return true, time.Time{}
 			}
 		}
 		if matchedBlocked {
@@ -976,6 +979,9 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry)
 	if found {
+		if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > wait {
+			wait = *retryAfter
+		}
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
 			return 0, false
 		}
@@ -1222,6 +1228,9 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -1539,6 +1548,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if opts.Metadata == nil {
+		opts.Metadata = make(map[string]any)
+	}
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -136,17 +137,36 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk, ok = <-ch
 		}
 		if !ok {
-			return buffered, true, false, nil
+			bootstrap.finish()
+			if !bootstrap.sawPayload {
+				return buffered, true, false, nil
+			}
+			return buffered, bootstrap.isEmptyCompletion(), false, nil
 		}
 		if chunk.Err != nil {
+			if bootstrap.hasMeaningfulOutput() {
+				buffered = append(buffered, chunk)
+				return buffered, false, false, nil
+			}
 			return nil, false, false, chunk.Err
 		}
 		if chunk.Bootstrap {
 			return buffered, false, true, nil
 		}
 		buffered = append(buffered, chunk)
+		// Downstream websocket handlers own protocol-level startup buffering so
+		// they can distinguish retryable pre-response metadata from a partial
+		// response that must terminate the current session. Hand them the first
+		// real frame instead of collapsing a prematurely closed response into an
+		// empty-completion retry at the credential layer.
+		if cliproxyexecutor.DownstreamWebsocket(ctx) && len(bytes.TrimSpace(chunk.Payload)) > 0 {
+			return buffered, false, false, nil
+		}
 		if bootstrap.observe(chunk.Payload) {
 			return buffered, false, false, nil
+		}
+		if bootstrap.isTerminalEmpty() {
+			return buffered, true, false, nil
 		}
 	}
 }
@@ -262,6 +282,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		_, didRefreshOnUnauthorized = unauthorizedRefreshTried[auth.ID]
 	}
 	for idx, execModel := range execModels {
+
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		recordProxySelection(ctx, auth, routeModel, execModel)
 		execReq := req
@@ -409,6 +430,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					retryStream, retryErr := executor.ExecuteStream(streamCtx, auth, execReq, execOpts)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					if retryErr != nil {
+						if retryStream != nil {
+							discardStreamChunks(retryStream.Chunks)
+						}
 						if errCtx := ctx.Err(); errCtx != nil {
 							var retryChunks <-chan cliproxyexecutor.StreamChunk
 							if retryStream != nil {
@@ -497,15 +521,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			abandonStreamAttempt(ctx, cancelStream, streamResult.Chunks)
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
-		if closed && (len(buffered) == 0 || isEmptyCompletion(buffered)) {
+		payloadBytes := 0
+		for _, chunk := range buffered {
+			payloadBytes += len(chunk.Payload)
+		}
+		if closed && (payloadBytes == 0 || isEmptyCompletion(buffered)) {
 			cancelStream()
 			emptyErr := errEmptyCompletion
-			if len(buffered) == 0 {
+			if payloadBytes == 0 {
 				emptyErr = &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			}
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr, Options: execOpts}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			discardStreamChunks(streamResult.Chunks)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
@@ -515,6 +544,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		remaining := streamResult.Chunks
 		if closed {
+			discardStreamChunks(streamResult.Chunks)
 			closedCh := make(chan cliproxyexecutor.StreamChunk)
 			close(closedCh)
 			remaining = closedCh

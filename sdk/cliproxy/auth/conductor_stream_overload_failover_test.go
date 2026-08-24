@@ -50,7 +50,7 @@ func overloadStatusError() customStatusError {
 
 func successStreamResult() *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 2)
-	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_item.added"}`)}
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"ok"}`)}
 	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed"}`)}
 	close(ch)
 	return &cliproxyexecutor.StreamResult{

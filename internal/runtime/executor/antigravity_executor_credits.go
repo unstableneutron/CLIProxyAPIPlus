@@ -525,6 +525,13 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		return
 	}
 }
+
+// antigravityRetryAttempts keeps executor-local retries separate from the
+// conductor's credential retry rounds. The conductor owns RequestRetry, so an
+// executor invocation always makes one attempt for the selected credential.
+func antigravityRetryAttempts(_ *cliproxyauth.Auth, _ *config.Config) int {
+	return 1
+}
 func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 	if statusCode != http.StatusServiceUnavailable {
 		return false

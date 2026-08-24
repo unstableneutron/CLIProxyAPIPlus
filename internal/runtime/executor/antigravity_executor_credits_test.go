@@ -278,7 +278,9 @@ func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	}
 }
 
-func TestAntigravityExecute_DoesNotUseRequestRetryForInternalRetries(t *testing.T) {
+// The conductor now owns the retry represented by this historical regression:
+// the executor must surface the transient 429 after one credential-local attempt.
+func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 

@@ -67,16 +67,15 @@ func claudeNativeHelperOAuthAuth(baseURL string) *cliproxyauth.Auth {
 	}
 }
 
-func TestApplyClaudeHeadersPreservesCallerAsyncWithoutFingerprintOptIn(t *testing.T) {
+func TestApplyClaudeHeadersPreservesAsyncOnlyForConfirmedNative(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		confirmed bool
-		profile   bool
+		cloak     bool
 		wantAsync string
 	}{
 		{name: "confirmed native", confirmed: true, wantAsync: "async"},
-		{name: "unconfirmed caller default", wantAsync: "async"},
-		{name: "unconfirmed caller profile", profile: true},
+		{name: "unconfirmed cloaked caller", cloak: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
@@ -85,8 +84,8 @@ func TestApplyClaudeHeadersPreservesCallerAsyncWithoutFingerprintOptIn(t *testin
 			}
 			incoming := http.Header{"X-Stainless-Async": {"async"}}
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}}
-			if test.profile {
-				auth.Attributes["fingerprint_profile"] = "claude-code-cli"
+			if test.cloak {
+				auth.Attributes["cloak_mode"] = "always"
 			}
 			if errHeaders := applyClaudeHeaders(
 				request,

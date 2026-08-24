@@ -254,7 +254,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 				responseParts := make([][]byte, 0, len(orderedOutputs))
 				for _, output := range orderedOutputs {
-					responseParts = append(responseParts, buildOpenAIResponsesFunctionResponseParts(output, functionNamesByCallID)...)
+					responseParts = append(responseParts, buildOpenAIResponsesFunctionResponsePart(output, functionNamesByCallID)...)
 				}
 				if len(responseParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", responseParts))
@@ -855,7 +855,7 @@ func parseOpenAIResponsesArrayOutput(outputResult gjson.Result) (result string, 
 	}
 }
 
-func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {
+func buildOpenAIResponsesFunctionResponsePart(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {
 	callID := item.Get("call_id").String()
 	functionName := "unknown"
 	if matchedName, ok := functionNamesByCallID[callID]; ok {

@@ -808,7 +808,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	})
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -849,7 +849,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 	})
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -866,7 +866,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -1681,7 +1681,6 @@ func writeResponsesTerminalError(c *gin.Context, errMsg *interfaces.ErrorMessage
 	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, nextResponsesSequence(c))
 	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 }
-
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
 	if framer == nil {
 		framer = &responsesSSEFramer{context: c}

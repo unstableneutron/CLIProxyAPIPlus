@@ -87,7 +87,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	// Credential retry rounds are owned by the conductor. Keep one upstream
 	// attempt per credential so request-retry is not consumed twice.
-	attempts := 1
+	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -317,7 +317,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	// Credential retry rounds are owned by the conductor. Keep one upstream
 	// attempt per credential so request-retry is not consumed twice.
-	attempts := 1
+	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {

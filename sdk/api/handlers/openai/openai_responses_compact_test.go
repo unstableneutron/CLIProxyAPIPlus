@@ -82,7 +82,6 @@ func (e *compactCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *h
 }
 
 func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -138,7 +137,6 @@ func TestOpenAIResponsesCompactRejectsMalformedContractRequest(t *testing.T) {
 }
 
 func TestOpenAIResponsesCompactExecute(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -177,7 +175,6 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 }
 
 func TestOpenAIResponsesCompactDecodesZstdRequestBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -486,7 +483,7 @@ func (e *compactFailureMockExecutor) Execute(ctx context.Context, auth *coreauth
 	}
 	respPayload := e.normalResp
 	if len(respPayload) == 0 {
-		respPayload = []byte(`{"id":"resp_123","object":"response","status":"completed"}`)
+		respPayload = []byte(`{"id":"resp_123","object":"response","status":"completed","output":[{"type":"message","id":"msg_123","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`)
 	}
 	return coreexecutor.Response{Payload: respPayload}, nil
 }
