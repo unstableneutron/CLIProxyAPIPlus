@@ -114,6 +114,23 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.tag }}
 
+
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: .publication-policy
+          sparse-checkout: .github/scripts/revalidate-release-target.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Install trusted target verifier
+        run: |
+          install -m 0755 \
+            .publication-policy/.github/scripts/revalidate-release-target.sh \
+            "${RUNNER_TEMP}/revalidate-release-target.sh"
+          rm -rf .publication-policy
+
       - name: Resolve and verify image identity
         id: identity
         env:
@@ -162,7 +179,9 @@ jobs:
           EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+        run: >-
+          "${RUNNER_TEMP}/revalidate-release-target.sh"
+          "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
 
       - name: Build and push platform by digest
         id: push
@@ -223,7 +242,7 @@ jobs:
             echo "Invalid ${PLATFORM} architecture digest: ${ARCHITECTURE_DIGEST}." >&2
             exit 1
           fi
-          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+          "${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
           ARCH_TAG="${TAG}-${TAG_SUFFIX}"
           EXISTING_DIGEST=""
           EXISTING_INSPECT_FILE=$(mktemp)
@@ -265,7 +284,7 @@ jobs:
             exit 1
           fi
           if [ -z "${EXISTING_DIGEST}" ]; then
-            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+            "${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
             docker buildx imagetools create \
               --prefer-index=false \
               --tag "${IMAGE}:${ARCH_TAG}" \
@@ -306,7 +325,9 @@ jobs:
           EXPECTED_COMMIT: ${{ steps.identity.outputs.expected_commit }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-        run: .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+        run: >-
+          "${RUNNER_TEMP}/revalidate-release-target.sh"
+          "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
 
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -334,6 +355,22 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.expected_commit }}
+
+      # actions/checkout v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: .publication-policy
+          sparse-checkout: .github/scripts/revalidate-release-target.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Install trusted target verifier
+        run: |
+          install -m 0755 \
+            .publication-policy/.github/scripts/revalidate-release-target.sh \
+            "${RUNNER_TEMP}/revalidate-release-target.sh"
+          rm -rf .publication-policy
 
       # docker/setup-buildx-action v4.2.0
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
@@ -423,10 +460,10 @@ jobs:
           }
           EXISTING_CANONICAL=$(mktemp)
           trap 'rm -f "${EXISTING_CANONICAL}"' EXIT
-          .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+          "${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
           CANONICAL_STATE="$(inspect_image_state "${IMAGE}:${TAG}" "${EXISTING_CANONICAL}")"
           if [ "${CANONICAL_STATE}" = absent ]; then
-            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+            "${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
             docker buildx imagetools create --tag "${IMAGE}:${TAG}" "${SOURCES[@]}"
           fi
           IMAGE_INDEX="$(docker buildx imagetools inspect \
@@ -467,7 +504,7 @@ jobs:
             fi
           done
           if [ "${PUBLISH_LATEST}" = true ]; then
-            .github/scripts/revalidate-release-target.sh "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
+            "${RUNNER_TEMP}/revalidate-release-target.sh" "${TAG}" "${EXPECTED_COMMIT}" "${RELEASE_MAIN_POLICY}"
             docker buildx imagetools create \
               --tag "${IMAGE}:latest" \
               "${IMAGE}@${IMAGE_DIGEST}"
