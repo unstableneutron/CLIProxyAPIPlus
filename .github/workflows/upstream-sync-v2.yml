@@ -1123,6 +1123,7 @@ jobs:
           EXPECTED_SYNC_ID: ${{ needs.candidate.outputs.sync_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ needs.docker.outputs.image }}
+          MAIN_POLICY: ${{ needs.promote.outputs.main_policy }}
           TAG: ${{ needs.promote.outputs.tag }}
         run: |
           ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
@@ -1137,6 +1138,7 @@ jobs:
             --expected-sync-id "${EXPECTED_SYNC_ID}" \
             --expected-plan-fingerprint "${EXPECTED_PLAN_FINGERPRINT}" \
             --image "${IMAGE}" \
+            --main-policy "${MAIN_POLICY}" \
             --require-architecture-tags true \
             --require-latest-parity true \
             --receipt upstream-sync-receipt.json
@@ -1148,15 +1150,30 @@ jobs:
 
       - name: Require final fetched no-op plan
         env:
+          MAIN_POLICY: ${{ needs.promote.outputs.main_policy }}
           PROMOTED_COMMIT: ${{ needs.promote.outputs.commit }}
         run: |
           git remote add "${ORIGINAL_REMOTE}" "https://github.com/${ORIGINAL_REPOSITORY}.git"
           git remote add "${PLUS_REMOTE}" "https://github.com/${PLUS_REPOSITORY}.git"
           git fetch --quiet origin main
-          if [ "$(git rev-parse origin/main)" != "${PROMOTED_COMMIT}" ]; then
-            echo "origin/main moved after promotion." >&2
-            exit 1
-          fi
+          case "${MAIN_POLICY}" in
+            exact)
+              [ "$(git rev-parse origin/main)" = "${PROMOTED_COMMIT}" ] || {
+                echo "origin/main moved after promotion." >&2
+                exit 1
+              }
+              ;;
+            descendant)
+              git merge-base --is-ancestor "${PROMOTED_COMMIT}" origin/main || {
+                echo "origin/main is not descended from the promoted commit." >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "Unsupported final main policy ${MAIN_POLICY}." >&2
+              exit 1
+              ;;
+          esac
           FINAL_PLAN="${SYNC_WORK_DIR}/final-plan.out"
           GITHUB_OUTPUT="${FINAL_PLAN}" .github/scripts/upstream-sync.sh plan
           cat "${FINAL_PLAN}"
