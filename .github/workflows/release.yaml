@@ -180,12 +180,14 @@ jobs:
           persist-credentials: false
           ref: ${{ github.workflow_sha }}
           path: .publication-policy
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/release-asset-contract.json
+            .github/scripts
 
       - name: Install trusted publication policy
         run: |
-          cp -R .publication-policy/.github/scripts \
-            "${RUNNER_TEMP}/publication-scripts"
+          cp -R .publication-policy/.github \
+            "${RUNNER_TEMP}/publication-policy"
           rm -rf .publication-policy
 
       - name: Publish or resume exact staged draft
@@ -200,7 +202,7 @@ jobs:
           STAGED_ARTIFACT_NAME: ${{ needs.stage.outputs.artifact_name }}
           RELEASE_MAIN_POLICY: ${{ inputs.main_policy }}
         run: |
-          "${RUNNER_TEMP}/publication-scripts/publish-staged-release.sh" \
+          "${RUNNER_TEMP}/publication-policy/scripts/publish-staged-release.sh" \
             "${TAG}" "${EXPECTED_COMMIT}" "${EXPECTED_RECEIPT}" \
             "${STAGED_ARTIFACT_ID}" "${STAGED_ARTIFACT_NAME}" \
             "${STAGED_ARTIFACT_DIGEST}" "${GITHUB_RUN_ID}" "${GITHUB_SHA}"

@@ -957,8 +957,9 @@ test_publication_workflows_are_reusable_and_checked() {
   assert_contains "${release}" "publish-staged-release.sh"
   # shellcheck disable=SC2016 # Workflow expressions are asserted literally.
   assert_contains "${release}" 'ref: ${{ github.workflow_sha }}'
+  assert_contains "${release}" ".github/release-asset-contract.json"
   # shellcheck disable=SC2016 # Workflow shell variables are asserted literally.
-  assert_contains "${release}" '"${RUNNER_TEMP}/publication-scripts/publish-staged-release.sh"'
+  assert_contains "${release}" '"${RUNNER_TEMP}/publication-policy/scripts/publish-staged-release.sh"'
   # shellcheck disable=SC2016 # GitHub expressions and shell variables are asserted literally.
   assert_contains "${release}" 'artifact_digest: ${{ steps.staged_identity.outputs.artifact_digest }}'
   # shellcheck disable=SC2016 # Shell variable is asserted literally.
