@@ -489,6 +489,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if normalized, ok := normalizeKiroIDETokenMetadata(metadata); ok {
 		metadata = normalized
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
