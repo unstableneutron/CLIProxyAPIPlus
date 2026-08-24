@@ -106,6 +106,24 @@ case "${method}:${path}" in
   GET:/repos/*/actions/artifacts/${STUB_ARTIFACT_ID}/zip)
     cat "${STUB_ARTIFACT_ZIP}"
     ;;
+  GET:/repos/*/actions/runs/${STUB_SOURCE_RUN_ID:-0})
+    jq -n \
+      --arg head "${STUB_SOURCE_HEAD}" \
+      --argjson run_id "${STUB_SOURCE_RUN_ID}" '{
+        id: $run_id,
+        path: ".github/workflows/upstream-sync-v2.yml",
+        event: "workflow_dispatch",
+        head_branch: "main",
+        head_sha: $head,
+        status: "completed",
+        conclusion: "failure",
+        actor: {login: "unstableneutron", type: "User"},
+        repository: {full_name: "unstableneutron/CLIProxyAPIPlus"}
+      }'
+    ;;
+  GET:/repos/*/compare/*)
+    printf '{"status":"ahead"}\n'
+    ;;
   GET:/repos/*/commits/*)
     count=$(cat "${STUB_COMMIT_COUNT}")
     count=$((count + 1))
@@ -288,6 +306,8 @@ run_publisher() {
   STUB_NEXT_ASSET_ID="${root}/next-asset-id" \
   STUB_RELEASE_TAG="${TAG}" \
   STUB_COMMIT_COUNT="${root}/commit-count" \
+  STUB_SOURCE_RUN_ID="${RUN_ID}" \
+  STUB_SOURCE_HEAD="${RUN_HEAD}" \
   env "$@" \
     "${PUBLISHER}" "${TAG}" "${COMMIT}" "${RECEIPT}" \
       "${ARTIFACT_ID}" "staged-release-assets-${RUN_ID}-1" "${digest}" \
@@ -417,6 +437,32 @@ test_reuses_pinned_evidence_and_rejects_drift() {
       "${RUN_ID}" "${RUN_HEAD}" >/dev/null
   [ "$(jq -r '.draft' "${root}/release.json")" = false ] \
     || fail "pinned evidence did not resume"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  jq '.receipt_name = "upstream-sync-receipt.json"' \
+    "${root}/release-manifest.json" > "${root}/release-manifest.json.new"
+  mv "${root}/release-manifest.json.new" "${root}/release-manifest.json"
+  write_artifact_zip "${root}"
+  refresh_artifact_identity "${root}"
+  digest=$(jq -r '.digest' "${root}/artifact.json")
+  jq -Sc --arg digest "${digest}" '.artifact_digest = $digest' \
+    "${root}/evidence.json" > "${root}/evidence.json.new"
+  mv "${root}/evidence.json.new" "${root}/evidence.json"
+  write_release "${root}" true 0
+  PATH="${root}/bin:${PATH}" \
+  GITHUB_REPOSITORY=unstableneutron/CLIProxyAPIPlus \
+  STUB_RELEASE_FILE="${root}/release.json" STUB_ARTIFACT_ID="${ARTIFACT_ID}" \
+  STUB_ARTIFACT_JSON="${root}/artifact.json" STUB_ARTIFACT_ZIP="${root}/artifact.zip" \
+  STUB_EXPECTED_COMMIT="${COMMIT}" STUB_CALLS="${root}/calls" STUB_RELEASE_TAG="${TAG}" \
+  STUB_NEXT_ASSET_ID="${root}/next-asset-id" STUB_COMMIT_COUNT="${root}/commit-count" \
+  STUB_SOURCE_RUN_ID="${RUN_ID}" STUB_SOURCE_HEAD="${RUN_HEAD}" \
+    "${PUBLISHER}" "${TAG}" "${COMMIT}" upstream-sync-receipt.json \
+      999 staged-release-assets-987654321-1 "sha256:$(printf 'f%.0s' {1..64})" \
+      987654321 cccccccccccccccccccccccccccccccccccccccc >/dev/null
+  [ "$(jq -r '.draft' "${root}/release.json")" = false ] \
+    || fail "cross-run pinned upstream evidence did not resume"
   rm -rf "${root}"
 
   root=$(mktemp -d); setup_fixture "${root}"
