@@ -41,7 +41,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      artifact_digest: ${{ steps.staged.outputs.artifact-digest }}
+      artifact_digest: ${{ steps.staged_identity.outputs.artifact_digest }}
       artifact_id: ${{ steps.staged.outputs.artifact-id }}
       artifact_name: staged-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
       release_commit: ${{ steps.identity.outputs.expected_commit }}
@@ -133,6 +133,19 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 90
+
+      - name: Normalize staged artifact digest
+        id: staged_identity
+        env:
+          ARTIFACT_DIGEST: ${{ steps.staged.outputs.artifact-digest }}
+        run: |
+          if [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            ARTIFACT_DIGEST="sha256:${ARTIFACT_DIGEST}"
+          elif ! [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Staged artifact digest is invalid." >&2
+            exit 1
+          fi
+          echo "artifact_digest=${ARTIFACT_DIGEST}" >> "${GITHUB_OUTPUT}"
 
   publish:
     needs: stage
