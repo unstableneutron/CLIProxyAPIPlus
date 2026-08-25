@@ -215,9 +215,11 @@ if [ "${REQUIRE_ARCHITECTURE_TAGS}" = true ]; then
     ARCHITECTURE_DIGEST=$(jq -r '.digest // empty' <<< "${ARCHITECTURE_MANIFEST}")
     if [ "${ARCHITECTURE_DIGEST}" != "${PLATFORM_DIGEST}" ] || \
        ! jq -e '
-         .schemaVersion == 2 and
+         (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+         (.size | type == "number" and floor == . and . > 0) and
          (.mediaType == "application/vnd.oci.image.manifest.v1+json" or
-          .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
+          .mediaType == "application/vnd.docker.distribution.manifest.v2+json") and
+         (has("manifests") | not)
        ' <<< "${ARCHITECTURE_MANIFEST}" >/dev/null; then
       die "Architecture tag ${ARCHITECTURE_REF} resolves to ${ARCHITECTURE_DIGEST}, expected ${PLATFORM_DIGEST}"
     fi
