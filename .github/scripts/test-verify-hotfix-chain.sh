@@ -489,8 +489,8 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 case "${4:-}" in
-  *-amd64) printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s"}\n' "$(printf '1%.0s' {1..64})" ;;
-  *-arm64) printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s"}\n' "$(printf '2%.0s' {1..64})" ;;
+  *-amd64) printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":1609}\n' "$(printf '1%.0s' {1..64})" ;;
+  *-arm64) printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":838}\n' "$(printf '2%.0s' {1..64})" ;;
   *)
     printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","digest":"sha256:%s","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","platform":{"os":"linux","architecture":"amd64"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","platform":{"os":"linux","architecture":"arm64"}}]}\n' \
       "$(printf 'a%.0s' {1..64})" "$(printf '1%.0s' {1..64})" "$(printf '2%.0s' {1..64})"
