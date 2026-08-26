@@ -301,3 +301,21 @@ OpenAIResponsesAPIHandler.prepareDirectResponsesStreamState	PR #63 generalized s
 directResponsesStreamStateTracker	PR #63 generalized the stream-only tracker as directResponsesStateTracker so streaming and non-streaming Responses requests share the same account-ownership contract
 directResponsesStreamStateTracker.Complete	PR #63 generalized the stream-only completion method as directResponsesStateTracker.Complete while retaining streamed response-state completion tracking
 normalizeDirectResponsesStreamStateRequest	PR #63 generalized stream-only request normalization as normalizeDirectResponsesStateRequest while retaining stream normalization and adding non-streaming response-state support
+antigravityInstantRetryDelay	original v7.2.142 removed executor-local cross-endpoint retries in favor of one request to the selected credential endpoint
+antigravityNoCapacityRetryDelay	original v7.2.142 removed executor-local cross-endpoint retries in favor of one request to the selected credential endpoint
+antigravityRetryAttempts	original v7.2.142 removed executor-local cross-endpoint retries in favor of one request to the selected credential endpoint
+antigravityShouldRetryNoCapacity	original v7.2.142 removed executor-local cross-endpoint retries in favor of conductor-level credential rotation
+antigravityShouldRetrySoftRateLimit	original v7.2.142 removed executor-local cross-endpoint retries in favor of conductor-level credential rotation
+antigravityShouldRetryTransientResourceExhausted429	original v7.2.142 removed executor-local cross-endpoint retries in favor of conductor-level credential rotation
+antigravitySoftRateLimitDelay	original v7.2.142 removed executor-local cross-endpoint retries in favor of one request to the selected credential endpoint
+antigravityTransient429RetryDelay	original v7.2.142 removed executor-local cross-endpoint retries in favor of one request to the selected credential endpoint
+antigravityWait	original v7.2.142 removed executor-local retry delays with the obsolete cross-endpoint retry loop
+buildBaseURL	original v7.2.142 replaced cross-tier fallback URL assembly with resolveAntigravityRequestBaseURL and antigravityLoadCodeAssistBaseURL
+RoundRobinSelector.ensureCursorKey	original v7.2.142 replaced index cursors with credential identity rotation and RoundRobinSelector.ensureRotationKey
+rpcPluginError	original v7.2.142 renamed the plugin RPC status error to rpcError without changing its contract
+rpcPluginError.Error	original v7.2.142 renamed the plugin RPC status error to rpcError without changing its contract
+rpcPluginError.StatusCode	original v7.2.142 renamed the plugin RPC status error to rpcError without changing its contract
+TestAntigravityShouldRetryNoCapacity_Standard503	original v7.2.142 removed executor-local no-capacity retry classification with the obsolete cross-endpoint retry loop
+TestConvertAntigravityResponseToGeminiStream	original v7.2.142 replaced the single streaming usage restoration case with TestConvertAntigravityResponseToGeminiStream_CarriesFilteredUsageIntoSyntheticTerminal
+TestNormalizeAntigravityGeminiFunctionResponseRolesLeavesMixedUserContent	original v7.2.142 replaced the single mixed-content role case with TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersMixedParallelResponses
+weightVectorsEqual	original v7.2.142 replaced full vector equality with weightsConfigChanged so transient candidate subsets preserve accumulated credits
