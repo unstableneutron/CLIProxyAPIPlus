@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ARTIFACT_EXTRACTOR="${SCRIPT_DIR}/extract-verified-actions-artifact.py"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 
 die() {
   echo "[hotfix-finalization-evidence] $*" >&2

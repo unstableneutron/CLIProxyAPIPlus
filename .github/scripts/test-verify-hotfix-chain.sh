@@ -5,6 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 ROOT_TAG=v7.2.131-unstableneutron.0
 FIRST_TAG=v7.2.131-unstableneutron.1
 SECOND_TAG=v7.2.131-unstableneutron.2
@@ -798,9 +800,9 @@ test_rejects_noncanonical_historical_checksum_separators() {
     checksum="${root}/fixtures/${FIRST_TAG}/checksums.txt"
     release="${root}/fixtures/${FIRST_TAG}/release.json"
     if [ "${separator}" = tabs ]; then
-      sed -i $'s/  /\t\t/' "${checksum}"
+      portable_sed_in_place $'s/  /\t\t/' "${checksum}"
     else
-      sed -i $'s/  / \t/' "${checksum}"
+      portable_sed_in_place $'s/  / \t/' "${checksum}"
     fi
     digest=$(sha256_digest "${checksum}")
     jq --arg digest "${digest}" \
@@ -912,7 +914,7 @@ test_rejects_historical_receipt_and_planner_drift() {
 
   root=$(mktemp -d); setup_fixture "${root}"
   temporary="${root}/fixtures/${FIRST_TAG}/final-plan.out"
-  sed -i 's/^has_changes=false$/has_changes=true/' "${temporary}"
+  portable_sed_in_place 's/^has_changes=false$/has_changes=true/' "${temporary}"
   rebuild_first_fixture "${root}"
   expect_second_failure "${root}" "final plan identity"
   rm -rf "${root}"
@@ -934,7 +936,7 @@ test_rejects_historical_receipt_and_planner_drift() {
     copy=$(mktemp -d)
     cp -a "${baseline}/." "${copy}/"
     temporary="${copy}/fixtures/${FIRST_TAG}/final-plan.out"
-    sed -i "s#^${field}=.*#${field}=tampered#" "${temporary}"
+    portable_sed_in_place "s#^${field}=.*#${field}=tampered#" "${temporary}"
     rebuild_first_fixture "${copy}"
     expect_second_failure "${copy}" ""
     rm -rf "${copy}"

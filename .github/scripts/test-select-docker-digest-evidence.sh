@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 SELECTOR="${SCRIPT_DIR}/select-docker-digest-evidence.sh"
 TAG=v7.2.135-unstableneutron.2
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

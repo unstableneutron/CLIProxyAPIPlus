@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 POLICY="${SCRIPT_DIR}/validate-hotfix-release.sh"
 GHCR_IMAGE_STATE="${SCRIPT_DIR}/inspect-ghcr-image-state.sh"
 IDENTITY_ABSENCE_CHECK="${SCRIPT_DIR}/confirm-hotfix-identities-absent.sh"

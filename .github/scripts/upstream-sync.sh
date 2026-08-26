@@ -1577,124 +1577,88 @@ cmd_classify_paths() {
   fi
 }
 
-shared_hotspot_go_paths_at_ref() {
-  local ref=$1
-  local path class
-
-  git ls-tree -r --name-only "${ref}" -- internal sdk cmd 2>/dev/null \
-    | while IFS= read -r path; do
-        [ -n "${path}" ] || continue
-        [[ "${path}" == *.go ]] || continue
-        class=$(classify_path "${path}")
-        case "${class}" in
-          plus-owned|fork-owned) ;;
-          *) printf '%s\n' "${path}" ;;
-        esac
-      done
+scan_shared_hotspot_symbols() {
+  local ref=${1:-}
+  local args=(--ownership "${OWNERSHIP_FILE}")
+  if [ -n "${ref}" ]; then
+    args+=(--ref "${ref}")
+  fi
+  go run "${SCRIPT_DIR}/check-go-symbols.go" "${args[@]}"
 }
 
-extract_go_symbols_from_stream() {
-  awk '
-    /^func[[:space:]]+\(/ {
-      line = $0
-      sub(/^func[[:space:]]*\(/, "", line)
-      recv = line
-      sub(/\).*/, "", recv)
-      n = split(recv, recv_parts, /[[:space:]]+/)
-      receiver = recv_parts[n]
-      sub(/^\*/, "", receiver)
-
-      name = $0
-      sub(/^func[[:space:]]*\([^)]*\)[[:space:]]*/, "", name)
-      sub(/\(.*/, "", name)
-      if (receiver != "" && name != "") {
-        print receiver "." name
-      }
-      next
-    }
-    /^func[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
-      name = $0
-      sub(/^func[[:space:]]+/, "", name)
-      sub(/[[:space:]\[\(].*/, "", name)
-      if (name != "") {
-        print name
-      }
-      next
-    }
-    /^type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
-      name = $0
-      sub(/^type[[:space:]]+/, "", name)
-      split(name, parts, /[[:space:]]+/)
-      sub(/\[.*/, "", parts[1])
-      if (parts[1] != "" && parts[1] != "(") {
-        print parts[1]
-      }
-    }
-  '
+active_symbol_approval_fingerprint() {
+  local fingerprint=${UPSTREAM_SYNC_PLAN_FINGERPRINT:-}
+  if [ -z "${fingerprint}" ]; then
+    fingerprint=$(recorded_state_value PLAN_FINGERPRINT)
+  fi
+  if [ -n "${fingerprint}" ] && ! [[ "${fingerprint}" =~ ^[0-9a-f]{40}$ ]]; then
+    die "symbol approval fingerprint must be a lowercase 40-character SHA"
+  fi
+  printf '%s\n' "${fingerprint}"
 }
 
-extract_shared_hotspot_symbols_from_ref() {
-  local ref=$1
-  local path
-
-  shared_hotspot_go_paths_at_ref "${ref}" \
-    | while IFS= read -r path; do
-        [ -n "${path}" ] || continue
-        git show "${ref}:${path}" 2>/dev/null || true
-        printf '\n'
-      done \
-    | extract_go_symbols_from_stream \
-    | sort -u
-}
-
-extract_shared_hotspot_test_symbols_from_ref() {
-  local ref=$1
-  local path
-
-  shared_hotspot_go_paths_at_ref "${ref}" \
-    | while IFS= read -r path; do
-        [ -n "${path}" ] || continue
-        [[ "${path}" == *_test.go ]] || continue
-        git show "${ref}:${path}" 2>/dev/null || true
-        printf '\n'
-      done \
-    | extract_go_symbols_from_stream \
-    | awk '/^Test[A-Za-z0-9_]*$/ { print }' \
-    | sort -u
-}
-
-extract_worktree_go_symbols() {
-  local path
-
-  git ls-files -- internal sdk cmd 2>/dev/null \
-    | while IFS= read -r path; do
-        [ -f "${path}" ] || continue
-        [[ "${path}" == *.go ]] || continue
-        cat "${path}"
-        printf '\n'
-      done \
-    | extract_go_symbols_from_stream \
-    | sort -u
+resolved_dropped_symbols_file() {
+  local configured_file=${DROPPED_SYMBOLS_FILE}
+  if [ -f "${configured_file}" ]; then
+    printf '%s\n' "${configured_file}"
+  elif [ -f "$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")" ]; then
+    printf '%s\n' "$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")"
+  fi
 }
 
 allowlisted_dropped_symbol_reason() {
   local symbol=$1
-  local configured_file=${DROPPED_SYMBOLS_FILE}
-  local resolved_file=""
+  local fingerprint=$2
+  local resolved_file
   local reason
-
-  if [ -f "${configured_file}" ]; then
-    resolved_file=${configured_file}
-  elif [ -f "$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")" ]; then
-    resolved_file="$(dirname -- "${OWNERSHIP_FILE}")/$(basename -- "${configured_file}")"
-  fi
+  resolved_file=$(resolved_dropped_symbols_file)
   [ -n "${resolved_file}" ] || return 1
 
-  reason=$(awk -F'\t' -v symbol="${symbol}" '
-    $1 == symbol { sub(/^[^\t]*\t?/, ""); print; found = 1; exit }
+  reason=$(awk -F'\t' -v symbol="${symbol}" -v fingerprint="${fingerprint}" '
+    $1 == symbol && $2 == fingerprint {
+      $1 = ""
+      $2 = ""
+      sub(/^\t+/, "")
+      print
+      found = 1
+      exit
+    }
     END { if (!found) exit 1 }
   ' "${resolved_file}") || return 1
-  printf '%s\n' "${reason:-allowlisted}"
+  [ -n "${reason}" ] || die "dropped symbol approval lacks a reason: ${symbol}"
+  printf '%s\n' "${reason}"
+}
+
+validate_dropped_symbol_approvals() {
+  local overlay_symbols=$1
+  local current_symbols=$2
+  local fingerprint=$3
+  local resolved_file
+  local symbol approval_fingerprint reason key
+  local seen
+  resolved_file=$(resolved_dropped_symbols_file)
+  [ -n "${resolved_file}" ] || return 0
+  seen=$(mktemp)
+  : > "${seen}"
+
+  while IFS=$'\t' read -r symbol approval_fingerprint reason _; do
+    [[ -n "${symbol}" && "${symbol}" != \#* ]] || continue
+    [ -n "${fingerprint}" ] || die "dropped symbol approvals require an active plan fingerprint"
+    [ "${approval_fingerprint}" = "${fingerprint}" ] \
+      || die "dropped symbol approval targets a different plan: ${symbol}"
+    [ -n "${reason}" ] || die "dropped symbol approval lacks a reason: ${symbol}"
+    [[ "${symbol}" == */*'|'*'|'* ]] \
+      || die "dropped symbol approval is not package-qualified: ${symbol}"
+    grep -Fxq -- "${symbol}" "${overlay_symbols}" \
+      || die "dropped symbol approval is unused by this plan: ${symbol}"
+    ! grep -Fxq -- "${symbol}" "${current_symbols}" \
+      || die "dropped symbol approval names a surviving declaration: ${symbol}"
+    key="${symbol}"$'\t'"${approval_fingerprint}"
+    ! grep -Fxq -- "${key}" "${seen}" \
+      || die "duplicate dropped symbol approval: ${symbol}"
+    printf '%s\n' "${key}" >> "${seen}"
+  done < "${resolved_file}"
+  rm -f "${seen}"
 }
 
 default_symbol_survival_upstream_ref() {
@@ -1718,26 +1682,21 @@ cmd_check_symbol_survival() {
   fi
 
   local root baseline_symbols upstream_symbols overlay_symbols current_symbols
-  local baseline_tests upstream_tests overlay_tests missing_tests
-  local symbol reason failed skipped
+  local missing_tests fingerprint symbol reason failed skipped
   root=$(mktemp -d)
   baseline_symbols="${root}/baseline-symbols.txt"
   upstream_symbols="${root}/upstream-symbols.txt"
   overlay_symbols="${root}/overlay-symbols.txt"
   current_symbols="${root}/current-symbols.txt"
-  baseline_tests="${root}/baseline-tests.txt"
-  upstream_tests="${root}/upstream-tests.txt"
-  overlay_tests="${root}/overlay-tests.txt"
   missing_tests="${root}/missing-tests.txt"
 
-  extract_shared_hotspot_symbols_from_ref "${baseline_ref}" > "${baseline_symbols}"
-  extract_shared_hotspot_symbols_from_ref "${upstream_ref}" > "${upstream_symbols}"
+  scan_shared_hotspot_symbols "${baseline_ref}" > "${baseline_symbols}"
+  scan_shared_hotspot_symbols "${upstream_ref}" > "${upstream_symbols}"
   comm -23 "${baseline_symbols}" "${upstream_symbols}" > "${overlay_symbols}"
-  extract_worktree_go_symbols > "${current_symbols}"
-
-  extract_shared_hotspot_test_symbols_from_ref "${baseline_ref}" > "${baseline_tests}"
-  extract_shared_hotspot_test_symbols_from_ref "${upstream_ref}" > "${upstream_tests}"
-  comm -23 "${baseline_tests}" "${upstream_tests}" > "${overlay_tests}"
+  scan_shared_hotspot_symbols > "${current_symbols}"
+  fingerprint=$(active_symbol_approval_fingerprint)
+  validate_dropped_symbol_approvals \
+    "${overlay_symbols}" "${current_symbols}" "${fingerprint}"
 
   failed=false
   skipped=false
@@ -1748,26 +1707,21 @@ cmd_check_symbol_survival() {
     if grep -Fxq -- "${symbol}" "${current_symbols}"; then
       continue
     fi
-    if reason=$(allowlisted_dropped_symbol_reason "${symbol}"); then
+    if reason=$(allowlisted_dropped_symbol_reason "${symbol}" "${fingerprint}"); then
       printf '[SKIP] dropped overlay symbol allowlisted: %s — %s\n' "${symbol}" "${reason}"
       skipped=true
       continue
     fi
     printf '[FAIL] missing overlay symbol: %s\n' "${symbol}"
+    if [[ "${symbol##*|}" == Test* ]]; then
+      printf '%s\n' "${symbol}" >> "${missing_tests}"
+    fi
     failed=true
   done < "${overlay_symbols}"
-
-  while IFS= read -r symbol; do
-    [ -n "${symbol}" ] || continue
-    grep -Fxq -- "${symbol}" "${current_symbols}" && continue
-    allowlisted_dropped_symbol_reason "${symbol}" >/dev/null && continue
-    printf '%s\n' "${symbol}" >> "${missing_tests}"
-  done < "${overlay_tests}"
 
   if [ -s "${missing_tests}" ]; then
     printf '\nDELETED FORK TESTS\n'
     while IFS= read -r symbol; do
-      [ -n "${symbol}" ] || continue
       printf '[FAIL] deleted fork test: %s\n' "${symbol}"
     done < "${missing_tests}"
   fi
@@ -1777,7 +1731,7 @@ cmd_check_symbol_survival() {
     return 1
   fi
   if [ "${skipped}" = true ]; then
-    printf '[OK] symbol-survival gate passed with allowlisted removals.\n'
+    printf '[OK] symbol-survival gate passed with target-bound removals.\n'
   else
     printf '[OK] symbol-survival gate passed.\n'
   fi

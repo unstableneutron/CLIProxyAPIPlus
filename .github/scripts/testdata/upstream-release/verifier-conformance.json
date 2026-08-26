@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {"id": "valid-release", "surface": "release-assets", "mutation": "none", "expected": "accept"},
+    {"id": "missing-release-asset", "surface": "release-assets", "mutation": "missing", "expected": "reject"},
+    {"id": "extra-release-asset", "surface": "release-assets", "mutation": "extra", "expected": "reject"},
+    {"id": "duplicate-release-asset", "surface": "release-assets", "mutation": "duplicate", "expected": "reject"},
+    {"id": "renamed-release-asset", "surface": "release-assets", "mutation": "renamed", "expected": "reject"},
+    {"id": "missing-amd64-platform", "surface": "oci-index", "mutation": "missing-amd64", "expected": "reject"},
+    {"id": "missing-arm64-platform", "surface": "oci-index", "mutation": "missing-arm64", "expected": "reject"},
+    {"id": "extra-platform", "surface": "oci-index", "mutation": "extra", "expected": "reject"},
+    {"id": "duplicate-platform", "surface": "oci-index", "mutation": "duplicate", "expected": "reject"},
+    {"id": "malformed-attestation", "surface": "oci-index", "mutation": "malformed-attestation", "expected": "reject"},
+    {"id": "duplicate-attestation", "surface": "oci-index", "mutation": "duplicate-attestation", "expected": "reject"}
+  ]
+}

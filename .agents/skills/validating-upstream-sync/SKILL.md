@@ -38,9 +38,9 @@ Keep release maintenance separate from deployment. Unless deployment is explicit
 - After shared-hotspot composition, run `check-symbol-survival <pre-sync-head>`. Restore missing fork-only symbols and `Test*` functions, or document genuine replacements in `.github/upstream-sync-dropped-symbols.tsv` in the same commit.
 - Re-check provider fallback, auth and proxy selection, CommandCode, Responses WebSocket continuity, compaction, Gemini CLI, model catalog, aliases, release branding, and CGO or plugin settings when touched.
 
-During repair iteration, rerun `replay-plan`, the failing gate, and focused tests for the changed surface. Do not rerun the full matrix after every edit. Once the repair is stable, run the complete matrix once. If final review causes another code change, rerun its focused checks and the complete matrix.
+During repair iteration, rerun `replay-plan`, the failing gate, and focused tests for the changed surface. Do not rerun the full matrix after every edit. Once the repair is stable, run the canonical validator once. If final review causes another code change, rerun its focused checks and the canonical validator.
 
-Stop as `needs-manual-action` only when repository ownership and invariants cannot determine the intended behavior, the repair expands beyond the bounded overlay, required authority or secrets are missing, or the exact repair-import or integration gates cannot be proven.
+Return `needs-manual-action` as a successful, durable automation outcome when repository ownership and invariants cannot determine the intended behavior, the repair expands beyond the bounded overlay, required authority or secrets are missing, or the exact repair-import or integration gates cannot be proven. The run ledger, report artifact, candidate branch, and actionable PR must survive. Reserve a failed workflow conclusion for tooling, infrastructure, or state-recording failures that prevent a trustworthy outcome.
 
 ### 3. Import an exact repaired candidate
 
@@ -52,21 +52,31 @@ Stop as `needs-manual-action` only when repository ownership and invariants cann
 - Dispatch repair import with all four pinned inputs. The workflow must independently verify PR identity, base ancestry, selected original and Plus ancestry, exact models snapshot, recorded state, protected sync-policy paths, freshness, provenance, and the complete matrix.
 - Manual-composition provenance may become acceptable only when `validate-repair` succeeds for the imported SHA. Never bypass or globally disable the provenance gate.
 - Candidate branch SHA, validated repair SHA, promoted `main`, and peeled tag must remain equal. If any identity changes, restart from planning.
-- If repair import is unavailable or fails closed, use a merge commit only under explicit interactive authorization or standing automation authorization. Re-fetch immediately and merge with `gh pr merge --merge --match-head-commit <validated-sha>`; never use `--admin` or deferred `--auto`. Then replan and rerun the stable full matrix before promotion.
+- If repair import is unavailable or fails closed, use a merge commit only under explicit interactive authorization or standing automation authorization. Re-fetch immediately and merge with `gh pr merge --merge --match-head-commit <validated-sha>`; never use `--admin` or deferred `--auto`. Then replan and rerun the canonical validator before promotion.
 
-### 4. Run the stable full matrix
+Generate the pinned repair command instead of retyping its fields:
 
 ```bash
-.github/scripts/upstream-sync.sh replay-plan
-.github/scripts/test-upstream-sync.sh
-.github/scripts/test-verify-upstream-release.sh
-.github/scripts/upstream-sync.sh check-invariants
-.github/scripts/upstream-sync.sh check-symbol-survival <pre-sync-head>
-shellcheck .github/scripts/*.sh
-go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-go build -o test-output ./cmd/server && rm test-output
-go test ./...
+.github/scripts/upstream-sync-dispatch-plan.sh repair \
+  --plan <plan-file> \
+  --repair-sha <validated-40-character-sha> \
+  --repair-pr <pr-number>
 ```
+
+### 4. Run the canonical validation matrix
+
+```bash
+.github/scripts/check-upstream-sync-tools.sh
+.github/scripts/validate-upstream-sync.sh \
+  --mode full \
+  --plan <plan-file> \
+  --report-dir <report-directory> \
+  --tooling always
+```
+
+This is the local and CI entrypoint. It runs invariants, package-qualified symbol survival, build, Go tests, helper/release-policy tests, ShellCheck, actionlint, and webhook Bun tests, then writes `validation.env` and `validation.json`. Use `--mode quick` during bounded repair iteration and `--mode tooling` for policy-only changes.
+Supported local hosts are Linux and Darwin/macOS with Bash 4 or newer. The doctor rejects other kernels, requires native `sha256sum` on Linux or `shasum` on Darwin, and exercises the portable file-size and release-asset enumeration primitives before validation.
+
 
 Capture the first failing diagnostic with enough context to reproduce it. Treat sandbox, network, cache, or runner failures as infrastructure failures until reproduced as code failures.
 
@@ -86,7 +96,7 @@ gh workflow run upstream-sync-v2.yml \
   -f force_candidate=false
 ```
 
-For an imported repair, add the exact pinned inputs:
+For an imported repair, use the generated command from the exact plan, reviewed SHA, and PR. The equivalent shape is:
 
 ```bash
 gh workflow run upstream-sync-v2.yml \
@@ -100,20 +110,20 @@ gh workflow run upstream-sync-v2.yml \
   -f repair_pr=<pr-number>
 ```
 
-Never dispatch `.github/workflows-disabled/upstream-sync.yml`. Never create an accepted tag manually. Use `Recover Existing Release Tag` only when an already accepted tag needs publication recovery and its peeled commit is exact.
+Never create an accepted tag manually. Use `Recover Existing Release Tag` only for the exact accepted upstream tag, merged repair PR, failed source attempt, and staged artifact represented by `run-state.json`. Generate the command with `.github/scripts/upstream-sync-dispatch-plan.sh recovery`; never reconstruct its eleven pinned inputs from memory.
 
 ### 6. Publish an explicitly authorized hotfix
 
 Use `Hotfix Release` only for a reviewed fork fix after a fully accepted upstream-sync release and only with explicit authorization to ship that fix. It is not an alternative way to accept upstream changes.
 
-- Land the focused fix and any release-policy change on `main` in separate reviewed commits. Re-run the stable full matrix and affected isolated runtime canaries before dispatch.
+- Land the focused fix and any release-policy change on `main` in separate reviewed commits. Re-run the canonical validator and affected isolated runtime canaries before dispatch.
 - Require a fresh no-op plan, unchanged `.ccs-fork-upstream.env`, the latest accepted release tag and its exact peeled commit, the exact current `origin/main` SHA, and the exact next numeric fork-tag suffix.
 - Dispatch `.github/workflows/hotfix-release.yml` on `main` with all four pinned inputs: `tag`, `expected_commit`, `base_tag`, and `expected_base_commit`. Never create or move the hotfix tag manually.
 - The workflow must reject a stale or non-descendant SHA, changed upstream representation, wrong base or suffix, any existing tag/release/image identity, an invalid base receipt, or planner drift. It must rerun the full repository and upstream suite before creating an annotated tag.
 - Publish through the checked reusable GoReleaser and multi-platform Docker workflows. Require `hotfix-release-receipt.json`, not an upstream-promotion receipt. Independently regenerate it and verify its previous release, upstream-state hash, workflow/run identity, release asset digests, `checksums.txt`, OCI index, architecture tags, platform digests, and `latest` parity.
 - Require the final fetched planner to report `has_changes=false`, `target_drift=false`, and `blocked=false`, with the hotfix tag as `latest_fork_tag`. Subsequent v2 no-op runs must verify the hotfix receipt as the represented release.
 
-`Recover Existing Release Tag` is restricted to the tag recorded by the accepted upstream-sync state. It must not publish or recover a hotfix suffix; stop for a dedicated reviewed recovery policy if a hotfix run partially publishes.
+`Recover Existing Release Tag` resumes only the exact staged assets for the accepted upstream tag and prints the pinned `resume_release=true` v2 dispatch required to finish acceptance. It must not publish or recover a hotfix suffix; a partial hotfix requires a dedicated reviewed superseding policy.
 
 ### 7. Verify the published state independently
 
@@ -131,7 +141,7 @@ Keep `run-state.json` with the immutable target, repair/PR identity, gate result
 
 For `has_changes=false`, verify the fetched `main`, peeled `latest_fork_tag`, represented release, receipt, and Docker digest without mutation. Do not use `next_fork_tag` and do not dispatch merely to exercise CI.
 
-Close superseded blocked PRs only after successful acceptance; retain their branches unless deletion is explicitly requested.
+After successful final verification, v2 automatically closes open PRs whose head starts with `upstream-sync/` and records the accepted tag, SHA, and run URL in each closing comment. Retain their branches unless deletion is explicitly requested; if cleanup fails, close them manually only after rechecking the same release evidence.
 
 ## Optional Deployment Proof
 

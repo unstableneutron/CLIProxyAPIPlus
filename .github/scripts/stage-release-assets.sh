@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 
 die() {
   echo "[release-stager] $*" >&2
@@ -34,9 +36,8 @@ esac
 
 EXPECTED_ASSETS=$(expected_release_assets_json "${TAG}") \
   || die "could not derive expected assets for ${TAG}"
-ACTUAL_ASSETS=$(find "${DIST}" -maxdepth 1 -type f \
-  \( -name '*.tar.gz' -o -name '*.zip' -o -name checksums.txt \) \
-  -printf '%f\n' | LC_ALL=C sort | jq -Rsc 'split("\n") | map(select(length > 0))')
+ACTUAL_ASSETS=$(portable_find_release_assets "${DIST}" |
+  jq -Rsc 'split("\n") | map(select(length > 0))')
 [ "${ACTUAL_ASSETS}" = "${EXPECTED_ASSETS}" ] \
   || die "staged release asset set differs"
 
