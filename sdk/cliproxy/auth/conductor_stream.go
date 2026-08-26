@@ -282,7 +282,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		_, didRefreshOnUnauthorized = unauthorizedRefreshTried[auth.ID]
 	}
 	for idx, execModel := range execModels {
-
+		ctx = newUpstreamAttemptContext(ctx)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		recordProxySelection(ctx, auth, routeModel, execModel)
 		execReq := req
@@ -318,7 +318,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if allowRetry {
 				alreadyTried := didRefreshOnUnauthorized
 				willAttemptHomeRefresh := ephemeralResult && !alreadyTried && auth != nil && auth.AuthKind() == AuthKindOAuth && isUnauthorizedError(errStream)
-				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(ctx, executor, auth, errStream, alreadyTried, ephemeralResult)
+				refreshCtx := newUpstreamAttemptContext(ctx)
+				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(refreshCtx, executor, auth, errStream, alreadyTried, ephemeralResult)
 				if willAttemptHomeRefresh {
 					didRefreshOnUnauthorized = true
 					if unauthorizedRefreshTried != nil {
@@ -338,6 +339,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						staleChunks = streamResult.Chunks
 					}
 					abandonStreamAttempt(ctx, cancelStream, staleChunks)
+					ctx = newUpstreamAttemptContext(ctx)
 					streamCtx, cancelStream = context.WithCancel(ctx)
 					startRetry := time.Now()
 					streamResult, errStream = executor.ExecuteStream(streamCtx, auth, execReq, execOpts)
@@ -407,7 +409,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if allowRetry {
 				alreadyTried := didRefreshOnUnauthorized
 				willAttemptHomeRefresh := ephemeralResult && !alreadyTried && auth != nil && auth.AuthKind() == AuthKindOAuth && isUnauthorizedError(bootstrapErr)
-				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(ctx, executor, auth, bootstrapErr, alreadyTried, ephemeralResult)
+				refreshCtx := newUpstreamAttemptContext(ctx)
+				refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(refreshCtx, executor, auth, bootstrapErr, alreadyTried, ephemeralResult)
 				if willAttemptHomeRefresh {
 					didRefreshOnUnauthorized = true
 					if unauthorizedRefreshTried != nil {
@@ -421,11 +424,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					streamResult = &cliproxyexecutor.StreamResult{}
 				} else if okRefresh {
 					abandonStreamAttempt(ctx, cancelStream, streamResult.Chunks)
-					streamCtx, cancelStream = context.WithCancel(ctx)
 					auth = refreshed
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
+					ctx = newUpstreamAttemptContext(ctx)
+					streamCtx, cancelStream = context.WithCancel(ctx)
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(streamCtx, auth, execReq, execOpts)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
