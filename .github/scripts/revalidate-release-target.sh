@@ -6,7 +6,9 @@ die() {
   exit 1
 }
 
-[ "$#" -ge 2 ] && [ "$#" -le 3 ] || die "usage: $0 <tag> <expected-release-commit> [exact|descendant]"
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  die "usage: $0 <tag> <expected-release-commit> [exact|descendant]"
+fi
 TAG=$1
 EXPECTED_COMMIT=$2
 MAIN_POLICY=${3:-exact}
