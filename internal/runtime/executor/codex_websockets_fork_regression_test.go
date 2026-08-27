@@ -18,6 +18,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
+	TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeadersWhenCloakingDisabled(t)
+}
+
 func TestBuildCodexWebsocketRequestBodyStripsTokenLimitsOnlyForChatGPTBackend(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[],"max_output_tokens":123,"max_completion_tokens":456,"max_tokens":789}`)
 

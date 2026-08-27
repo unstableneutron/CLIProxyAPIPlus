@@ -15,3 +15,7 @@ func xaiBaseURLForLog(baseURL string) string {
 	parsed.Fragment = ""
 	return parsed.String()
 }
+
+func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string]xaiNamespaceToolRef) []byte {
+	return newXAINamespaceRestorer(refs).restoreAtPath(data, path)
+}

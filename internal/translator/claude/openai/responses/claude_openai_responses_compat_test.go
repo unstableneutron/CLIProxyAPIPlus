@@ -6,6 +6,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps(t *testing.T) {
+	TestConvertClaudeResponseToOpenAIResponses_ServerToolsSurfaceWithoutOutputIndexGaps(t)
+}
+
 func TestConvertOpenAIResponsesRequestToClaudeWithCompatPreservesEmptyReasoning(t *testing.T) {
 	payload := []byte(`{"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"reason"}],"encrypted_content":""}]}`)
 
