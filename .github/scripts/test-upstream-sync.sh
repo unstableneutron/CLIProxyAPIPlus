@@ -1884,12 +1884,24 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
     $'internal/runtime/executor|func|ForkOnly\t'"${fingerprint}"$'\tintentionally superseded in test' \
     $'internal/runtime/executor|func|TestForkOnly\t'"${fingerprint}"$'\tintentionally superseded in test' \
     $'internal/runtime/executor|type|ForkType\t'"${fingerprint}"$'\tintentionally superseded in test' \
+    $'internal/runtime/executor|func|HistoricalForkOnly\t3333333333333333333333333333333333333333\thistorical approval from an earlier plan' \
     > "${fork}/.github/upstream-sync-dropped-symbols.tsv"
   (cd "${fork}" && UPSTREAM_SYNC_PLAN_FINGERPRINT="${fingerprint}" \
     "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
   assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: internal/runtime/executor|func|ForkOnly"
   assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: internal/runtime/executor|func|TestForkOnly"
   assert_contains "${out}" "[OK] symbol-survival gate passed with target-bound removals."
+
+  set +e
+  (cd "${fork}" && UPSTREAM_SYNC_PLAN_FINGERPRINT=1111111111111111111111111111111111111112 \
+    "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
+  exit_code=$?
+  set -e
+  if [ ${exit_code} -eq 0 ]; then
+    fail "check-symbol-survival accepted removals using historical approvals"
+  fi
+  assert_contains "${out}" "[FAIL] missing overlay symbol: internal/runtime/executor|func|ForkOnly"
+  assert_not_contains "${out}" "dropped symbol approval targets a different plan"
 }
 
 main() {
