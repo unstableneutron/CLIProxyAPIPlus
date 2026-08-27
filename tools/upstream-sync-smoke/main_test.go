@@ -160,6 +160,10 @@ func TestResponsesPayloadMarkerMatchesOutputItemText(t *testing.T) {
 	if !responsesPayloadContainsOutputMarker(payload, marker) {
 		t.Fatal("assistant output item marker was not matched")
 	}
+	response := []byte(`{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"` + marker + `"}]}],"text":{"format":{"type":"text"}}}`)
+	if !responsesPayloadContainsOutputMarker(response, marker) {
+		t.Fatal("REST response marker was not matched when top-level text is an object")
+	}
 	reasoning := []byte(`{"type":"response.reasoning_summary_text.done","text":"` + marker + `"}`)
 	if responsesPayloadContainsOutputMarker(reasoning, marker) {
 		t.Fatal("reasoning marker was accepted as assistant output")
