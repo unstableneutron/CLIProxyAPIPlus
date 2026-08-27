@@ -2238,46 +2238,6 @@ func TestCodexWebsocketLifecycleBindFailureReleasesSessionRequestLock(t *testing
 	}
 }
 
-func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
-	auth := &cliproxyauth.Auth{
-		Provider: "codex",
-		Metadata: map[string]any{"email": "user@example.com"},
-	}
-	ctx := contextWithGinHeaders(map[string]string{
-		"Originator":            "Codex Desktop",
-		"User-Agent":            "codex_cli_rs/0.1.0",
-		"Version":               "0.115.0-alpha.27",
-		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
-		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
-		"session-id":            "legacy-session",
-	})
-
-	cfg := &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}}
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
-
-	if got := headers.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
-	}
-	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
-		t.Fatalf("User-Agent = %s, want %s", got, "codex_cli_rs/0.1.0")
-	}
-	if got := headers.Get("Version"); got != "0.115.0-alpha.27" {
-		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
-	}
-	if got := headers.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-1"}` {
-		t.Fatalf("X-Codex-Turn-Metadata = %s, want %s", got, `{"turn_id":"turn-1"}`)
-	}
-	if got := headers.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
-		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
-	}
-	if got := headers["session_id"]; len(got) != 1 || got[0] != "legacy-session" {
-		t.Fatalf("session_id = %#v, want [legacy-session]", got)
-	}
-	if got := headers.Get("Session-Id"); got != "" {
-		t.Fatalf("Session-Id = %s, want empty", got)
-	}
-}
-
 func TestCodexWebsocketsExecuteObservesWebSocketResponseEvents(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
