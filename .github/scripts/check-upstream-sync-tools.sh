@@ -55,10 +55,10 @@ probe_dir=$(mktemp -d)
 trap 'rm -rf "${probe_dir}"' EXIT
 printf 'probe\n' > "${probe_dir}/probe.zip"
 mapfile -t probe_assets < <(portable_find_release_assets "${probe_dir}")
-[ "${#probe_assets[@]}" -eq 1 ] && [ "${probe_assets[0]}" = probe.zip ] || {
+if [ "${#probe_assets[@]}" -ne 1 ] || [ "${probe_assets[0]}" != probe.zip ]; then
   echo "[upstream-sync-tools] filesystem enumeration primitive failed" >&2
   exit 1
-}
+fi
 
 printf '[OK] upstream-sync tooling is available (os=%s bash=%s go=%s bun=%s hash=%s)\n' \
   "${os_name}" "${BASH_VERSION}" "$(go version | cut -d' ' -f3)" "$(bun --version)" "${hash_backend}"

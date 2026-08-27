@@ -202,10 +202,11 @@ cmd_verify_final_plan() {
   local final_plan="${sync_work_dir}/final-plan.out"
   GITHUB_OUTPUT="${final_plan}" "${SCRIPT_DIR}/upstream-sync.sh" plan
   cat "${final_plan}"
-  [ "$(state_value "${final_plan}" has_changes)" = false ] && \
-    [ "$(state_value "${final_plan}" target_drift)" = false ] && \
-    [ "$(state_value "${final_plan}" blocked)" = false ] \
-    || die "final planner did not reach clean no-op state"
+  if [ "$(state_value "${final_plan}" has_changes)" != false ] || \
+     [ "$(state_value "${final_plan}" target_drift)" != false ] || \
+     [ "$(state_value "${final_plan}" blocked)" != false ]; then
+    die "final planner did not reach clean no-op state"
+  fi
 }
 
 cmd_finalize_release_ledger() {
