@@ -901,6 +901,7 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "            .github/scripts"
   assert_contains "${workflow}" "check-freshness"
   assert_contains "${workflow}" "validate-upstream-sync.sh --mode full"
+  assert_contains "${workflow}" "npm install --global bun@1.3.14"
   assert_contains "${workflow_helper}" "--force-with-lease"
   assert_contains "${workflow_helper}" "gh pr create"
   assert_contains "${workflow}" "git push origin HEAD:main"
