@@ -26,6 +26,83 @@ safe_ref_component() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
 }
 
+verify_upstream_post_publication_failure() {
+  local run_id=$1 run_attempt=$2 run_head=$3 receipt_created_at=$4 jobs_file=$5
+  gh api \
+    "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" \
+    > "${jobs_file}"
+  jq -e \
+    --argjson run_id "${run_id}" \
+    --argjson run_attempt "${run_attempt}" \
+    --arg run_head "${run_head}" \
+    --arg receipt_created_at "${receipt_created_at}" '
+      ([.jobs[] |
+        select(.name == "verify" and .conclusion == "failure")][0]) as $verify |
+      ([ $verify.steps[] |
+         select(
+           .name == "Attach immutable receipt after complete evidence publication" and
+           .conclusion == "failure"
+         ) ][0]) as $attach |
+      $attach.number as $attach_number |
+      .total_count == (.jobs | length) and .total_count > 0 and
+      all(.jobs[];
+        .run_id == $run_id and .run_attempt == $run_attempt and
+        .head_sha == $run_head and
+        .status == "completed" and
+        (.conclusion == "success" or .conclusion == "skipped" or
+         (.name == "verify" and .conclusion == "failure"))) and
+      ([.jobs[] | select(.conclusion == "failure")] | length) == 1 and
+      ([.jobs[].steps[]? | select(.conclusion == "failure")] | length) == 1 and
+      all(.jobs[].steps[]?;
+        .status == "completed" and
+        (.conclusion == "success" or .conclusion == "skipped" or
+         .conclusion == "failure")) and
+      ([.jobs[] | select(.name == "verify" and .conclusion == "failure")] | length) == 1 and
+      all($verify.steps[];
+        (.number | type) == "number" and .number == (.number | floor) and .number > 0) and
+      ([$verify.steps[].number] | length) == ([$verify.steps[].number] | unique | length) and
+      ([ $verify.steps[] | select(.conclusion == "failure") ] | length) == 1 and
+      ([ $verify.steps[] |
+         select(
+           .name == "Attach immutable receipt after complete evidence publication" and
+           .status == "completed" and .conclusion == "failure"
+         ) ] | length) == 1 and
+      any($verify.steps[];
+        .name == "Verify release, image, and promoted identity" and
+        .number < $attach_number and
+        .status == "completed" and .conclusion == "success") and
+      any($verify.steps[];
+        .name == "Require final fetched no-op plan" and
+        .number < $attach_number and
+        .status == "completed" and .conclusion == "success") and
+      any($verify.steps[];
+        .name == "Finalize machine-readable run ledger" and
+        .number < $attach_number and
+        .status == "completed" and .conclusion == "success") and
+      any($verify.steps[];
+        .name == "Revalidate target before immutable receipt evidence upload" and
+        .number < $attach_number and
+        .status == "completed" and .conclusion == "success") and
+      any($verify.steps[];
+        (.name | startswith("Run actions/upload-artifact@")) and
+        .number < $attach_number and
+        .status == "completed" and .conclusion == "success") and
+      ($receipt_created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+      ($attach.started_at | type) == "string" and
+      ($attach.completed_at | type) == "string" and
+      $receipt_created_at >= $attach.started_at and
+      $receipt_created_at <= $attach.completed_at and
+      all($verify.steps[];
+        .status == "completed" and
+        if .number < $attach_number then .conclusion == "success"
+        elif .number == $attach_number then
+          .name == "Attach immutable receipt after complete evidence publication" and
+          .conclusion == "failure"
+        else .conclusion == "success" or .conclusion == "skipped"
+        end)
+    ' "${jobs_file}" >/dev/null
+}
+
 TAG=""
 EXPECTED_COMMIT=""
 PARENT_TAG=""
@@ -331,7 +408,7 @@ verify_release_and_link() {
     <(jq -S '{id,tag_name,html_url,assets_url,published_at,draft,prerelease,target_commitish,author,assets}' "${canonical_file}") >/dev/null \
     || die "canonical release ${tag} differs from its tag lookup"
 
-  local receipt_count receipt_kind_count receipt_id receipt_digest
+  local receipt_count receipt_kind_count receipt_id receipt_digest receipt_created_at
   receipt_count=$(jq --arg name "${receipt_name}" '[.assets[] | select(.name == $name)] | length' "${release_file}")
   receipt_kind_count=$(jq '[.assets[] | select(.name == "upstream-sync-receipt.json" or .name == "hotfix-release-receipt.json")] | length' "${release_file}")
   if [ "${receipt_count}" -ne 1 ] || [ "${receipt_kind_count}" -ne 1 ]; then
@@ -361,6 +438,7 @@ verify_release_and_link() {
   local receipt_size
   receipt_id=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .id' "${release_file}")
   receipt_digest=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .digest' "${release_file}")
+  receipt_created_at=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .created_at' "${release_file}")
   receipt_size=$(jq -r --arg name "${receipt_name}" '.assets[] | select(.name == $name) | .size' "${release_file}")
   [ "${receipt_size}" -le 1000000 ] \
     || die "receipt asset for ${tag} exceeds the metadata limit"
@@ -463,7 +541,8 @@ verify_release_and_link() {
     --argjson repo_id "${REPOSITORY_ID}" \
     --argjson run_id "${run_id}" '
       .id == $run_id and .path == $path and .head_branch == "main" and .status == "completed" and
-      .conclusion == "success" and .actor.login == $login and .actor.id == $owner_id and
+      (.conclusion == "success" or .conclusion == "failure") and
+      .actor.login == $login and .actor.id == $owner_id and
       .repository.full_name == $repo and .repository.id == $repo_id and
       (.run_attempt | type) == "number" and (.run_attempt | floor) == .run_attempt and
       .run_attempt >= 1 and .run_attempt <= 9007199254740991 and
@@ -472,6 +551,17 @@ verify_release_and_link() {
     || die "workflow run for ${tag} has an unexpected identity"
   run_attempt=$(jq -r '.run_attempt' "${run_file}")
   run_head=$(jq -r '.head_sha' "${run_file}")
+  local run_conclusion
+  run_conclusion=$(jq -r '.conclusion' "${run_file}")
+  if [ "${run_conclusion}" != success ]; then
+    if [ "${kind}" != upstream ] || [ "${core_schema}" != 3 ] || \
+       [ "${regenerate_attempt}" != "${run_attempt}" ] || \
+       ! verify_upstream_post_publication_failure \
+         "${run_id}" "${run_attempt}" "${run_head}" "${receipt_created_at}" \
+         "${node_dir}/workflow-jobs.json"; then
+      die "workflow run for ${tag} has an unexpected identity"
+    fi
+  fi
   evidence_attempt=${run_attempt}
   if [ "${kind}" = hotfix ]; then
     if [ "$(jq -r '.event' "${run_file}")" != workflow_dispatch ] || [ "${run_head}" != "${commit}" ]; then
