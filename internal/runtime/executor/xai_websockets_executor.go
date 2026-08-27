@@ -825,91 +825,81 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				return
 			}
 
-			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
-				payload = namespaceRestorer.restore(payload)
-				payload = responseFilter.apply(payload)
-				if len(payload) == 0 {
-					continue
-				}
-				eventType := gjson.GetBytes(payload, "type").String()
-				isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
-				warmupCompletedPayload := []byte(nil)
-				switch eventType {
-				case "response.created":
-					if warmupRequest {
-						warmupCompletedPayload = buildXAIWebsocketWarmupCompletedPayload(payload)
-						if idMapper != nil && idMapper.state != nil && !recordedTranscript {
-							idMapper.state.recordTranscriptTurn(wsReqBody, warmupCompletedPayload, transcriptReset)
+			for _, normalizedPayload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
+				for _, payload := range namespaceRestorer.restore(normalizedPayload) {
+					payload = responseFilter.apply(payload)
+					if len(payload) == 0 {
+						continue
+					}
+					eventType := gjson.GetBytes(payload, "type").String()
+					isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+					warmupCompletedPayload := []byte(nil)
+					switch eventType {
+					case "response.created":
+						if warmupRequest {
+							warmupCompletedPayload = buildXAIWebsocketWarmupCompletedPayload(payload)
+							if idMapper != nil && idMapper.state != nil && !recordedTranscript {
+								idMapper.state.recordTranscriptTurn(wsReqBody, warmupCompletedPayload, transcriptReset)
+								recordedTranscript = true
+							}
+							logXAIWebsocketWarmupCompleted(executionSessionID, authID, wsURL, payload)
+						}
+					case "response.output_item.done":
+						xaiCollectOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+					case "response.completed":
+						logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
+						if detail, ok := helps.ParseCodexUsage(payload); ok {
+							reporter.Publish(ctx, detail)
+						}
+						payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+						payload = xaiNormalizeReasoningSummaryData(payload)
+						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
+						if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
+							idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
 							recordedTranscript = true
 						}
-						logXAIWebsocketWarmupCompleted(executionSessionID, authID, wsURL, payload)
-					}
-				case "response.output_item.done":
-					xaiCollectOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
-				case "response.completed":
-					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
-					if detail, ok := helps.ParseCodexUsage(payload); ok {
-						reporter.Publish(ctx, detail)
-					}
-					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-					payload = xaiNormalizeReasoningSummaryData(payload)
-					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
-					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
-						idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
-						recordedTranscript = true
-					}
-				case "response.done":
-					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
-					if detail, ok := helps.ParseCodexUsage(payload); ok {
-						reporter.Publish(ctx, detail)
-					}
-					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
-						idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
-						recordedTranscript = true
-					}
-				}
-
-				if cliproxyexecutor.DownstreamWebsocket(ctx) {
-					downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
-					downstreamWarmupCompletedPayload := helps.EnsureResponsesUsageDetails(warmupCompletedPayload)
-					if idMapper != nil {
-						downstreamPayload = idMapper.downstreamResponsePayload(downstreamPayload)
-						if len(warmupCompletedPayload) > 0 {
-							downstreamWarmupCompletedPayload = idMapper.downstreamResponsePayload(downstreamWarmupCompletedPayload)
+					case "response.done":
+						logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
+						if detail, ok := helps.ParseCodexUsage(payload); ok {
+							reporter.Publish(ctx, detail)
+						}
+						if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
+							idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
+							recordedTranscript = true
 						}
 					}
-					if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload}) {
-						terminateReason = "context_done"
-						terminateErr = ctx.Err()
-						return
-					}
-					if len(downstreamWarmupCompletedPayload) > 0 {
-						if !send(cliproxyexecutor.StreamChunk{Payload: downstreamWarmupCompletedPayload}) {
+
+					if cliproxyexecutor.DownstreamWebsocket(ctx) {
+						downstreamPayload := helps.EnsureResponsesUsageDetails(payload)
+						downstreamWarmupCompletedPayload := helps.EnsureResponsesUsageDetails(warmupCompletedPayload)
+						if idMapper != nil {
+							downstreamPayload = idMapper.downstreamResponsePayload(downstreamPayload)
+							if len(warmupCompletedPayload) > 0 {
+								downstreamWarmupCompletedPayload = idMapper.downstreamResponsePayload(downstreamWarmupCompletedPayload)
+							}
+						}
+						if !send(cliproxyexecutor.StreamChunk{Payload: downstreamPayload}) {
 							terminateReason = "context_done"
 							terminateErr = ctx.Err()
 							return
 						}
-						return
+						if len(downstreamWarmupCompletedPayload) > 0 {
+							if !send(cliproxyexecutor.StreamChunk{Payload: downstreamWarmupCompletedPayload}) {
+								terminateReason = "context_done"
+								terminateErr = ctx.Err()
+								return
+							}
+							return
+						}
+						if isTerminalEvent {
+							return
+						}
+						continue
 					}
-					if isTerminalEvent {
-						return
-					}
-					continue
-				}
 
-				payload = normalizeCodexWebsocketCompletion(payload)
-				line := encodeCodexWebsocketAsSSE(payload)
-				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
-				for i := range chunks {
-					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-						terminateReason = "context_done"
-						terminateErr = ctx.Err()
-						return
-					}
-				}
-				if len(warmupCompletedPayload) > 0 {
-					line = encodeCodexWebsocketAsSSE(warmupCompletedPayload)
-					chunks = helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
+					payload = normalizeCodexWebsocketCompletion(payload)
+					line := encodeCodexWebsocketAsSSE(payload)
+					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
 					for i := range chunks {
 						if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 							terminateReason = "context_done"
@@ -917,10 +907,21 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 							return
 						}
 					}
-					return
-				}
-				if eventType == "response.completed" || eventType == "response.done" {
-					return
+					if len(warmupCompletedPayload) > 0 {
+						line = encodeCodexWebsocketAsSSE(warmupCompletedPayload)
+						chunks = helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)
+						for i := range chunks {
+							if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+								terminateReason = "context_done"
+								terminateErr = ctx.Err()
+								return
+							}
+						}
+						return
+					}
+					if eventType == "response.completed" || eventType == "response.done" {
+						return
+					}
 				}
 			}
 		}

@@ -109,46 +109,49 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 			if bytes.HasPrefix(line, xaiDataTag) {
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
-				for i, eventData := range eventDataList {
-					eventData = namespaceRestorer.restore(eventData)
-					eventData = responseFilter.apply(eventData)
-					if len(eventData) == 0 {
-						if hasPendingEventLine && i == 0 {
-							pendingEventLine = nil
+				emittedEvent := false
+				for _, eventData := range eventDataList {
+					for _, restoredEvent := range namespaceRestorer.restore(eventData) {
+						restoredEvent = responseFilter.apply(restoredEvent)
+						if len(restoredEvent) == 0 {
+							continue
 						}
-						continue
-					}
-					normalizedEventName := gjson.GetBytes(eventData, "type").String()
-					switch normalizedEventName {
-					case "response.output_item.done":
-						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-					case "response.completed", "response.incomplete":
-						if detail, ok := helps.ParseCodexUsage(eventData); ok {
-							reporter.Publish(ctx, detail)
+						normalizedEventName := gjson.GetBytes(restoredEvent, "type").String()
+						switch normalizedEventName {
+						case "response.output_item.done":
+							xaiCollectOutputItemDone(restoredEvent, outputItemsByIndex, &outputItemsFallback)
+						case "response.completed", "response.incomplete":
+							if detail, ok := helps.ParseCodexUsage(restoredEvent); ok {
+								reporter.Publish(ctx, detail)
+							}
+							restoredEvent = xaiPatchCompletedOutput(restoredEvent, outputItemsByIndex, outputItemsFallback)
+							restoredEvent = xaiNormalizeReasoningSummaryData(restoredEvent)
+							if normalizedEventName == "response.completed" {
+								// A truncated turn carries no replayable terminal state, so only a
+								// completed response may refresh the reasoning replay cache.
+								cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, restoredEvent)
+							}
+							normalizedEventName = gjson.GetBytes(restoredEvent, "type").String()
 						}
-						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-						eventData = xaiNormalizeReasoningSummaryData(eventData)
-						if normalizedEventName == "response.completed" {
-							// A truncated turn carries no replayable terminal state, so only a
-							// completed response may refresh the reasoning replay cache.
-							cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
-						}
-						normalizedEventName = gjson.GetBytes(eventData, "type").String()
-					}
 
-					if hasPendingEventLine {
-						eventLine := []byte("event: " + normalizedEventName)
-						if i == 0 {
-							eventLine = xaiNormalizeReasoningSummaryEventLine(pendingEventLine, normalizedEventName)
-							pendingEventLine = nil
+						if hasPendingEventLine {
+							eventLine := []byte("event: " + normalizedEventName)
+							if !emittedEvent {
+								eventLine = xaiNormalizeReasoningSummaryEventLine(pendingEventLine, normalizedEventName)
+								pendingEventLine = nil
+							}
+							if !emitTranslatedLine(eventLine) {
+								return
+							}
 						}
-						if !emitTranslatedLine(eventLine) {
+						if !emitTranslatedLine(append([]byte("data: "), restoredEvent...)) {
 							return
 						}
+						emittedEvent = true
 					}
-					if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
-						return
-					}
+				}
+				if hasPendingEventLine && !emittedEvent {
+					pendingEventLine = nil
 				}
 				continue
 			}

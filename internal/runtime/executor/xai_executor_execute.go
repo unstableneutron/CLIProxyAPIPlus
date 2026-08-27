@@ -90,32 +90,33 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		eventData = namespaceRestorer.restore(eventData)
-		eventData = responseFilter.apply(eventData)
-		if len(eventData) == 0 {
-			continue
-		}
-		eventType := gjson.GetBytes(eventData, "type").String()
-		switch eventType {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
+		for _, restoredEvent := range namespaceRestorer.restore(eventData) {
+			restoredEvent = responseFilter.apply(restoredEvent)
+			if len(restoredEvent) == 0 {
+				continue
 			}
-			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			if eventType == "response.completed" {
-				// A truncated turn carries no replayable terminal state, so only a
-				// completed response may refresh the reasoning replay cache.
-				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+			eventType := gjson.GetBytes(restoredEvent, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(restoredEvent, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete":
+				if detail, ok := helps.ParseCodexUsage(restoredEvent); ok {
+					reporter.Publish(ctx, detail)
+				}
+				completedData := xaiPatchCompletedOutput(restoredEvent, outputItemsByIndex, outputItemsFallback)
+				completedData = xaiNormalizeReasoningSummaryData(completedData)
+				if eventType == "response.completed" {
+					// A truncated turn carries no replayable terminal state, so only a
+					// completed response may refresh the reasoning replay cache.
+					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+				}
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+					out = helps.EnsureResponsesUsageDetails(out)
+				}
+				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 			}
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
-				out = helps.EnsureResponsesUsageDetails(out)
-			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
 

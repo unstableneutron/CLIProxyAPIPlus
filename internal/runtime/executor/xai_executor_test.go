@@ -558,6 +558,108 @@ func TestXAIExecutorExecuteStreamFoldsNamespacesWhenToolsExceed200(t *testing.T)
 	}
 }
 
+func TestXAIExecutorExecuteStreamBuffersFoldedDispatcherIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeEvent := func(event []byte) {
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", gjson.GetBytes(event, "type").String(), event)
+		}
+		writeEvent([]byte(`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","arguments":"","status":"in_progress"}}`))
+		firstDelta := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":2,"output_index":0,"item_id":"fc_1","delta":""}`)
+		firstDelta, _ = sjson.SetBytes(firstDelta, "delta", `{"name":"tool_2","arguments":{"q":"stream`)
+		writeEvent(firstDelta)
+		secondDelta := []byte(`{"type":"response.function_call_arguments.delta","sequence_number":3,"output_index":0,"item_id":"fc_1","delta":""}`)
+		secondDelta, _ = sjson.SetBytes(secondDelta, "delta", `_test"}}`)
+		writeEvent(secondDelta)
+		dispatcherArguments := `{"name":"tool_2","arguments":{"q":"stream_test"}}`
+		argumentsDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":4,"output_index":0,"item_id":"fc_1","arguments":""}`)
+		argumentsDone, _ = sjson.SetBytes(argumentsDone, "arguments", dispatcherArguments)
+		writeEvent(argumentsDone)
+		outputDone := []byte(`{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","arguments":"","status":"completed"}}`)
+		outputDone, _ = sjson.SetBytes(outputDone, "item.arguments", dispatcherArguments)
+		writeEvent(outputDone)
+		completed := []byte(`{"type":"response.completed","sequence_number":6,"response":{"id":"resp_1","object":"response","status":"completed","model":"grok-4.6","output":[{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","arguments":""}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		completed, _ = sjson.SetBytes(completed, "response.output.0.arguments", dispatcherArguments)
+		writeEvent(completed)
+	}))
+	defer server.Close()
+
+	payload := xaiFoldedNamespaceTestBody("mcp__app", xaiMaxTools+1, "")
+	payload, _ = sjson.SetBytes(payload, "model", "grok-4.6")
+	payload, _ = sjson.SetRawBytes(payload, "input", []byte(`[{"role":"user","content":"call tool_2"}]`))
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var stream bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		stream.Write(chunk.Payload)
+		stream.WriteByte('\n')
+	}
+
+	var toolEvents []gjson.Result
+	for _, line := range strings.Split(stream.String(), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "data:"))
+		if !gjson.Valid(line) {
+			continue
+		}
+		event := gjson.Parse(line)
+		switch event.Get("type").String() {
+		case "response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done":
+			toolEvents = append(toolEvents, event)
+		}
+	}
+	if len(toolEvents) != 4 {
+		t.Fatalf("tool event count = %d, want 4; stream=%s", len(toolEvents), stream.String())
+	}
+	wantTypes := []string{
+		"response.output_item.added",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+	}
+	for index, wantType := range wantTypes {
+		if got := toolEvents[index].Get("type").String(); got != wantType {
+			t.Fatalf("tool event %d type = %q, want %q; stream=%s", index, got, wantType, stream.String())
+		}
+	}
+	if got := toolEvents[0].Get("item.name").String(); got != "tool_2" {
+		t.Fatalf("added item.name = %q, want tool_2; stream=%s", got, stream.String())
+	}
+	if got := toolEvents[0].Get("item.namespace").String(); got != "mcp__app" {
+		t.Fatalf("added item.namespace = %q, want mcp__app; stream=%s", got, stream.String())
+	}
+	if got := toolEvents[1].Get("delta").String(); got != `{"q":"stream_test"}` {
+		t.Fatalf("arguments delta = %q, want child arguments; stream=%s", got, stream.String())
+	}
+	if got := toolEvents[2].Get("arguments").String(); got != `{"q":"stream_test"}` {
+		t.Fatalf("arguments done = %q, want child arguments; stream=%s", got, stream.String())
+	}
+	if got := toolEvents[3].Get("item.name").String(); got != "tool_2" {
+		t.Fatalf("done item.name = %q, want tool_2; stream=%s", got, stream.String())
+	}
+	if got := toolEvents[3].Get("item.arguments").String(); got != `{"q":"stream_test"}` {
+		t.Fatalf("done item.arguments = %q, want child arguments; stream=%s", got, stream.String())
+	}
+}
+
 func TestXAIExecutorExecuteRestoresAdditionalToolsNamespaceCalls(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4304,22 +4406,34 @@ func TestRestoreXAINamespaceToolCalls_FunctionCallArgumentsDone(t *testing.T) {
 
 	addedEvent := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"item_1","type":"function_call","name":"mcp__app_0"}}`)
 	restoredAdded := restorer.restore(addedEvent)
-	if got := gjson.GetBytes(restoredAdded, "item.namespace").String(); got != "mcp__app_0" {
-		t.Fatalf("restored item.namespace = %q, want mcp__app_0", got)
+	if len(restoredAdded) != 0 {
+		t.Fatalf("dispatcher added emitted before child identity: %q", restoredAdded)
 	}
 
 	doneArgsEvent := []byte(`{"type":"response.function_call_arguments.done","item_id":"item_1","output_index":0,"arguments":"{\"name\":\"tool_x\",\"arguments\":{\"count\":42}}"}`)
 	restoredArgs := restorer.restore(doneArgsEvent)
-	if got := gjson.GetBytes(restoredArgs, "arguments").String(); got != `{"count":42}` {
+	if len(restoredArgs) != 2 {
+		t.Fatalf("restored arguments.done events = %d, want added + done", len(restoredArgs))
+	}
+	if got := gjson.GetBytes(restoredArgs[0], "item.name").String(); got != "tool_x" {
+		t.Fatalf("restored added item.name = %q, want tool_x", got)
+	}
+	if got := gjson.GetBytes(restoredArgs[0], "item.namespace").String(); got != "mcp__app_0" {
+		t.Fatalf("restored added item.namespace = %q, want mcp__app_0", got)
+	}
+	if got := gjson.GetBytes(restoredArgs[1], "arguments").String(); got != `{"count":42}` {
 		t.Fatalf("restored arguments.done = %q, want {\"count\":42}", got)
 	}
 
 	doneItemEvent := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"item_1","type":"function_call","name":"mcp__app_0","arguments":"{\"name\":\"tool_x\",\"arguments\":{\"count\":42}}"}}`)
 	restoredItem := restorer.restore(doneItemEvent)
-	if got := gjson.GetBytes(restoredItem, "item.name").String(); got != "tool_x" {
+	if len(restoredItem) != 1 {
+		t.Fatalf("restored output_item.done events = %d, want 1", len(restoredItem))
+	}
+	if got := gjson.GetBytes(restoredItem[0], "item.name").String(); got != "tool_x" {
 		t.Fatalf("restored item.name = %q, want tool_x", got)
 	}
-	if got := gjson.GetBytes(restoredItem, "item.namespace").String(); got != "mcp__app_0" {
+	if got := gjson.GetBytes(restoredItem[0], "item.namespace").String(); got != "mcp__app_0" {
 		t.Fatalf("restored item.namespace = %q, want mcp__app_0", got)
 	}
 }
@@ -4351,14 +4465,20 @@ func TestRestoreXAINamespaceToolCalls_FoldModePreservesNonDispatcherArgumentsDon
 	// Step 1: added event for a non-dispatcher tool (e.g. web_search or regular function)
 	addedNonDisp := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"non_disp_1","type":"function_call","name":"web_search"}}`)
 	restoredAdded := restorer.restore(addedNonDisp)
-	if got := gjson.GetBytes(restoredAdded, "item.name").String(); got != "web_search" {
+	if len(restoredAdded) != 1 {
+		t.Fatalf("restored non-dispatcher added events = %d, want 1", len(restoredAdded))
+	}
+	if got := gjson.GetBytes(restoredAdded[0], "item.name").String(); got != "web_search" {
 		t.Fatalf("restored name = %q, want web_search", got)
 	}
 
 	// Step 2: arguments.done for non_disp_1 containing a "name" property
 	doneNonDisp := []byte(`{"type":"response.function_call_arguments.done","item_id":"non_disp_1","output_index":0,"arguments":"{\"name\":\"golang\",\"query\":\"test\"}"}`)
 	restoredDone := restorer.restore(doneNonDisp)
-	if got := gjson.GetBytes(restoredDone, "arguments").String(); got != `{"name":"golang","query":"test"}` {
+	if len(restoredDone) != 1 {
+		t.Fatalf("restored non-dispatcher arguments.done events = %d, want 1", len(restoredDone))
+	}
+	if got := gjson.GetBytes(restoredDone[0], "arguments").String(); got != `{"name":"golang","query":"test"}` {
 		t.Fatalf("non-dispatcher arguments.done was incorrectly mutated: %s", got)
 	}
 }
@@ -4408,6 +4528,44 @@ func TestPrepareResponsesRequest_CapsAt200WithInjectXSearch(t *testing.T) {
 	}
 }
 
+func TestPrepareResponsesRequest_ReservesInjectedXSearchAt200OrdinaryTools(t *testing.T) {
+	toolList := make([]string, 0, xaiMaxTools)
+	for i := 0; i < xaiMaxTools; i++ {
+		toolList = append(toolList, fmt.Sprintf(`{"type":"function","name":"plain_fn_%d","parameters":{"type":"object"}}`, i))
+	}
+	payload := []byte(fmt.Sprintf(`{"model":"grok-4.6","tools":[%s],"input":[{"role":"user","content":"hi"}]}`, strings.Join(toolList, ",")))
+
+	exec := NewXAIExecutor(&config.Config{
+		XAI: config.XAIConfig{InjectXSearch: true},
+	})
+	prepared, err := exec.prepareResponsesRequestTo(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, false, sdktranslator.FormatOpenAIResponse)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequestTo error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != xaiMaxTools {
+		t.Fatalf("prepared tools length = %d, want %d; body=%s", len(tools), xaiMaxTools, prepared.body)
+	}
+	xSearchCount := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == xaiXSearchToolType {
+			xSearchCount++
+		}
+	}
+	if xSearchCount != 1 {
+		t.Fatalf("prepared x_search count = %d, want 1; body=%s", xSearchCount, prepared.body)
+	}
+	if !prepared.filterInternalXSearch {
+		t.Fatal("filterInternalXSearch = false, want true for injected x_search")
+	}
+}
+
 func TestRestoreXAINamespaceToolCalls_FlattenModePreservesNameInArgumentsDone(t *testing.T) {
 	// In flatten mode (<= 200), refs isDispatcher = false
 	refs := map[string]xaiNamespaceToolRef{
@@ -4423,7 +4581,41 @@ func TestRestoreXAINamespaceToolCalls_FlattenModePreservesNameInArgumentsDone(t 
 	}
 }
 
-func TestRestoreXAINamespaceToolCalls_OutputItemAddedInDispatcherMode(t *testing.T) {
+func TestRestoreXAINamespaceToolCalls_OutputItemsInFlattenMode(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"mcp__github","tools":[{"type":"function","name":"create_repo","parameters":{"type":"object"}}]}]}`)
+	restorer := newXAINamespaceRestorer(collectXAINamespaceToolRefs(request))
+
+	events := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "added",
+			data: []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__github__create_repo","status":"in_progress"}}`),
+		},
+		{
+			name: "done",
+			data: []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__github__create_repo","arguments":"{}","status":"completed"}}`),
+		},
+	}
+	for _, event := range events {
+		t.Run(event.name, func(t *testing.T) {
+			restoredEvents := restorer.restore(event.data)
+			if len(restoredEvents) != 1 {
+				t.Fatalf("restored events = %d, want 1", len(restoredEvents))
+			}
+			restored := restoredEvents[0]
+			if got := gjson.GetBytes(restored, "item.name").String(); got != "create_repo" {
+				t.Fatalf("item.name = %q, want create_repo; event=%s", got, restored)
+			}
+			if got := gjson.GetBytes(restored, "item.namespace").String(); got != "mcp__github" {
+				t.Fatalf("item.namespace = %q, want mcp__github; event=%s", got, restored)
+			}
+		})
+	}
+}
+
+func TestRestoreXAINamespaceToolCalls_OutputItemAddedInDispatcherModeIsBuffered(t *testing.T) {
 	refs := map[string]xaiNamespaceToolRef{
 		"mcp__app_0": {namespace: "mcp__app_0", name: "", isDispatcher: true},
 	}
@@ -4431,12 +4623,8 @@ func TestRestoreXAINamespaceToolCalls_OutputItemAddedInDispatcherMode(t *testing
 	// At output_item.added time, arguments is empty or in progress
 	event := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__app_0","status":"in_progress"}}`)
 	restored := restoreXAINamespaceToolCalls(event, refs)
-
-	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "mcp__app_0" {
-		t.Fatalf("item.namespace = %q, want mcp__app_0", got)
-	}
-	if got := gjson.GetBytes(restored, "item.name").String(); got != "mcp__app_0" {
-		t.Fatalf("item.name = %q, want mcp__app_0 at added phase", got)
+	if len(restored) != 0 {
+		t.Fatalf("dispatcher added emitted before child identity: %s", restored)
 	}
 }
 
@@ -4474,6 +4662,187 @@ func TestClampXAIToolsLimit_PreservesDispatchersOverRegularTools(t *testing.T) {
 		if !found {
 			t.Fatalf("dispatcher %s was dropped by clamp", name)
 		}
+	}
+}
+
+func xaiFoldedNamespaceTestBody(namespaceName string, childCount int, toolChoice string, extraTools ...string) []byte {
+	childTools := make([]string, 0, childCount)
+	for i := 0; i < childCount; i++ {
+		childTools = append(childTools, fmt.Sprintf(`{"type":"function","name":"tool_%d","parameters":{"type":"object"}}`, i))
+	}
+	tools := []string{fmt.Sprintf(`{"type":"namespace","name":%q,"tools":[%s]}`, namespaceName, strings.Join(childTools, ","))}
+	tools = append(tools, extraTools...)
+	body := fmt.Sprintf(`{"tools":[%s]`, strings.Join(tools, ","))
+	if toolChoice != "" {
+		body += `,"tool_choice":` + toolChoice
+	}
+	return []byte(body + `}`)
+}
+
+func TestNormalizeXAITools_FoldDispatcherNameAvoidsPlainToolCollision(t *testing.T) {
+	body := xaiFoldedNamespaceTestBody(
+		"lookup",
+		xaiMaxTools,
+		"",
+		`{"type":"function","name":"lookup","parameters":{"type":"object"}}`,
+	)
+	body, _ = sjson.SetRawBytes(body, "input", []byte(`[{"type":"function_call","name":"tool_1","namespace":"lookup","call_id":"call_history","arguments":"{}"}]`))
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	if !shouldFold {
+		t.Fatal("test fixture must exceed the flattened tool limit")
+	}
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	dispatcherName := xaiNamespaceDispatcherName(refs, "lookup")
+	if dispatcherName == "" || dispatcherName == "lookup" {
+		t.Fatalf("dispatcher wire name = %q, want collision-free synthetic name", dispatcherName)
+	}
+
+	nameCounts := make(map[string]int)
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		nameCounts[tool.Get("name").String()]++
+	}
+	if nameCounts["lookup"] != 1 || nameCounts[dispatcherName] != 1 {
+		t.Fatalf("normalized tool names are not unique: %v; body=%s", nameCounts, out)
+	}
+
+	out = normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(out, shouldFold, refs)
+	if got := gjson.GetBytes(out, "input.0.name").String(); got != dispatcherName {
+		t.Fatalf("historical call name = %q, want dispatcher %q; body=%s", got, dispatcherName, out)
+	}
+
+	plainEvent := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"lookup","call_id":"call_plain","arguments":"{\"query\":\"test\"}"}}`)
+	if restored := restoreXAINamespaceToolCalls(plainEvent, refs); !bytes.Equal(restored, plainEvent) {
+		t.Fatalf("plain lookup was misclassified as dispatcher: %s", restored)
+	}
+	dispatcherEvent := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"","call_id":"call_ns","arguments":"{\"name\":\"tool_1\",\"arguments\":{\"query\":\"test\"}}"}}`)
+	dispatcherEvent, _ = sjson.SetBytes(dispatcherEvent, "item.name", dispatcherName)
+	restored := restoreXAINamespaceToolCalls(dispatcherEvent, refs)
+	if got := gjson.GetBytes(restored, "item.name").String(); got != "tool_1" {
+		t.Fatalf("restored dispatcher child name = %q, want tool_1; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "lookup" {
+		t.Fatalf("restored dispatcher namespace = %q, want lookup; event=%s", got, restored)
+	}
+}
+
+func TestNormalizeXAITools_FoldForcedChildRestrictsDispatcher(t *testing.T) {
+	body := xaiFoldedNamespaceTestBody(
+		"mcp__app",
+		xaiMaxTools+1,
+		`{"type":"function","name":"tool_7","namespace":"mcp__app"}`,
+	)
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	out = normalizeXAINamespaceToolChoiceWithFoldAndRefs(out, shouldFold, refs)
+	dispatcherName := xaiNamespaceDispatcherName(refs, "mcp__app")
+
+	enum := gjson.GetBytes(out, "tools.0.parameters.properties.name.enum").Array()
+	if len(enum) != 1 || enum[0].String() != "tool_7" {
+		t.Fatalf("forced dispatcher enum = %s, want only tool_7; body=%s", gjson.GetBytes(out, "tools.0.parameters.properties.name.enum").Raw, out)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != dispatcherName {
+		t.Fatalf("forced tool_choice name = %q, want %q; body=%s", got, dispatcherName, out)
+	}
+	if gjson.GetBytes(out, "tool_choice.namespace").Exists() {
+		t.Fatalf("forced tool_choice namespace leaked upstream: %s", out)
+	}
+	if _, exists := refs["mcp__app__tool_8"]; exists {
+		t.Fatal("unforced child retained in dispatcher refs")
+	}
+	if _, exists := refs["mcp__app__tool_7"]; !exists {
+		t.Fatal("forced child missing from dispatcher refs")
+	}
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"","call_id":"call_forced","arguments":"{\"name\":\"tool_7\",\"arguments\":{\"value\":\"ok\"}}"}}`)
+	event, _ = sjson.SetBytes(event, "item.name", dispatcherName)
+	restored := restoreXAINamespaceToolCalls(event, refs)
+	if got := gjson.GetBytes(restored, "item.name").String(); got != "tool_7" {
+		t.Fatalf("restored forced child name = %q, want tool_7; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "mcp__app" {
+		t.Fatalf("restored forced child namespace = %q, want mcp__app; event=%s", got, restored)
+	}
+}
+
+func TestNormalizeXAITools_FoldAllowedChildrenRestrictDispatcher(t *testing.T) {
+	body := xaiFoldedNamespaceTestBody(
+		"mcp__app",
+		xaiMaxTools+1,
+		`{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"tool_2","namespace":"mcp__app"},{"type":"function","name":"tool_9","namespace":"mcp__app"}]}`,
+	)
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	out = normalizeXAINamespaceToolChoiceWithFoldAndRefs(out, shouldFold, refs)
+	dispatcherName := xaiNamespaceDispatcherName(refs, "mcp__app")
+
+	allowedChildren := make(map[string]bool)
+	for _, name := range gjson.GetBytes(out, "tools.0.parameters.properties.name.enum").Array() {
+		allowedChildren[name.String()] = true
+	}
+	if len(allowedChildren) != 2 || !allowedChildren["tool_2"] || !allowedChildren["tool_9"] {
+		t.Fatalf("allowed dispatcher enum = %v, want tool_2 and tool_9; body=%s", allowedChildren, out)
+	}
+	allowedChoices := gjson.GetBytes(out, "tool_choice.tools").Array()
+	if len(allowedChoices) != 1 || allowedChoices[0].Get("name").String() != dispatcherName {
+		t.Fatalf("normalized allowed choices = %s, want one dispatcher %q; body=%s", gjson.GetBytes(out, "tool_choice.tools").Raw, dispatcherName, out)
+	}
+	if _, exists := refs["mcp__app__tool_3"]; exists {
+		t.Fatal("disallowed child retained in dispatcher refs")
+	}
+	for _, childName := range []string{"tool_2", "tool_9"} {
+		if _, exists := refs[qualifyXAINamespaceToolName("mcp__app", childName)]; !exists {
+			t.Fatalf("allowed child %s missing from dispatcher refs", childName)
+		}
+	}
+}
+
+func TestNormalizeXAITools_FoldNormalizesNamespaceChildren(t *testing.T) {
+	childTools := make([]string, 0, xaiMaxTools+1)
+	for i := 0; i < xaiMaxTools-1; i++ {
+		childTools = append(childTools, fmt.Sprintf(`{"type":"function","name":"plain_fn_%d","parameters":{"type":"object"}}`, i))
+	}
+	childTools = append(childTools,
+		`{"type":"custom","name":"apply_patch","description":"unsupported patch tool"}`,
+		`{"type":"custom","name":"freeform_exec","description":"declared freeform tool"}`,
+	)
+	body := []byte(fmt.Sprintf(`{"tools":[{"type":"namespace","name":"mcp__app","tools":[%s]}]}`, strings.Join(childTools, ",")))
+
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	if !shouldFold {
+		t.Fatal("test fixture must exceed the flattened tool limit")
+	}
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 1 || tools[0].Get("name").String() != "mcp__app" {
+		t.Fatalf("folded tools = %s, want one mcp__app dispatcher", gjson.GetBytes(out, "tools").Raw)
+	}
+
+	childNames := make(map[string]bool)
+	for _, name := range tools[0].Get("parameters.properties.name.enum").Array() {
+		childNames[name.String()] = true
+	}
+	if childNames["apply_patch"] {
+		t.Fatalf("folded dispatcher retained filtered apply_patch: %s", tools[0].Raw)
+	}
+	if !childNames["freeform_exec"] {
+		t.Fatalf("folded dispatcher dropped declared freeform_exec: %s", tools[0].Raw)
+	}
+	if _, ok := refs["mcp__app__apply_patch"]; ok {
+		t.Fatal("namespace refs retained filtered apply_patch")
+	}
+	if ref, ok := refs["mcp__app__freeform_exec"]; !ok || ref.isDispatcher || ref.namespace != "mcp__app" || ref.name != "freeform_exec" {
+		t.Fatalf("freeform namespace ref = %+v, exists=%v", ref, ok)
+	}
+
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"mcp__app","call_id":"call_1","arguments":"{\"name\":\"freeform_exec\",\"arguments\":{\"input\":\"payload\"}}"}}`)
+	restored := restoreXAINamespaceToolCalls(event, refs)
+	if got := gjson.GetBytes(restored, "item.name").String(); got != "freeform_exec" {
+		t.Fatalf("restored item.name = %q, want freeform_exec; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "mcp__app" {
+		t.Fatalf("restored item.namespace = %q, want mcp__app; event=%s", got, restored)
+	}
+	if got := gjson.GetBytes(restored, "item.arguments").String(); got != `{"input":"payload"}` {
+		t.Fatalf("restored item.arguments = %q, want freeform payload; event=%s", got, restored)
 	}
 }
 

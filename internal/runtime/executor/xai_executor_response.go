@@ -281,10 +281,19 @@ func (f *xaiInternalXSearchResponseFilter) filterCompletedOutput(eventData []byt
 }
 
 func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
-	return normalizeXAIInputNamespaceToolCallsWithFold(body, xaiShouldFoldNamespaceTools(body, false))
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	var refs map[string]xaiNamespaceToolRef
+	if shouldFold {
+		refs = collectXAINamespaceToolRefsWithFold(body, shouldFold)
+	}
+	return normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(body, shouldFold, refs)
 }
 
 func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) []byte {
+	return normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(body, shouldFold, nil)
+}
+
+func normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(body []byte, shouldFold bool, refs map[string]xaiNamespaceToolRef) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
@@ -302,8 +311,14 @@ func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) [
 			continue
 		}
 		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
+		dispatcherName := ""
+		if shouldFold && refs != nil {
+			dispatcherName = xaiNamespaceDispatcherName(refs, namespaceName)
+		}
 		var isFolded bool
-		if xaiHasFunctionToolNamed(body, namespaceName) {
+		if dispatcherName != "" {
+			isFolded = true
+		} else if xaiHasFunctionToolNamed(body, namespaceName) {
 			isFolded = true
 		} else if xaiHasFunctionToolNamed(body, qualifiedName) {
 			isFolded = false
@@ -330,7 +345,11 @@ func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) [
 				continue
 			}
 
-			updated, errSet := sjson.SetBytes(body, namePath, namespaceName)
+			targetName := namespaceName
+			if dispatcherName != "" {
+				targetName = dispatcherName
+			}
+			updated, errSet := sjson.SetBytes(body, namePath, targetName)
 			if errSet != nil {
 				continue
 			}
@@ -365,20 +384,32 @@ func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) [
 }
 
 type xaiNamespaceRestorer struct {
-	refs              map[string]xaiNamespaceToolRef
-	dispatcherItemIDs map[string]string
+	refs            map[string]xaiNamespaceToolRef
+	dispatcherItems map[string]*xaiDispatcherItem
+}
+
+type xaiDispatcherItem struct {
+	namespace     string
+	added         []byte
+	firstDelta    []byte
+	deltaBuffer   []byte
+	identified    bool
+	argumentsDone []byte
 }
 
 func newXAINamespaceRestorer(refs map[string]xaiNamespaceToolRef) *xaiNamespaceRestorer {
 	return &xaiNamespaceRestorer{
-		refs:              refs,
-		dispatcherItemIDs: make(map[string]string),
+		refs:            refs,
+		dispatcherItems: make(map[string]*xaiDispatcherItem),
 	}
 }
 
-func (r *xaiNamespaceRestorer) restore(data []byte) []byte {
-	if r == nil || len(r.refs) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
-		return data
+func (r *xaiNamespaceRestorer) restore(data []byte) [][]byte {
+	if len(data) == 0 {
+		return nil
+	}
+	if r == nil || len(r.refs) == 0 || !gjson.ValidBytes(data) {
+		return [][]byte{data}
 	}
 	eventType := gjson.GetBytes(data, "type").String()
 	switch eventType {
@@ -386,28 +417,72 @@ func (r *xaiNamespaceRestorer) restore(data []byte) []byte {
 		item := gjson.GetBytes(data, "item")
 		if item.Get("type").String() == "function_call" {
 			name := strings.TrimSpace(item.Get("name").String())
-			itemID := strings.TrimSpace(item.Get("id").String())
 			if ref, ok := r.refs[name]; ok && ref.isDispatcher {
-				if itemID != "" {
-					r.dispatcherItemIDs[itemID] = ref.namespace
+				if key := xaiDispatcherItemKey(data, true); key != "" {
+					r.dispatcherItems[key] = &xaiDispatcherItem{
+						namespace: ref.namespace,
+						added:     bytes.Clone(data),
+					}
 				}
-				data, _ = sjson.SetBytes(data, "item.namespace", ref.namespace)
+				return nil
 			}
 		}
-		return data
+		return [][]byte{r.restoreAtPath(data, "item")}
+
+	case "response.function_call_arguments.delta":
+		key := xaiDispatcherItemKey(data, false)
+		item := r.dispatcherItems[key]
+		if item == nil {
+			return [][]byte{data}
+		}
+		if item.firstDelta == nil {
+			item.firstDelta = bytes.Clone(data)
+		}
+		item.deltaBuffer = append(item.deltaBuffer, gjson.GetBytes(data, "delta").String()...)
+		childName, childArgs, ok := unwrapXAIDispatcherArguments(string(item.deltaBuffer), item.namespace, r.refs)
+		if !ok {
+			return nil
+		}
+		return r.emitDispatcherIdentity(item, childName, childArgs)
 
 	case "response.function_call_arguments.done":
-		itemID := strings.TrimSpace(gjson.GetBytes(data, "item_id").String())
-		if namespaceName, isDisp := r.dispatcherItemIDs[itemID]; isDisp {
-			rawArgs := gjson.GetBytes(data, "arguments").String()
-			if _, childArgs, ok := unwrapXAIDispatcherArguments(rawArgs, namespaceName, r.refs); ok {
-				updated, errSet := sjson.SetBytes(data, "arguments", string(childArgs))
-				if errSet == nil {
-					data = updated
+		key := xaiDispatcherItemKey(data, false)
+		item := r.dispatcherItems[key]
+		if item == nil {
+			return [][]byte{data}
+		}
+		item.argumentsDone = bytes.Clone(data)
+		childName, childArgs, ok := unwrapXAIDispatcherArguments(gjson.GetBytes(data, "arguments").String(), item.namespace, r.refs)
+		if !ok {
+			return nil
+		}
+		events := r.emitDispatcherIdentity(item, childName, childArgs)
+		updated, errSet := sjson.SetBytes(data, "arguments", string(childArgs))
+		if errSet == nil {
+			data = updated
+		}
+		return append(events, data)
+
+	case "response.output_item.done":
+		key := xaiDispatcherItemKey(data, true)
+		item := r.dispatcherItems[key]
+		events := make([][]byte, 0, 4)
+		if item != nil && !item.identified {
+			rawArgs := gjson.GetBytes(data, "item.arguments").String()
+			if childName, childArgs, ok := unwrapXAIDispatcherArguments(rawArgs, item.namespace, r.refs); ok {
+				events = append(events, r.emitDispatcherIdentity(item, childName, childArgs)...)
+				if len(item.argumentsDone) > 0 {
+					argumentsDone, errSet := sjson.SetBytes(item.argumentsDone, "arguments", string(childArgs))
+					if errSet == nil {
+						events = append(events, argumentsDone)
+					}
 				}
 			}
 		}
-		return data
+		data = r.restoreAtPath(data, "item")
+		events = append(events, data)
+		delete(r.dispatcherItems, key)
+		return events
 
 	default:
 		data = r.restoreAtPath(data, "item")
@@ -417,8 +492,46 @@ func (r *xaiNamespaceRestorer) restore(data []byte) []byte {
 				data = r.restoreAtPath(data, fmt.Sprintf("response.output.%d", index))
 			}
 		}
-		return data
+		return [][]byte{data}
 	}
+}
+
+func xaiDispatcherItemKey(data []byte, itemEvent bool) string {
+	idPath := "item_id"
+	if itemEvent {
+		idPath = "item.id"
+	}
+	if itemID := strings.TrimSpace(gjson.GetBytes(data, idPath).String()); itemID != "" {
+		return "id:" + itemID
+	}
+	if outputIndex := gjson.GetBytes(data, "output_index"); outputIndex.Exists() {
+		return "output:" + outputIndex.Raw
+	}
+	return ""
+}
+
+func (r *xaiNamespaceRestorer) emitDispatcherIdentity(item *xaiDispatcherItem, childName string, childArgs []byte) [][]byte {
+	if item == nil || item.identified {
+		return nil
+	}
+	item.identified = true
+
+	events := make([][]byte, 0, 2)
+	if len(item.added) > 0 {
+		added, errName := sjson.SetBytes(item.added, "item.name", childName)
+		if errName == nil {
+			if withNamespace, errNamespace := sjson.SetBytes(added, "item.namespace", item.namespace); errNamespace == nil {
+				events = append(events, withNamespace)
+			}
+		}
+	}
+	if len(item.firstDelta) > 0 {
+		delta, errSet := sjson.SetBytes(item.firstDelta, "delta", string(childArgs))
+		if errSet == nil {
+			events = append(events, delta)
+		}
+	}
+	return events
 }
 
 func (r *xaiNamespaceRestorer) restoreAtPath(data []byte, path string) []byte {
@@ -519,7 +632,11 @@ func unwrapXAIDispatcherArguments(rawArgs string, namespaceName string, refs map
 
 func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
 	restorer := newXAINamespaceRestorer(refs)
-	return restorer.restore(data)
+	events := restorer.restore(data)
+	if len(events) == 0 {
+		return nil
+	}
+	return events[len(events)-1]
 }
 
 // normalizeXAIObjectRootUnionBranchTypes makes untyped root union branches
