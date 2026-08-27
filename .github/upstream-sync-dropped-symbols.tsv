@@ -32,6 +32,7 @@ internal/runtime/executor|func|parseEntrypointFromUA	065f64d09061f23492cc0de08eb
 internal/runtime/executor|func|prependToFirstUserMessage	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/runtime/executor|func|restoreXAINamespaceToolCallAtPath	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/runtime/executor|func|sanitizeForwardedSystemPrompt	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
+internal/runtime/executor|method|antigravityReasoningReplayAccumulator.Flush	065f64d09061f23492cc0de08eb1763fe482d3ff	audited unreferenced compatibility wrapper removed after upstream v7.2.143 acceptance
 internal/translator/claude/openai/responses|func|TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/translator/claude/openai/responses|func|convertResponsesNamespaceToolToClaude	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/translator/claude/openai/responses|func|convertResponsesToolToClaudeTools	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
@@ -58,6 +59,7 @@ internal/watcher/diff|func|TestComputeClaudeModelsHash_IgnoresBlankAndDedup	065f
 internal/watcher/diff|func|TestComputeCodexModelsHash_IgnoresBlankAndDedup	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/watcher/diff|func|TestComputeOpenAICompatModelsHash_NormalizesAndDedups	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
 internal/watcher/diff|func|TestComputeVertexCompatModelsHash_IgnoresBlankAndOrder	065f64d09061f23492cc0de08eb1763fe482d3ff	validated superseded compatibility residue removal after upstream v7.2.143 acceptance
+sdk/api/handlers/openai|var|_	065f64d09061f23492cc0de08eb1763fe482d3ff	audited redundant compile anchors removed after upstream v7.2.143 acceptance; live implementations and callers retained
 # Add only declarations intentionally removed by an accepted fingerprinted sync.
 # Qualified symbols use path|kind|name from check-go-symbols.go. Entries
 # match only their exact plan fingerprint and are ignored by later plans.

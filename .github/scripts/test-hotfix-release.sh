@@ -53,14 +53,20 @@ setup_policy_repo() {
   local root=$1
   local repo=${root}/repo
   local origin=${root}/origin.git
+  local symbol_baseline_commit
   mkdir -p "${repo}"
   run_git -C "${repo}" init -q
   run_git -C "${repo}" config user.name hotfix-test
   run_git -C "${repo}" config user.email hotfix-test@example.invalid
+  echo seed > "${repo}/seed.txt"
+  run_git -C "${repo}" add seed.txt
+  run_git -C "${repo}" commit -m seed >/dev/null
+  symbol_baseline_commit=$(run_git -C "${repo}" rev-parse HEAD)
   cat > "${repo}/.ccs-fork-upstream.env" <<EOF
 SCHEMA_VERSION=2
 SYNC_ID=original-v7.2.131_plus-v7.2.127-3
 PLAN_FINGERPRINT=eeef3819ca9dfb38b4528fc5dabc3324d538b19b
+BASE_FORK_COMMIT=${symbol_baseline_commit}
 ORIGINAL_TAG=${ORIGINAL_SOURCE_TAG}
 EXPECTED_FORK_TAG=${BASE_TAG}
 EOF
@@ -215,6 +221,10 @@ test_policy_accepts_consecutive_chained_suffixes() {
     "${HOTFIX_TAG}" "${first_commit}" >/dev/null
   [ "$(output_value "${output}" root_tag)" = "${BASE_TAG}" ] \
     || fail "second hotfix did not preserve the accepted upstream root"
+  [ "$(output_value "${output}" root_commit)" = "$(run_git -C "${repo}" rev-parse "${BASE_TAG}^{}")" ] \
+    || fail "second hotfix did not preserve the accepted upstream root commit"
+  [ "$(output_value "${output}" symbol_baseline_commit)" = "$(run_git -C "${repo}" rev-parse "${BASE_TAG}^{}^")" ] \
+    || fail "second hotfix did not preserve the upstream-sync symbol baseline"
 
   run_git -C "${repo}" tag -a v7.2.131-unstableneutron.2 \
     -m "Hotfix release v7.2.131-unstableneutron.2 after ${HOTFIX_TAG}"
@@ -273,6 +283,12 @@ test_workflow_contract_is_fail_closed() {
   assert_contains "${WORKFLOW}" "github.actor"
   assert_contains "${WORKFLOW}" "github.ref"
   assert_contains "${WORKFLOW}" "validate-hotfix-release.sh"
+  # shellcheck disable=SC2016 # GitHub and workflow shell expressions are asserted literally.
+  assert_contains "${WORKFLOW}" 'SYMBOL_BASELINE_COMMIT: ${{ steps.policy.outputs.symbol_baseline_commit }}'
+  # shellcheck disable=SC2016 # GitHub and workflow shell expressions are asserted literally.
+  assert_contains "${WORKFLOW}" 'check-symbol-survival "${SYMBOL_BASELINE_COMMIT}"'
+  # shellcheck disable=SC2016 # The obsolete immediate-parent baseline must not return.
+  assert_not_contains "${WORKFLOW}" 'check-symbol-survival "${BASE_COMMIT}"'
   assert_contains "${WORKFLOW}" "Verify complete previous release chain"
   assert_contains "${WORKFLOW}" "verify-hotfix-chain.sh"
   assert_contains "${WORKFLOW}" "test-verify-hotfix-chain.sh"

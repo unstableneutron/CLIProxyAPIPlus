@@ -173,7 +173,7 @@ jobs:
 
       - name: Run complete repository and upstream validation
         env:
-          BASE_COMMIT: ${{ steps.policy.outputs.base_commit }}
+          SYMBOL_BASELINE_COMMIT: ${{ steps.policy.outputs.symbol_baseline_commit }}
         run: |
           test -z "$(gofmt -l .)"
           git diff --check
@@ -189,7 +189,7 @@ jobs:
           .github/scripts/test-verify-hotfix-release.sh
           .github/scripts/test-publish-staged-release.sh
           .github/scripts/upstream-sync.sh check-invariants
-          .github/scripts/upstream-sync.sh check-symbol-survival "${BASE_COMMIT}"
+          .github/scripts/upstream-sync.sh check-symbol-survival "${SYMBOL_BASELINE_COMMIT}"
           shellcheck .github/scripts/*.sh
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
