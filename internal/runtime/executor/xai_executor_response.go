@@ -394,6 +394,8 @@ type xaiDispatcherItem struct {
 	firstDelta    []byte
 	deltaBuffer   []byte
 	identified    bool
+	childName     string
+	childArgs     []byte
 	argumentsDone []byte
 }
 
@@ -479,7 +481,21 @@ func (r *xaiNamespaceRestorer) restore(data []byte) [][]byte {
 				}
 			}
 		}
-		data = r.restoreAtPath(data, "item")
+		if item != nil && item.identified {
+			if updated, errSet := sjson.SetBytes(data, "item.name", item.childName); errSet == nil {
+				data = updated
+			}
+			if updated, errSet := sjson.SetBytes(data, "item.namespace", item.namespace); errSet == nil {
+				data = updated
+			}
+			if len(item.childArgs) > 0 {
+				if updated, errSet := sjson.SetBytes(data, "item.arguments", string(item.childArgs)); errSet == nil {
+					data = updated
+				}
+			}
+		} else {
+			data = r.restoreAtPath(data, "item")
+		}
 		events = append(events, data)
 		delete(r.dispatcherItems, key)
 		return events
@@ -515,6 +531,8 @@ func (r *xaiNamespaceRestorer) emitDispatcherIdentity(item *xaiDispatcherItem, c
 		return nil
 	}
 	item.identified = true
+	item.childName = childName
+	item.childArgs = bytes.Clone(childArgs)
 
 	events := make([][]byte, 0, 2)
 	if len(item.added) > 0 {

@@ -1427,7 +1427,7 @@ func normalizeXAIToolArray(tools gjson.Result, keepImageGeneration, shouldFold b
 					}
 					normalizedNamespace = gjson.ParseBytes(updatedNamespace)
 				}
-				if restricted && len(normalizedNamespace.Get("tools").Array()) == 0 {
+				if len(normalizedNamespace.Get("tools").Array()) == 0 {
 					continue
 				}
 				dispatcherName := reserveXAINamespaceDispatcherName(namespaceName, reservedToolNames)

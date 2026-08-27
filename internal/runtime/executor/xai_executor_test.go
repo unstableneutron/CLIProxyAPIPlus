@@ -575,8 +575,7 @@ func TestXAIExecutorExecuteStreamBuffersFoldedDispatcherIdentity(t *testing.T) {
 		argumentsDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":4,"output_index":0,"item_id":"fc_1","arguments":""}`)
 		argumentsDone, _ = sjson.SetBytes(argumentsDone, "arguments", dispatcherArguments)
 		writeEvent(argumentsDone)
-		outputDone := []byte(`{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","arguments":"","status":"completed"}}`)
-		outputDone, _ = sjson.SetBytes(outputDone, "item.arguments", dispatcherArguments)
+		outputDone := []byte(`{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","status":"completed"}}`)
 		writeEvent(outputDone)
 		completed := []byte(`{"type":"response.completed","sequence_number":6,"response":{"id":"resp_1","object":"response","status":"completed","model":"grok-4.6","output":[{"id":"fc_1","type":"function_call","name":"mcp__app","call_id":"call_1","arguments":""}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 		completed, _ = sjson.SetBytes(completed, "response.output.0.arguments", dispatcherArguments)
@@ -4566,6 +4565,41 @@ func TestPrepareResponsesRequest_ReservesInjectedXSearchAt200OrdinaryTools(t *te
 	}
 }
 
+func TestPrepareResponsesRequest_ReservesInjectedXSearchAt200Dispatchers(t *testing.T) {
+	namespaceTools := make([]string, 0, xaiMaxTools+1)
+	for i := 0; i <= xaiMaxTools; i++ {
+		namespaceTools = append(namespaceTools, fmt.Sprintf(
+			`{"type":"namespace","name":"namespace_%d","tools":[{"type":"function","name":"child","parameters":{"type":"object"}}]}`,
+			i,
+		))
+	}
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
+	prepared, err := exec.prepareResponsesRequestTo(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(`{"model":"grok-4.6","input":"hi","tools":[` + strings.Join(namespaceTools, ",") + `]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, true, sdktranslator.FormatOpenAIResponse)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequestTo() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != xaiMaxTools {
+		t.Fatalf("prepared tools length = %d, want %d; body=%s", len(tools), xaiMaxTools, prepared.body)
+	}
+	xSearchCount := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == xaiXSearchToolType {
+			xSearchCount++
+		}
+	}
+	if xSearchCount != 1 {
+		t.Fatalf("prepared x_search count = %d, want 1; body=%s", xSearchCount, prepared.body)
+	}
+	if !prepared.filterInternalXSearch {
+		t.Fatal("filterInternalXSearch = false, want true for injected x_search")
+	}
+}
+
 func TestRestoreXAINamespaceToolCalls_FlattenModePreservesNameInArgumentsDone(t *testing.T) {
 	// In flatten mode (<= 200), refs isDispatcher = false
 	refs := map[string]xaiNamespaceToolRef{
@@ -4843,6 +4877,26 @@ func TestNormalizeXAITools_FoldNormalizesNamespaceChildren(t *testing.T) {
 	}
 	if got := gjson.GetBytes(restored, "item.arguments").String(); got != `{"input":"payload"}` {
 		t.Fatalf("restored item.arguments = %q, want freeform payload; event=%s", got, restored)
+	}
+}
+
+func TestNormalizeXAITools_FoldDropsNamespaceWithNoSupportedChildren(t *testing.T) {
+	childTools := make([]string, 0, xaiMaxTools+1)
+	for i := 0; i <= xaiMaxTools; i++ {
+		childTools = append(childTools, `{"type":"custom","name":"apply_patch"}`)
+	}
+	body := []byte(`{"tools":[{"type":"namespace","name":"mcp__app","tools":[` + strings.Join(childTools, ",") + `]}]}`)
+
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	if !shouldFold {
+		t.Fatal("test fixture must exceed the flattened tool limit")
+	}
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	if tools := gjson.GetBytes(out, "tools").Array(); len(tools) != 0 {
+		t.Fatalf("folded tools = %s, want no phantom dispatcher", gjson.GetBytes(out, "tools").Raw)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("folded refs = %+v, want none", refs)
 	}
 }
 
