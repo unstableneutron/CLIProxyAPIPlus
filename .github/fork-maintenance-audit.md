@@ -29,6 +29,7 @@ The comparison used path identity with rename inference disabled. Its result is:
 - 59 files are absent from the exact Original tree.
 - `internal/runtime/executor/helps/logging_helpers.go` exists in Original but is modified (`262` insertions and `28` deletions).
 - No covered Go file is byte-identical to Original, and no exact `fork-owned` Go-file rule points at a missing current file.
+- The subtree rule for `.github/workflows-disabled/` points at an intentionally absent directory. It is a negative-policy tombstone, not current source ownership: tests require the legacy workflow to remain absent, PR/tooling validation watches its reintroduction, and repair validation protects the path. This justified tombstone still contributes to manifest maintenance weight.
 
 | Authoritative `fork-owned` rule | Current Go files | Exact Original result |
 |---|---:|---|
@@ -83,7 +84,7 @@ Absence from Original proves that the exact Original tree cannot replace that pa
 |---|---|---|
 | `internal/runtime/executor/antigravity_reasoning_replay_overlay_compat.go` / `(*antigravityReasoningReplayAccumulator).Flush` | One-line delegation to canonical `Commit`; no production or test caller found; the accumulator type is unexported. | Deleted. |
 | `sdk/api/handlers/openai/openai_responses_websocket.go` compile anchors for `finalizeResponsesWebsocketRequest` and `stripUnsupportedResponsesWebsocketInputItemMetadata` | Both functions have direct callers in `openai_responses_websocket_requests.go`; the declarations carried no behavior. | Deleted declarations only; functions and callers retained. Invariant paths now point at the implementation file. |
-| Legacy `test-upstream-sync-tracker-fixtures.sh`, `upstream-sync.yml`, and `sync-validation-status.yml` | Already absent; superseded by the candidate/provenance v2 synchronization lifecycle. | Keep deleted; do not resurrect. |
+| Legacy `test-upstream-sync-tracker-fixtures.sh`, `upstream-sync.yml`, and `sync-validation-status.yml` | Already absent; superseded by the candidate/provenance v2 synchronization lifecycle. | Keep deleted; retain the `.github/workflows-disabled/` tombstone rule and negative tests to reject resurrection. |
 | `internal/watcher/diff/model_hash_fork_overlay_test.go` and earlier executor/translator compatibility overlays | Already removed before this audit; current canonical implementations and tests cover the behavior. | Keep deleted. |
 
 The ownership manifest was expanded to cover fork policy, plugins, tools, runtime helpers, and protocol surfaces that were previously under-specified.
