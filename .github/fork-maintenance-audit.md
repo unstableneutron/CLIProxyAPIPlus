@@ -10,7 +10,7 @@ Primary comparison snapshot:
 - Original: `router-for-me/CLIProxyAPI` `v7.2.143` (`4b5f1eab25fca4b3815369a826e958e7c070a69e`)
 - Plus: `kaitranntt/CLIProxyAPIPlus` `v7.2.127-7` (`f5570ed69c3b82e3ec789b986a7f61396af49180`)
 
-The audit used pinned source trees, current callers and tests, `.github/upstream-sync-ownership.tsv`, `.github/upstream-sync-invariants.tsv`, and `.ccs-fork-upstream.env`. Follow-up release-policy and Responses fixes were merged as PRs #98 and #99; they do not change the classifications below.
+The historical audit used pinned source trees, current callers and tests, `.github/upstream-sync-ownership.tsv`, `.github/upstream-sync-invariants.tsv`, and `.ccs-fork-upstream.env`. The cleanup described below landed in PR #100; release-policy, Responses, and smoke-helper fixes landed in PRs #98, #99, #101, and #102. The authority revalidation below is an exact Original comparison; it does not validate earlier Plus-equivalence assertions.
 
 Classification meanings:
 
@@ -19,9 +19,59 @@ Classification meanings:
 - **Obsolete residue**: compatibility-only code with no live caller and a canonical replacement.
 - **Needs characterization**: provenance or behavior is not understood well enough for safe deletion.
 
+### Ownership-authority revalidation
+
+`.github/upstream-sync-ownership.tsv` is the ownership authority. The invariant table describes required behavior but does not reclassify a path. In the post-PR #102 revalidation snapshot, every current Go file covered by a `fork-owned` rule was compared from main at `6da6e217824723518e8dd46dd9ed062ffb177c69` to the exact Original tree recorded in `.ccs-fork-upstream.env`, `v7.2.143` at `4b5f1eab25fca4b3815369a826e958e7c070a69e`.
+
+The comparison used path identity with rename inference disabled. Its result is:
+
+- 34 `fork-owned` rules cover 60 current Go files.
+- 59 files are absent from the exact Original tree.
+- `internal/runtime/executor/helps/logging_helpers.go` exists in Original but is modified (`262` insertions and `28` deletions).
+- No covered Go file is byte-identical to Original, and no exact `fork-owned` Go-file rule points at a missing current file.
+
+| Authoritative `fork-owned` rule | Current Go files | Exact Original result |
+|---|---:|---|
+| `.github/scripts/check-go-symbols.go` | 1 | Absent |
+| `internal/api/chatgpt_backend_passthrough.go` | 1 | Absent |
+| `internal/api/chatgpt_backend_passthrough_test.go` | 1 | Absent |
+| `internal/auth/gemini/` | 2 | All absent |
+| `internal/registry/commandcode_model_definitions.go` | 1 | Absent |
+| `internal/registry/commandcode_models_test.go` | 1 | Absent |
+| `internal/runtime/executor/bedrock_executor.go` | 1 | Absent |
+| `internal/runtime/executor/bedrock_executor_test.go` | 1 | Absent |
+| `internal/runtime/executor/codex_continue_fold.go` | 1 | Absent |
+| `internal/runtime/executor/codex_continue_fold_test.go` | 1 | Absent |
+| `internal/runtime/executor/codex_websocket_compaction_overlap.go` | 1 | Absent |
+| `internal/runtime/executor/commandcode_executor.go` | 1 | Absent |
+| `internal/runtime/executor/commandcode_executor_test.go` | 1 | Absent |
+| `internal/runtime/executor/gemini_cli_executor.go` | 1 | Absent |
+| `internal/runtime/executor/gemini_cli_executor_test.go` | 1 | Absent |
+| `internal/runtime/executor/helps/logging_helpers.go` | 1 | Modified; 13 added functions provide event emission, header masking, protocol detection, and HTTP/WebSocket metadata capture |
+| `internal/runtime/executor/xai_executor_overlay_compat.go` | 1 | Absent |
+| `internal/runtime/geminicli/` | 1 | All absent |
+| `internal/thinking/provider/geminicli/` | 1 | All absent |
+| `internal/translator/claude/gemini-cli/` | 3 | All absent |
+| `internal/translator/codex/gemini-cli/` | 4 | All absent |
+| `internal/translator/gemini-cli/` | 14 | All absent |
+| `internal/translator/gemini/gemini-cli/` | 3 | All absent |
+| `internal/translator/openai/gemini-cli/` | 3 | All absent |
+| `internal/watcher/synthesizer/commandcode_config_test.go` | 1 | Absent |
+| `sdk/api/handlers/force_model_prefix.go` | 1 | Absent |
+| `sdk/api/handlers/gemini/gemini-cli_handlers.go` | 1 | Absent |
+| `sdk/api/handlers/openai/codex_fast_model.go` | 1 | Absent |
+| `sdk/api/handlers/openai/codex_fast_model_test.go` | 1 | Absent |
+| `sdk/auth/gemini.go` | 1 | Absent |
+| `sdk/cliproxy/service_commandcode_executor_binding_test.go` | 1 | Absent |
+| `tools/release-asset-contract/` | 1 | All absent |
+| `tools/request-fingerprint-probe/` | 3 | All absent |
+| `tools/upstream-sync-smoke/` | 2 | All absent |
+
+Absence from Original proves that the exact Original tree cannot replace that path. It does not by itself prove whether Plus authored equivalent behavior; the ownership manifest remains authoritative for that decision. Callers and focused tests establish relevance after this provenance check.
+
 ## Decisions
 
-1. Keep both upstreams as distinct sources. Original owns the newer core; Plus supplies provider families and integrations absent from Original.
+1. Keep both upstreams as distinct sources and use the ownership manifest to classify their paths. The exact Original comparison proves only the path results above, not the absence of equivalent behavior elsewhere.
 2. Preserve fork policy and runtime features explicitly. Absence from Original is not evidence that Plus or fork behavior is obsolete.
 3. Delete only evidence-backed residue. A filename containing `overlay`, `compat`, or `fork` is not a deletion criterion.
 4. Treat shared files symbol-by-symbol. Many shared files contain both upstream-equivalent machinery and fork-only branches.
@@ -46,25 +96,25 @@ The ownership manifest was expanded to cover fork policy, plugins, tools, runtim
 |---|---|
 | `internal/runtime/executor/codex_continue_fold.go` | Codex continuation state machine for reasoning truncation, rewind/replay, terminal fallback, usage aggregation, and event rewriting. Active in HTTP and WebSocket execution and protected by focused tests. |
 | `internal/runtime/executor/codex_websocket_compaction_overlap.go` | Deduplicates full-history overlap during WebSocket compaction replay. Required by synchronization invariants and compaction tests. |
-| `internal/runtime/executor/bedrock_executor.go` | Native Bedrock executor and transport behavior absent from both pinned upstreams; registered and tested through the service. |
-| Command Code registry, executor, model catalog, and service wiring | Fork provider absent from Original and not replaceable by Plus. Config, catalog, watcher hashes, registration, and executor must be changed as one feature. |
-| `internal/runtime/executor/xai_executor_overlay_compat.go` / `xaiBaseURLForLog` | Security policy that redacts credentials and query data from XAI URL logs. Original logs the raw base URL. |
+| `internal/runtime/executor/bedrock_executor.go` | The Bedrock executor paths are absent from the exact Original tree, classified `fork-owned`, and registered and tested through the service. This comparison does not establish Plus equivalence. |
+| Command Code registry, executor, model catalog, and service wiring | The manifest-listed Command Code paths are absent from the exact Original tree. Config, catalog, watcher hashes, registration, and executor remain one coordinated feature; Plus replaceability is not established here. |
+| `internal/runtime/executor/xai_executor_overlay_compat.go` / `xaiBaseURLForLog` | `fork-owned` security helper that redacts credentials and query data from XAI URL logs; its path is absent from the exact Original tree. |
 | `internal/runtime/executor/helps/logging_helpers.go` / `RecordAPIHTTPResponseMetadata` | Preserves HTTP protocol, status, and headers for request/response capture across multiple providers. Active callers remain. |
 
-Plus-owned provider infrastructure such as Cursor, iFlow, Gemini CLI, AiStudio, websocket relay, and their auth/translator packages is retained. It is upstream-equivalent to Plus, not residue.
+Provider infrastructure such as Cursor, iFlow, Gemini CLI, AiStudio, and websocket relay is retained under the ownership manifest. Cursor and iFlow auth paths are `plus-owned`, while the Gemini CLI auth, executor, thinking, handler, and translator paths listed above are `fork-owned`. This Original-only comparison makes no Plus-equivalence claim.
 
 ### Protocol and API behavior
 
 | Area | Why it remains fork-owned |
 |---|---|
-| `internal/api/chatgpt_backend_passthrough.go` | Authenticated `/backend-api/*` passthrough with account-bound Codex credentials, header filtering, uTLS transport, and response relay. No pinned upstream equivalent. |
+| `internal/api/chatgpt_backend_passthrough.go` | The passthrough paths are absent from the exact Original tree and remain `fork-owned`; active behavior includes account-bound Codex credentials, header filtering, uTLS transport, and response relay. Path absence does not prove that no equivalent exists elsewhere. |
 | `sdk/api/handlers/force_model_prefix.go` | `X-Force-Model-Prefix` routing policy used by OpenAI, Claude, Gemini, Gemini CLI, multipart, path, and WebSocket request flows. |
 | Direct Responses state cache in `openai_responses_handlers.go` | Bounded, expiring response state with pending tool IDs and originating-auth pinning; prevents cross-auth response-ID reuse. |
 | `sdk/api/handlers/openai/codex_fast_model.go` | Maps supported `*-fast` client models to the base model plus priority service tier while preserving thinking suffix behavior. |
 | WebSocket input-item metadata stripping | Avoids upstream request rejection. Only the redundant compile anchors were removed. |
-| Gemini CLI and iFlow thinking/translator packages | Plus-equivalent implementations protected as fork-owned policy because this fork depends on those provider families. |
+| Gemini CLI and iFlow thinking/translator packages | Retained under their manifest classifications because the fork depends on those provider families. Relative-to-Plus equivalence is not established by this Original-only comparison. |
 
-Original-owned route, middleware, thinking, and core Responses WebSocket behavior remains inherited normally. It must not be relabeled as fork behavior solely because it is heavily modified by upstream syncs.
+Route, middleware, thinking, and core Responses WebSocket paths outside the manifest's `fork-owned` rules are outside this comparison. Apply the synchronization ownership policy; do not infer byte or behavioral equivalence from sync history alone.
 
 ### Platform and configuration
 
@@ -75,11 +125,11 @@ Retained coordinated fork features:
 - Bedrock/provider dimensions in config diff and model hashing.
 - Responses-state capability configuration.
 
-Generic conductor cooldown, scheduler, and custom-header helpers match Original behavior. They remain active upstream-equivalent code, not cleanup targets.
+Generic conductor cooldown, scheduler, and custom-header helpers remain outside this fork-owned-path comparison. Treat them as cleanup targets only after an explicit exact-tree or symbol comparison.
 
 ### Synchronization, release, and operations
 
-The following are intentional fork policy and have no equivalent guarded lifecycle in either pinned upstream:
+The following paths are classified `fork-owned` and implement the fork's current guarded lifecycle. This audit does not establish whether either upstream contains functionally equivalent behavior elsewhere:
 
 - Candidate-first `.github/workflows/upstream-sync-v2.yml`.
 - Ownership-aware planning, materialization, provenance, invariant, dropped-symbol, freshness, and repair validation in `.github/scripts/upstream-sync.sh` and its helpers.
@@ -118,11 +168,11 @@ The ownership manifest should remain during this reduction. A later patch-stack 
 
 | Priority | Area | Unknown or cost | Exit criterion |
 |---|---|---|---|
-| P1 | Cursor executor additions | Client-version headers, H2 header handling, MCP schema validation/deduplication, raw protocol logging, model aliases, and resume behavior are current-only relative to pinned Plus. Their individual ownership is not recorded. | Produce a symbol-level behavior matrix against the next Plus release; mark each symbol fork-owned or adopt the Plus implementation with focused Cursor tests. |
-| P1 | HTTP response metadata divergence | iFlow and Gemini CLI largely match Plus but call `RecordAPIHTTPResponseMetadata` instead of Plus's canonical metadata helper. | Decide whether protocol capture is a required fork contract. If yes, add explicit invariants/tests; if no, migrate all callers together and remove the adapter only when no callers remain. |
-| P1 | Service provider overlays | `sdk/cliproxy/service_provider_overlays.go` mixes provider-specific resolution, including Command Code, with Plus behavior. | Compare each branch against pinned Original and Plus; split ownership in the manifest or tests without creating a second registration path. |
+| P1 | Cursor executor additions | Relative-to-Plus status for client-version headers, H2 header handling, MCP schema validation/deduplication, raw protocol logging, model aliases, and resume behavior is not established by this Original-only audit. Their individual ownership is not recorded. | Produce a symbol-level behavior matrix against the next Plus release; mark each symbol fork-owned or adopt the Plus implementation with focused Cursor tests. |
+| P1 | HTTP response metadata divergence | iFlow and Gemini CLI call `RecordAPIHTTPResponseMetadata`; their relative-to-Plus status is not established by this Original-only audit. | Decide whether protocol capture is a required fork contract. If yes, add explicit invariants/tests; if no, migrate all callers together and remove the adapter only when no callers remain. |
+| P1 | Service provider overlays | `sdk/cliproxy/service_provider_overlays.go` mixes provider-specific resolution, including Command Code; its relative-to-Plus status is not established here. | Compare each branch against pinned Original and Plus; split ownership in the manifest or tests without creating a second registration path. |
 | P2 | Store, cache, usage, and TUI deltas | Exact current-vs-upstream provenance was not completed. These areas may contain both inherited and fork behavior. | Audit by exported behavior and live callers before any cleanup. No filename-based deletions. |
-| P2 | Gemini CLI ownership | Implementations are Plus-equivalent but intentionally marked fork-owned. This reduces accidental deletion but increases future manual composition. | Decide whether to keep policy ownership or move to Plus ownership after verifying every translator/applier path and invariant. |
+| P2 | Gemini CLI ownership | Implementations are marked `fork-owned`; relative-to-Plus equivalence is not established by this Original-only audit. This reduces accidental deletion but increases future manual composition. | Decide whether to keep policy ownership or move to Plus ownership after verifying every translator/applier path and invariant. |
 | P2 | Agent skill discovery | `.agents/` is consumed by external coding harnesses, so source-code caller search cannot prove usage. | Keep fork-owned unless the supported harness inventory and `skills-lock.json` references prove a narrower safe set. |
 | P2 | Manual diagnostic utilities | `cmd/mcpdebug`, `cmd/protocheck`, `cmd/qoder_replay`, and the request fingerprint probe have few or no production callers. | Inventory operator usage before deletion. Preserve any utility that shortens provider incident diagnosis. |
 | P3 | Release-policy complexity | The release webhook, upstream-sync script/test, and hotfix-chain verifier are large, high-churn policy hotspots. | Reduce only by consolidating duplicated pure validation logic behind existing command contracts; retain independent verifier boundaries and negative tests. |
