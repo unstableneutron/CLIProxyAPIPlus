@@ -44,6 +44,8 @@ asset_json() {
       size: $size,
       state: "uploaded",
       digest: $digest,
+      created_at: "2026-08-15T05:32:46Z",
+      updated_at: "2026-08-15T05:32:46Z",
       uploader: {login: "github-actions[bot]", id: 41898282, type: "Bot"}
     }'
 }
@@ -425,6 +427,55 @@ upgrade_root_to_schema3() {
   rebuild_root_artifact "${root}"
 }
 
+write_post_publication_failure_jobs() {
+  local root=$1
+  local node="${root}/fixtures/${ROOT_TAG}"
+  jq -n \
+    --arg head "$(cat "${root}/root.commit")" '
+    {
+      total_count: 2,
+      jobs: [
+        {
+          run_id: 800,
+          run_attempt: 1,
+          head_sha: $head,
+          name: "candidate",
+          status: "completed",
+          conclusion: "success",
+          steps: [
+            {name: "Set up job", number: 1, status: "completed", conclusion: "success"}
+          ]
+        },
+        {
+          run_id: 800,
+          run_attempt: 1,
+          head_sha: $head,
+          name: "verify",
+          status: "completed",
+          conclusion: "failure",
+          steps: [
+            {name: "Set up job", number: 1, status: "completed", conclusion: "success"},
+            {name: "Verify release, image, and promoted identity", number: 4, status: "completed", conclusion: "success"},
+            {name: "Require final fetched no-op plan", number: 5, status: "completed", conclusion: "success"},
+            {name: "Finalize machine-readable run ledger", number: 6, status: "completed", conclusion: "success"},
+            {name: "Revalidate target before immutable receipt evidence upload", number: 7, status: "completed", conclusion: "success"},
+            {name: "Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", number: 8, status: "completed", conclusion: "success"},
+            {
+              name: "Attach immutable receipt after complete evidence publication",
+              number: 9,
+              status: "completed",
+              conclusion: "failure",
+              started_at: "2026-08-15T05:32:45Z",
+              completed_at: "2026-08-15T05:32:47Z"
+            },
+            {name: "Close superseded synchronization PRs", number: 10, status: "completed", conclusion: "skipped"},
+            {name: "Complete job", number: 12, status: "completed", conclusion: "success"}
+          ]
+        }
+      ]
+    }' > "${node}/jobs.json"
+}
+
 make_stubs() {
   local root=$1
   mkdir -p "${root}/bin"
@@ -478,6 +529,7 @@ case "${path}" in
   repos/*/releases/assets/13) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/hotfix-release-receipt.json" ;;
   repos/*/actions/runs/800/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/artifacts.json" ;;
   repos/*/actions/runs/900/artifacts*) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/artifacts.json" ;;
+  repos/*/actions/runs/800/attempts/1/jobs*) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/jobs.json" ;;
   repos/*/actions/runs/800/attempts/1) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/attempt-1.json" ;;
   repos/*/actions/runs/900/attempts/1) cat "${STUB_ROOT}/fixtures/${STUB_FIRST_TAG}/attempt-1.json" ;;
   repos/*/actions/runs/800) cat "${STUB_ROOT}/fixtures/${STUB_ROOT_TAG}/run.json" ;;
@@ -708,6 +760,76 @@ test_accepts_schema3_root_and_earlier_failed_evidence_attempt() {
       "${root}/schema3-recovery.json" >/dev/null
     rm -rf "${root}"
   done
+}
+
+test_accepts_only_schema3_root_post_publication_failure() {
+  local root run jobs
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  upgrade_root_to_schema3 "${root}"
+  run="${root}/fixtures/${ROOT_TAG}/run.json"
+  jq '.conclusion = "failure"' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  write_post_publication_failure_jobs "${root}"
+  run_chain \
+    "${root}" "${FIRST_TAG}" "${ROOT_TAG}" \
+    "$(cat "${root}/first.commit")" "$(cat "${root}/root.commit")" \
+    "${root}/post-publication-chain.json" >/dev/null
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  upgrade_root_to_schema3 "${root}"
+  run="${root}/fixtures/${ROOT_TAG}/run.json"
+  jobs="${root}/fixtures/${ROOT_TAG}/jobs.json"
+  jq '.conclusion = "failure"' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  write_post_publication_failure_jobs "${root}"
+  jq '(.jobs[] | select(.name == "verify") | .steps[] |
+      select(.conclusion == "failure")).name = "Verify release, image, and promoted identity"' \
+    "${jobs}" > "${jobs}.new"
+  mv "${jobs}.new" "${jobs}"
+  expect_second_failure "${root}" "workflow run"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  upgrade_root_to_schema3 "${root}"
+  run="${root}/fixtures/${ROOT_TAG}/run.json"
+  jobs="${root}/fixtures/${ROOT_TAG}/jobs.json"
+  jq '.conclusion = "failure"' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  write_post_publication_failure_jobs "${root}"
+  jq '(.jobs[] | select(.name == "candidate") | .steps[0].conclusion) = "failure"' \
+    "${jobs}" > "${jobs}.new"
+  mv "${jobs}.new" "${jobs}"
+  expect_second_failure "${root}" "workflow run"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  upgrade_root_to_schema3 "${root}"
+  run="${root}/fixtures/${ROOT_TAG}/run.json"
+  jq '.conclusion = "failure"' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  write_post_publication_failure_jobs "${root}"
+  jq '(.assets[] | select(.name == "upstream-sync-receipt.json") |
+      .created_at) = "2026-08-15T05:32:44Z"' \
+    "${root}/fixtures/${ROOT_TAG}/release.json" \
+    > "${root}/fixtures/${ROOT_TAG}/release.json.new"
+  mv "${root}/fixtures/${ROOT_TAG}/release.json.new" \
+    "${root}/fixtures/${ROOT_TAG}/release.json"
+  expect_second_failure "${root}" "workflow run"
+  rm -rf "${root}"
+
+  root=$(mktemp -d)
+  setup_fixture "${root}"
+  run="${root}/fixtures/${ROOT_TAG}/run.json"
+  jq '.conclusion = "failure"' "${run}" > "${run}.new"
+  mv "${run}.new" "${run}"
+  write_post_publication_failure_jobs "${root}"
+  expect_second_failure "${root}" "workflow run"
+  rm -rf "${root}"
 }
 
 test_rejects_schema3_root_identity_drift() {
@@ -984,6 +1106,7 @@ main() {
   test_accepts_nonzero_and_prerelease_root_chains
   test_accepts_parent_artifact_only_from_earlier_failed_attempt
   test_accepts_schema3_root_and_earlier_failed_evidence_attempt
+  test_accepts_only_schema3_root_post_publication_failure
   test_rejects_schema3_root_identity_drift
   test_rejects_oversized_compressed_artifact_member
   test_accepts_planner_sanitized_source_tag_linkage
