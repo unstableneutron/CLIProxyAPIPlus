@@ -51,6 +51,15 @@ func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 }
 
 func TestComputeOpenAICompatModelsHashPreservesRoutingOrderAndDuplicates(t *testing.T) {
+	normalized := []config.OpenAICompatibilityModel{
+		{Name: " GPT-4 ", Alias: " GPT4 "},
+		{Name: " ", Alias: " "},
+	}
+	canonical := []config.OpenAICompatibilityModel{{Name: "gpt-4", Alias: "gpt4"}}
+	if h1, h2 := ComputeOpenAICompatModelsHash(normalized), ComputeOpenAICompatModelsHash(canonical); h1 == "" || h1 != h2 {
+		t.Fatalf("expected case, whitespace, and blank entries to normalize, got %q / %q", h1, h2)
+	}
+
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},
 		{Name: " "},
@@ -84,6 +93,21 @@ func TestComputeVertexCompatModelsHash_DifferentInputs(t *testing.T) {
 }
 
 func TestComputeVertexCompatModelsHashPreservesDuplicates(t *testing.T) {
+	normalized := []config.VertexCompatModel{
+		{Name: " M1 ", Alias: " A1 "},
+		{Name: " ", Alias: " "},
+	}
+	canonical := []config.VertexCompatModel{{Name: "m1", Alias: "a1"}}
+	if h1, h2 := ComputeVertexCompatModelsHash(normalized), ComputeVertexCompatModelsHash(canonical); h1 == "" || h1 != h2 {
+		t.Fatalf("expected case, whitespace, and blank entries to normalize, got %q / %q", h1, h2)
+	}
+
+	ordered := []config.VertexCompatModel{{Name: "m1"}, {Name: "m2"}}
+	reversed := []config.VertexCompatModel{{Name: "m2"}, {Name: "m1"}}
+	if h1, h2 := ComputeVertexCompatModelsHash(ordered), ComputeVertexCompatModelsHash(reversed); h1 == h2 {
+		t.Fatalf("expected routing order to remain significant, got %q", h1)
+	}
+
 	a := []config.VertexCompatModel{
 		{Name: "m1", Alias: "a1"},
 		{Name: " "},
@@ -116,6 +140,15 @@ func TestComputeCodexModelsHash_Empty(t *testing.T) {
 }
 
 func TestComputeClaudeModelsHashPreservesDuplicates(t *testing.T) {
+	normalized := []config.ClaudeModel{
+		{Name: " M1 ", Alias: " A1 "},
+		{Name: " ", Alias: " "},
+	}
+	canonical := []config.ClaudeModel{{Name: "m1", Alias: "a1"}}
+	if h1, h2 := ComputeClaudeModelsHash(normalized), ComputeClaudeModelsHash(canonical); h1 == "" || h1 != h2 {
+		t.Fatalf("expected case, whitespace, and blank entries to normalize, got %q / %q", h1, h2)
+	}
+
 	a := []config.ClaudeModel{
 		{Name: "m1", Alias: "a1"},
 		{Name: " "},
@@ -130,6 +163,15 @@ func TestComputeClaudeModelsHashPreservesDuplicates(t *testing.T) {
 }
 
 func TestComputeCodexModelsHashPreservesDuplicates(t *testing.T) {
+	normalized := []config.CodexModel{
+		{Name: " M1 ", Alias: " A1 "},
+		{Name: " ", Alias: " "},
+	}
+	canonical := []config.CodexModel{{Name: "m1", Alias: "a1"}}
+	if h1, h2 := ComputeCodexModelsHash(normalized), ComputeCodexModelsHash(canonical); h1 == "" || h1 != h2 {
+		t.Fatalf("expected case, whitespace, and blank entries to normalize, got %q / %q", h1, h2)
+	}
+
 	a := []config.CodexModel{
 		{Name: "m1", Alias: "a1"},
 		{Name: " "},

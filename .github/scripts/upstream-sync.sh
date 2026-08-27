@@ -1615,7 +1615,7 @@ allowlisted_dropped_symbol_reason() {
   [ -n "${resolved_file}" ] || return 1
 
   reason=$(awk -F'\t' -v symbol="${symbol}" -v fingerprint="${fingerprint}" '
-    $1 == symbol && $2 == fingerprint {
+    $1 == symbol && ("x" $2) == ("x" fingerprint) {
       $1 = ""
       $2 = ""
       sub(/^\t+/, "")
@@ -1643,20 +1643,20 @@ validate_dropped_symbol_approvals() {
 
   while IFS=$'\t' read -r symbol approval_fingerprint reason _; do
     [[ -n "${symbol}" && "${symbol}" != \#* ]] || continue
-    [ -n "${fingerprint}" ] || die "dropped symbol approvals require an active plan fingerprint"
-    [ "${approval_fingerprint}" = "${fingerprint}" ] \
-      || die "dropped symbol approval targets a different plan: ${symbol}"
+    [[ "${approval_fingerprint}" =~ ^[0-9a-f]{40}$ ]] \
+      || die "dropped symbol approval fingerprint is invalid: ${symbol}"
     [ -n "${reason}" ] || die "dropped symbol approval lacks a reason: ${symbol}"
     [[ "${symbol}" == */*'|'*'|'* ]] \
       || die "dropped symbol approval is not package-qualified: ${symbol}"
-    grep -Fxq -- "${symbol}" "${overlay_symbols}" \
-      || die "dropped symbol approval is unused by this plan: ${symbol}"
-    ! grep -Fxq -- "${symbol}" "${current_symbols}" \
-      || die "dropped symbol approval names a surviving declaration: ${symbol}"
     key="${symbol}"$'\t'"${approval_fingerprint}"
     ! grep -Fxq -- "${key}" "${seen}" \
       || die "duplicate dropped symbol approval: ${symbol}"
     printf '%s\n' "${key}" >> "${seen}"
+    [ "${approval_fingerprint}" = "${fingerprint}" ] || continue
+    grep -Fxq -- "${symbol}" "${overlay_symbols}" \
+      || die "dropped symbol approval is unused by this plan: ${symbol}"
+    ! grep -Fxq -- "${symbol}" "${current_symbols}" \
+      || die "dropped symbol approval names a surviving declaration: ${symbol}"
   done < "${resolved_file}"
   rm -f "${seen}"
 }
