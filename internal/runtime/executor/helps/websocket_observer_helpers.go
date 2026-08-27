@@ -1,7 +1,9 @@
 package helps
 
 import (
+	"bytes"
 	"context"
+	"maps"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -42,7 +44,7 @@ func EmitWebSocketResponseEvent(ctx context.Context, opts cliproxyexecutor.Optio
 		AuthLabel:      authLabel,
 		AuthType:       authType,
 		EventType:      eventType,
-		Payload:        payload,
-		Metadata:       opts.Metadata,
+		Payload:        bytes.Clone(payload),
+		Metadata:       maps.Clone(opts.Metadata),
 	})
 }

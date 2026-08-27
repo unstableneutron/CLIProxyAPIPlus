@@ -216,10 +216,14 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
 
 	counts := map[string]int{}
+	var addedOutputIndices []int64
 	var completed gjson.Result
 	for _, output := range outputs {
 		event, data := parseClaudeResponsesSSEEvent(t, output)
 		counts[event]++
+		if event == "response.output_item.added" {
+			addedOutputIndices = append(addedOutputIndices, data.Get("output_index").Int())
+		}
 		if event == "response.completed" {
 			completed = data
 		}
@@ -228,35 +232,41 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 		}
 	}
 
-	if counts["response.output_item.added"] != 3 {
-		t.Fatalf("response.output_item.added count = %d, want 3", counts["response.output_item.added"])
+	if counts["response.output_item.added"] != 2 {
+		t.Fatalf("response.output_item.added count = %d, want 2", counts["response.output_item.added"])
 	}
-	if counts["response.content_part.added"] != 2 {
-		t.Fatalf("response.content_part.added count = %d, want 2", counts["response.content_part.added"])
+	if len(addedOutputIndices) != 2 || addedOutputIndices[0] != 0 || addedOutputIndices[1] != 1 {
+		t.Fatalf("response.output_item.added indices = %v, want contiguous [0 1]", addedOutputIndices)
 	}
-	if counts["response.output_text.done"] != 2 {
-		t.Fatalf("response.output_text.done count = %d, want 2", counts["response.output_text.done"])
+	if counts["response.content_part.added"] != 1 {
+		t.Fatalf("response.content_part.added count = %d, want 1", counts["response.content_part.added"])
 	}
-	if counts["response.content_part.done"] != 2 {
-		t.Fatalf("response.content_part.done count = %d, want 2", counts["response.content_part.done"])
+	if counts["response.output_text.done"] != 1 {
+		t.Fatalf("response.output_text.done count = %d, want 1", counts["response.output_text.done"])
 	}
-	if counts["response.output_item.done"] != 3 {
-		t.Fatalf("response.output_item.done count = %d, want 3", counts["response.output_item.done"])
+	if counts["response.content_part.done"] != 1 {
+		t.Fatalf("response.content_part.done count = %d, want 1", counts["response.content_part.done"])
+	}
+	if counts["response.output_item.done"] != 2 {
+		t.Fatalf("response.output_item.done count = %d, want 2", counts["response.output_item.done"])
 	}
 	if counts["response.function_call_arguments.delta"] != 0 {
 		t.Fatalf("response.function_call_arguments.delta count = %d, want 0", counts["response.function_call_arguments.delta"])
 	}
 
-	if got := completed.Get("response.output.0.content.0.text").String(); got != "**Compare competitors**\n- " {
-		t.Fatalf("completed message[0] text = %q, want %q", got, "**Compare competitors**\n- ")
+	if got := completed.Get("response.output.#").Int(); got != 2 {
+		t.Fatalf("completed output items = %d, want 2: %s", got, completed.Get("response.output").Raw)
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "**Compare competitors**\n- Qwen 3.7 Max leads." {
+		t.Fatalf("completed message text = %q, want aggregated text", got)
 	}
 	if got := completed.Get("response.output.1.type").String(); got != "web_search_call" {
 		t.Fatalf("completed output[1].type = %q, want web_search_call", got)
 	}
-	if got := completed.Get("response.output.2.content.0.text").String(); got != "Qwen 3.7 Max leads." {
-		t.Fatalf("completed message[2] text = %q, want %q", got, "Qwen 3.7 Max leads.")
+	if got := completed.Get("response.output.1.action.query").String(); got != "Qwen3" {
+		t.Fatalf("completed search query = %q, want Qwen3", got)
 	}
-	if got := completed.Get("response.output.2.content.0.annotations.0.type").String(); got != "web_search_result_location" {
+	if got := completed.Get("response.output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
 	}
 }
@@ -476,24 +486,27 @@ func TestConvertClaudeResponseToOpenAIResponses_ServerToolsSurfaceWithoutOutputI
 		case event == "response.output_item.added" && data.Get("item.type").String() == "function_call",
 			event == "response.output_item.done" && data.Get("item.type").String() == "function_call",
 			strings.HasPrefix(event, "response.function_call_arguments."):
-			if got := data.Get("output_index").Int(); got != 3 {
-				t.Fatalf("%s output_index = %d, want 3", event, got)
+			if got := data.Get("output_index").Int(); got != 2 {
+				t.Fatalf("%s output_index = %d, want 2", event, got)
 			}
 		case event == "response.completed":
 			completed = data
 		}
 	}
 
-	if messageAddedCount != 2 || messageDoneCount != 2 {
-		t.Fatalf("message lifecycle counts: added=%d done=%d, want 2 each", messageAddedCount, messageDoneCount)
+	if messageAddedCount != 1 || messageDoneCount != 1 {
+		t.Fatalf("message lifecycle counts: added=%d done=%d, want 1 each", messageAddedCount, messageDoneCount)
 	}
-	if got := completed.Get("response.output.#").Int(); got != 4 {
-		t.Fatalf("completed output count = %d, want 4", got)
+	if got := completed.Get("response.output.#").Int(); got != 3 {
+		t.Fatalf("completed output count = %d, want 3", got)
 	}
-	for index, wantType := range []string{"message", "web_search_call", "message", "function_call"} {
+	for index, wantType := range []string{"message", "web_search_call", "function_call"} {
 		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
 			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
 		}
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "Searching. Found it." {
+		t.Fatalf("completed message text = %q, want aggregated search-surrounding text", got)
 	}
 }
 

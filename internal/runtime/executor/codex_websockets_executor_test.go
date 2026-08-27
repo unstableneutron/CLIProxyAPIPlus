@@ -2398,3 +2398,87 @@ func TestCodexWebsocketsExecuteStreamObservesWebSocketResponseEvents(t *testing.
 		t.Fatalf("Payload = %s, want used_percent 75", rateLimitEvent.Payload)
 	}
 }
+
+func TestCodexWebsocketsExecuteStreamContinueFoldObservesNormalizedResponse(t *testing.T) {
+	const (
+		authID                 = "auth-continue-observer"
+		originalPromptCacheKey = "continue-observer-cache"
+	)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","metadata":{"prompt_cache_key":"` + originalPromptCacheKey + `"},"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{
+		Routing: config.RoutingConfig{Strategy: "fill-first"},
+		Codex: config.CodexConfig{
+			IdentityConfuse: true,
+			ContinueThinking: config.CodexContinueThinking{
+				Enabled: true,
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","prompt_cache_key":"` + originalPromptCacheKey + `","input":[{"role":"user","content":"hello"}]}`),
+	}
+
+	var observedEvents []cliproxyexecutor.WebSocketResponseEvent
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+		Metadata: map[string]any{
+			"request_id": "continue-observer-request",
+		},
+		WebSocketResponseObserver: func(_ context.Context, ev cliproxyexecutor.WebSocketResponseEvent) {
+			observedEvents = append(observedEvents, ev)
+		},
+	}
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	if len(observedEvents) != 1 {
+		t.Fatalf("observed %d events, want 1", len(observedEvents))
+	}
+	event := observedEvents[0]
+	if event.RequestID != "continue-observer-request" {
+		t.Fatalf("RequestID = %q, want continue-observer-request", event.RequestID)
+	}
+	if event.EventType != "response.completed" {
+		t.Fatalf("EventType = %q, want response.completed", event.EventType)
+	}
+	normalizedPromptCacheKey := codexIdentityConfuseUUID(authID, "prompt-cache", originalPromptCacheKey)
+	if got := gjson.GetBytes(event.Payload, "response.metadata.prompt_cache_key").String(); got != normalizedPromptCacheKey {
+		t.Fatalf("observed prompt_cache_key = %q, want normalized %q: %s", got, normalizedPromptCacheKey, event.Payload)
+	}
+}

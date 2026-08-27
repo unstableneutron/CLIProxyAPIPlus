@@ -419,7 +419,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
 		} else if typ == "server_tool_use" {
-			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			if name := cb.Get("name").String(); name != claudeWebSearchToolName {
 				// Reachability guard: only web_search can be enabled on Claude by
 				// this translator, so anything else means a new upstream tool.
@@ -892,14 +891,17 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			typ := cb.Get("type").String()
 			switch typ {
 			case "text":
-				item := newOutputItem("message", idx)
-				item.id = fmt.Sprintf("msg_%s_%d", responseID, messageCount)
-				messageCount++
-				if len(pendingAnnotations) > 0 {
-					item.annotations = append(item.annotations, pendingAnnotations...)
-					pendingAnnotations = nil
+				if activeMessageItem == nil {
+					activeMessageItem = newOutputItem("message", idx)
+					activeMessageItem.id = fmt.Sprintf("msg_%s_%d", responseID, messageCount)
+					messageCount++
+					if len(pendingAnnotations) > 0 {
+						activeMessageItem.annotations = append(activeMessageItem.annotations, pendingAnnotations...)
+						pendingAnnotations = nil
+					}
+				} else {
+					blockToItem[idx] = activeMessageItem
 				}
-				activeMessageItem = item
 			case "tool_use":
 				activeMessageItem = nil
 				itemType := "function_call"
@@ -915,7 +917,6 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 				item.name = cb.Get("name").String()
 			case "server_tool_use":
-				activeMessageItem = nil
 				name := cb.Get("name").String()
 				if name != claudeWebSearchToolName {
 					log.Debugf("claude->responses: unmapped server_tool_use %q at block %d", name, idx)

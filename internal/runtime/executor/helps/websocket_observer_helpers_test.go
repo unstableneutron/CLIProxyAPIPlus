@@ -71,3 +71,24 @@ func TestEmitWebSocketResponseEventNilObserverNoOp(t *testing.T) {
 	// Should not panic
 	EmitWebSocketResponseEvent(context.Background(), opts, nil, "codex", "gpt-5.3-codex", payload)
 }
+
+func TestEmitWebSocketResponseEventClonesPayloadAndMetadata(t *testing.T) {
+	payload := []byte(`{"type":"codex.rate_limits"}`)
+	metadata := map[string]any{"request_id": "test-req-1"}
+	opts := cliproxyexecutor.Options{
+		Metadata: metadata,
+		WebSocketResponseObserver: func(_ context.Context, ev cliproxyexecutor.WebSocketResponseEvent) {
+			ev.Payload[0] = 'X'
+			ev.Metadata["request_id"] = "mutated"
+		},
+	}
+
+	EmitWebSocketResponseEvent(context.Background(), opts, nil, "codex", "gpt-5.3-codex", payload)
+
+	if payload[0] != '{' {
+		t.Fatalf("payload was mutated: %s", payload)
+	}
+	if metadata["request_id"] != "test-req-1" {
+		t.Fatalf("metadata was mutated: %#v", metadata)
+	}
+}

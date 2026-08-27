@@ -2263,6 +2263,57 @@ func TestCleanJSONSchemaForAntigravityResponse_AnyOfRequiredOnlyBranches(t *test
 	}
 }
 
+// TestCleanJSONSchemaForAntigravityResponse_RootObjectOneOfWidensBranches tests issue 5219 #1:
+// object unions must retain every branch instead of silently selecting the first variant.
+func TestCleanJSONSchemaForAntigravityResponse_RootObjectOneOfWidensBranches(t *testing.T) {
+	input := `{
+		"type": "object",
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string", "enum": ["alpha"]},
+					"alpha_value": {"type": "integer"}
+				},
+				"required": ["kind", "alpha_value"],
+				"additionalProperties": false
+			},
+			{
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string", "enum": ["beta"]},
+					"beta_value": {"type": "integer"}
+				},
+				"required": ["kind", "beta_value"],
+				"additionalProperties": false
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if parsed.Get("oneOf").Exists() {
+		t.Fatalf("oneOf was not removed; cleaned: %s", got)
+	}
+	if !parsed.Get("properties.alpha_value").Exists() || !parsed.Get("properties.beta_value").Exists() {
+		t.Fatalf("object union properties were not widened; cleaned: %s", got)
+	}
+	if kindEnum := getStrings(got, "properties.kind.enum"); !contains(kindEnum, "alpha") || !contains(kindEnum, "beta") {
+		t.Fatalf("kind enum = %v, want alpha and beta; cleaned: %s", kindEnum, got)
+	}
+	required := getStrings(got, "required")
+	if !contains(required, "kind") || contains(required, "alpha_value") || contains(required, "beta_value") {
+		t.Fatalf("required = %v, want only common branch requirements; cleaned: %s", required, got)
+	}
+	if !parsed.Get("additionalProperties").Exists() || parsed.Get("additionalProperties").Bool() {
+		t.Fatalf("additionalProperties was not preserved as false; cleaned: %s", got)
+	}
+}
+
 // TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped tests issue 5219 #3:
 // contains keyword in array schemas should be stripped and moved to description hint.
 func TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped(t *testing.T) {

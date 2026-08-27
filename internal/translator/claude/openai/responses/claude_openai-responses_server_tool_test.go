@@ -432,7 +432,7 @@ func TestClaudeWebSearchErrorResultSurvivesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
+func TestTextSearchTextAggregatesOneMessageAndKeepsSearch(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_order","usage":{"input_tokens":1,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
@@ -456,20 +456,20 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 		}
 	}
 	items := completed.Get("response.output").Array()
-	if len(items) != 3 {
-		t.Fatalf("expected 3 output items, got %d: %s", len(items), completed.Get("response.output").Raw)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 output items, got %d: %s", len(items), completed.Get("response.output").Raw)
 	}
-	if items[0].Get("type").String() != "message" || items[0].Get("content.0.text").String() != "Before search." {
-		t.Fatalf("item 0 must be message 'Before search.', got: %s", items[0].Raw)
+	if items[0].Get("type").String() != "message" || items[0].Get("content.0.text").String() != "Before search.After search." {
+		t.Fatalf("item 0 must be one aggregated message, got: %s", items[0].Raw)
 	}
 	if items[1].Get("type").String() != "web_search_call" {
 		t.Fatalf("item 1 must be web_search_call, got: %s", items[1].Raw)
 	}
-	if items[2].Get("type").String() != "message" || items[2].Get("content.0.text").String() != "After search." {
-		t.Fatalf("item 2 must be message 'After search.', got: %s", items[2].Raw)
+	if items[1].Get("action.query").String() != "query" || items[1].Get("results.0.url").String() != "https://example.com/order" {
+		t.Fatalf("item 1 must preserve the surfaced search output, got: %s", items[1].Raw)
 	}
-	if items[2].Get("content.0.annotations.0.encrypted_index").String() != "IDX_ORD" {
-		t.Fatalf("item 2 must have citation with encrypted_index IDX_ORD, got: %s", items[2].Raw)
+	if items[0].Get("content.0.annotations.0.encrypted_index").String() != "IDX_ORD" {
+		t.Fatalf("aggregated message must have citation with encrypted_index IDX_ORD, got: %s", items[0].Raw)
 	}
 
 	// Also verify non-streaming matches streaming behavior:
@@ -480,24 +480,23 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 	nonStreamOut := ConvertClaudeResponseToOpenAIResponsesNonStream(
 		context.Background(), "claude-test", nil, nil, []byte(strings.Join(lines, "\n")), nil)
 	nonStreamItems := gjson.GetBytes(nonStreamOut, "output").Array()
-	if len(nonStreamItems) != 3 {
-		t.Fatalf("non-stream expected 3 output items, got %d: %s", len(nonStreamItems), gjson.GetBytes(nonStreamOut, "output").Raw)
+	if len(nonStreamItems) != 2 {
+		t.Fatalf("non-stream expected 2 output items, got %d: %s", len(nonStreamItems), gjson.GetBytes(nonStreamOut, "output").Raw)
 	}
-	if nonStreamItems[0].Get("content.0.text").String() != "Before search." {
-		t.Fatalf("non-stream item 0 text = %q, want 'Before search.'", nonStreamItems[0].Get("content.0.text").String())
+	if nonStreamItems[0].Get("content.0.text").String() != "Before search.After search." {
+		t.Fatalf("non-stream item 0 text = %q, want aggregated text", nonStreamItems[0].Get("content.0.text").String())
 	}
 	if nonStreamItems[1].Get("type").String() != "web_search_call" {
 		t.Fatalf("non-stream item 1 type = %q, want web_search_call", nonStreamItems[1].Get("type").String())
 	}
-	if nonStreamItems[2].Get("content.0.text").String() != "After search." {
-		t.Fatalf("non-stream item 2 text = %q, want 'After search.'", nonStreamItems[2].Get("content.0.text").String())
+	if nonStreamItems[1].Get("action.query").String() != "query" || nonStreamItems[1].Get("results.0.url").String() != "https://example.com/order" {
+		t.Fatalf("non-stream item 1 must preserve the surfaced search output, got: %s", nonStreamItems[1].Raw)
 	}
-	if nonStreamItems[2].Get("content.0.annotations.0.encrypted_index").String() != "IDX_ORD" {
-		t.Fatalf("non-stream item 2 citation encrypted_index = %q, want IDX_ORD", nonStreamItems[2].Get("content.0.annotations.0.encrypted_index").String())
+	if nonStreamItems[0].Get("content.0.annotations.0.encrypted_index").String() != "IDX_ORD" {
+		t.Fatalf("non-stream message citation encrypted_index = %q, want IDX_ORD", nonStreamItems[0].Get("content.0.annotations.0.encrypted_index").String())
 	}
 
-	// Replay back to Claude and verify the block sequence matches original Claude order:
-	// text -> server_tool_use -> web_search_tool_result -> text
+	// Replay back to Claude and verify both surfaced output items survive.
 	var rawItems []json.RawMessage
 	for _, it := range items {
 		rawItems = append(rawItems, json.RawMessage(it.Raw))
@@ -505,8 +504,11 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": rawItems})
 	replayed := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 	replayedBlocks := claudeAssistantBlockTypes(t, replayed)
-	wantBlocks := []string{"text", "server_tool_use", "web_search_tool_result", "text"}
+	wantBlocks := []string{"text", "server_tool_use", "web_search_tool_result"}
 	if strings.Join(replayedBlocks, ",") != strings.Join(wantBlocks, ",") {
 		t.Fatalf("replayed block types = %v, want %v", replayedBlocks, wantBlocks)
+	}
+	if got := gjson.GetBytes(replayed, "messages.0.content.0.text").String(); got != "Before search.After search." {
+		t.Fatalf("replayed text = %q, want aggregated text", got)
 	}
 }

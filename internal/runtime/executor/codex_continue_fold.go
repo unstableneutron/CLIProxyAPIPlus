@@ -1068,7 +1068,7 @@ func codexContinueSendError(ctx context.Context, out chan<- cliproxyexecutor.Str
 	}
 }
 
-func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, responseFormat sdktranslator.Format, to sdktranslator.Format, originalPayload []byte, clientBody []byte, upstreamBody []byte, identityState codexIdentityConfuseState, reporter *helps.UsageReporter, executionSessionID string, sess *codexWebsocketSession, readCh chan codexWebsocketRead, conn *websocket.Conn, wsReqBody []byte, wsURL string, wsHeaders http.Header, upstreamHeaders http.Header, authID string, baseURL string, baseModel string) (*cliproxyexecutor.StreamResult, bool) {
+func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, responseFormat sdktranslator.Format, to sdktranslator.Format, originalPayload []byte, clientBody []byte, upstreamBody []byte, identityState codexIdentityConfuseState, reporter *helps.UsageReporter, executionSessionID string, sess *codexWebsocketSession, readCh chan codexWebsocketRead, conn *websocket.Conn, wsReqBody []byte, wsURL string, wsHeaders http.Header, upstreamHeaders http.Header, authID string, baseURL string, baseModel string) (*cliproxyexecutor.StreamResult, bool) {
 	fold := newCodexContinueFold(clientBody, e.cfg)
 	if fold == nil {
 		return nil, false
@@ -1169,6 +1169,7 @@ func (e *CodexWebsocketsExecutor) executeCodexContinueFoldWebsocketStream(ctx co
 			reporter.MarkFirstResponseByte()
 			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
 				if fold.ShouldFallbackContinuation(wsErr) {

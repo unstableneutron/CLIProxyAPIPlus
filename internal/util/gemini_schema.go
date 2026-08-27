@@ -67,7 +67,8 @@ func CleanJSONSchemaForAntigravityTool(jsonStr string, requirePlaceholder bool) 
 //     additionalProperties: false (which Antigravity natively enforces for response schemas).
 //   - Description hints + deletion: unsupported or accepted-but-ignored constraints.
 //   - Flattened: allOf merged into properties/required.
-//   - Projected: anyOf/oneOf select the strongest branch; null branches become nullable:true.
+//   - Projected: object anyOf/oneOf branches are widened; other unions select the strongest branch.
+//     Null branches become nullable:true.
 //   - Resolved: local $ref targets are inlined before $defs/definitions are removed.
 //   - Dropped: unresolved $ref (after a hint), metadata, unsupported object-key constraints,
 //     conditional keywords (after non-conflicting properties are retained), and x-* extensions.
@@ -999,28 +1000,8 @@ func flattenAnyOfOneOf(jsonStr string) string {
 			}
 
 			items := arr.Array()
-
-			// If the parent already defines properties (e.g. an object schema with anyOf/oneOf constraints),
-			// do not replace the parent with a single branch. Instead, merge any branch properties
-			// into the parent and delete the union keyword.
-			if parentProps := parent.Get("properties"); parentProps.IsObject() {
-				hasNull := false
-				for _, item := range items {
-					if item.Get("type").String() == "null" {
-						hasNull = true
-					}
-					if branchProps := item.Get("properties"); branchProps.IsObject() {
-						branchProps.ForEach(func(propKey, propVal gjson.Result) bool {
-							destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(propKey.String()))
-							jsonStr = mergeMissingSchemaAtPath(jsonStr, destPath, propVal)
-							return true
-						})
-					}
-				}
-				if hasNull {
-					updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
-					jsonStr = string(updated)
-				}
+			if widened, ok := widenObjectUnion(jsonStr, parentPath, parent, items); ok {
+				jsonStr = widened
 				jsonStr, _ = sjson.Delete(jsonStr, p)
 				continue
 			}
@@ -1053,6 +1034,146 @@ func flattenAnyOfOneOf(jsonStr string) string {
 		}
 	}
 	return jsonStr
+}
+
+func widenObjectUnion(jsonStr, parentPath string, parent gjson.Result, items []gjson.Result) (string, bool) {
+	parentHasProperties := parent.Get("properties").IsObject()
+	if parent.Get("type").String() != "object" && !parentHasProperties {
+		return jsonStr, false
+	}
+
+	branches := make([]gjson.Result, 0, len(items))
+	hasNull := false
+	for _, item := range items {
+		if item.Get("type").String() == "null" {
+			hasNull = true
+			continue
+		}
+		if !item.IsObject() && !parentHasProperties {
+			return jsonStr, false
+		}
+		if itemType := item.Get("type").String(); itemType != "" && itemType != "object" && !parentHasProperties {
+			return jsonStr, false
+		}
+		branches = append(branches, item)
+	}
+	if len(branches) == 0 {
+		return jsonStr, false
+	}
+
+	if parent.Get("type").String() == "" {
+		updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "object")
+		jsonStr = string(updated)
+	}
+
+	var commonRequired []string
+	allAdditionalPropertiesFalse := true
+	for i, branch := range branches {
+		if branchProps := branch.Get("properties"); branchProps.IsObject() {
+			branchProps.ForEach(func(propKey, propVal gjson.Result) bool {
+				destination := joinPath(parentPath, "properties."+escapeGJSONPathKey(propKey.String()))
+				jsonStr = mergeUnionSchemaAtPath(jsonStr, destination, propVal)
+				return true
+			})
+		}
+
+		required := make(map[string]struct{})
+		for _, name := range branch.Get("required").Array() {
+			required[name.String()] = struct{}{}
+		}
+		if i == 0 {
+			commonRequired = make([]string, 0, len(required))
+			for _, name := range branch.Get("required").Array() {
+				commonRequired = append(commonRequired, name.String())
+			}
+		} else {
+			commonRequired = filterStrings(commonRequired, required)
+		}
+
+		if branch.Get("additionalProperties").Raw != "false" {
+			allAdditionalPropertiesFalse = false
+		}
+	}
+
+	requiredPath := joinPath(parentPath, "required")
+	required := getStrings(jsonStr, requiredPath)
+	for _, name := range commonRequired {
+		if !contains(required, name) {
+			required = append(required, name)
+		}
+	}
+	if len(required) > 0 {
+		updated, _ := sjson.SetBytes([]byte(jsonStr), requiredPath, required)
+		jsonStr = string(updated)
+	}
+
+	additionalPropertiesPath := joinPath(parentPath, "additionalProperties")
+	if allAdditionalPropertiesFalse && !gjson.Get(jsonStr, additionalPropertiesPath).Exists() {
+		updated, _ := sjson.SetBytes([]byte(jsonStr), additionalPropertiesPath, false)
+		jsonStr = string(updated)
+	}
+	if hasNull {
+		updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
+		jsonStr = string(updated)
+	}
+	return jsonStr, true
+}
+
+func mergeUnionSchemaAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	if !existing.IsObject() || !incoming.IsObject() {
+		return jsonStr
+	}
+
+	incoming.ForEach(func(key, value gjson.Result) bool {
+		child := joinPath(destination, escapeGJSONPathKey(key.String()))
+		if key.String() == "enum" {
+			jsonStr = mergeUnionEnumAtPath(jsonStr, child, value)
+		} else {
+			jsonStr = mergeUnionSchemaAtPath(jsonStr, child, value)
+		}
+		return true
+	})
+	return jsonStr
+}
+
+func mergeUnionEnumAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	if !existing.IsArray() || !incoming.IsArray() {
+		return jsonStr
+	}
+
+	rawValues := make([]string, 0, len(existing.Array())+len(incoming.Array()))
+	seen := make(map[string]struct{}, cap(rawValues))
+	for _, values := range [][]gjson.Result{existing.Array(), incoming.Array()} {
+		for _, value := range values {
+			if _, ok := seen[value.Raw]; ok {
+				continue
+			}
+			seen[value.Raw] = struct{}{}
+			rawValues = append(rawValues, value.Raw)
+		}
+	}
+	updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte("["+strings.Join(rawValues, ",")+"]"))
+	return string(updated)
+}
+
+func filterStrings(values []string, allowed map[string]struct{}) []string {
+	filtered := values[:0]
+	for _, value := range values {
+		if _, ok := allowed[value]; ok {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
 }
 
 func selectBest(items []gjson.Result) (bestIdx int, types []string) {
