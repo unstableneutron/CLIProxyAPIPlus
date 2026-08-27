@@ -5,6 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 EXTRACTOR="${SCRIPT_DIR}/extract-staged-release-artifact.py"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 
 die() {
   echo "[staged-release-publisher] $*" >&2
@@ -21,6 +23,12 @@ INPUT_ARTIFACT_DIGEST=$6
 WORKFLOW_RUN_ID=$7
 WORKFLOW_HEAD_SHA=$8
 RELEASE_MAIN_POLICY=${RELEASE_MAIN_POLICY:-exact}
+RELEASE_RECONCILE_ATTEMPTS=${RELEASE_RECONCILE_ATTEMPTS:-5}
+RELEASE_RECONCILE_DELAY_SECONDS=${RELEASE_RECONCILE_DELAY_SECONDS:-2}
+[[ "${RELEASE_RECONCILE_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] \
+  || die "release reconcile attempts must be a positive decimal integer"
+[[ "${RELEASE_RECONCILE_DELAY_SECONDS}" =~ ^[0-9]+$ ]] \
+  || die "release reconcile delay must be a non-negative decimal integer"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 [[ "${EXPECTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || die "expected commit is invalid"
 [[ "${WORKFLOW_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || die "workflow head SHA is invalid"
@@ -36,26 +44,47 @@ RELEASE_FILE=$(mktemp)
 RELEASE_LIST_FILE=$(mktemp)
 CANONICAL_FILE=$(mktemp)
 RESPONSE=$(mktemp)
+CREATE_INPUT=$(mktemp)
 ARTIFACT_FILE=$(mktemp)
 ARTIFACT_ZIP=$(mktemp)
 SOURCE_RUN_FILE=$(mktemp)
 EXTRACTED=$(mktemp -d)
 rm -rf "${EXTRACTED}"
-trap 'rm -f "${RELEASE_FILE}" "${RELEASE_LIST_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}" "${SOURCE_RUN_FILE}"; rm -rf "${EXTRACTED}"' EXIT
+trap 'rm -f "${RELEASE_FILE}" "${RELEASE_LIST_FILE}" "${CANONICAL_FILE}" "${RESPONSE}" "${CREATE_INPUT}" "${ARTIFACT_FILE}" "${ARTIFACT_ZIP}" "${SOURCE_RUN_FILE}"; rm -rf "${EXTRACTED}"' EXIT
+KNOWN_RELEASE_ID=""
+
+canonicalize_release() {
+  local context=$1
+  local release_id attempt
+  release_id=$(jq -er '.id | select(type == "number" and floor == . and . > 0 and . <= 9007199254740991)' "${RELEASE_FILE}") \
+    || die "release ${TAG} ID is invalid"
+  KNOWN_RELEASE_ID=${release_id}
+  for ((attempt = 1; attempt <= RELEASE_RECONCILE_ATTEMPTS; attempt++)); do
+    if gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${CANONICAL_FILE}"; then
+      diff -u \
+        <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${RELEASE_FILE}") \
+        <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${CANONICAL_FILE}") >/dev/null \
+        || die "canonical release ${TAG} differs from ${context}"
+      cp "${CANONICAL_FILE}" "${RELEASE_FILE}"
+      return 0
+    fi
+    if [ "${attempt}" -lt "${RELEASE_RECONCILE_ATTEMPTS}" ]; then
+      sleep "${RELEASE_RECONCILE_DELAY_SECONDS}"
+    fi
+  done
+  die "canonical release ${TAG} is not visible by ID after ${context}"
+}
 
 fetch_release() {
+  if [ -n "${KNOWN_RELEASE_ID}" ] && \
+     gh api "/repos/${GITHUB_REPOSITORY}/releases/${KNOWN_RELEASE_ID}" > "${RELEASE_FILE}"; then
+    canonicalize_release "its known release ID"
+    return 0
+  fi
   : > "${RESPONSE}"
   if gh api --include "/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > "${RESPONSE}" 2>&1; then
     sed '1,/^\r\{0,1\}$/d' "${RESPONSE}" > "${RELEASE_FILE}"
-    local release_id
-    release_id=$(jq -er '.id | select(type == "number" and floor == . and . > 0 and . <= 9007199254740991)' "${RELEASE_FILE}") \
-      || die "release ${TAG} ID is invalid"
-    gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${CANONICAL_FILE}"
-    diff -u \
-      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${RELEASE_FILE}") \
-      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${CANONICAL_FILE}") >/dev/null \
-      || die "canonical release ${TAG} differs from its tag lookup"
-    cp "${CANONICAL_FILE}" "${RELEASE_FILE}"
+    canonicalize_release "its tag lookup"
     return 0
   fi
   mapfile -t statuses < <(sed -nE 's/^HTTP\/[0-9.]+ ([0-9]{3})( .*)?\r?$/\1/p' "${RESPONSE}")
@@ -71,19 +100,24 @@ fetch_release() {
       *) die "release ${TAG} is duplicated" ;;
     esac
     jq '.[0]' <<< "${matches}" > "${RELEASE_FILE}"
-    local release_id
-    release_id=$(jq -er '.id | select(type == "number" and floor == . and . > 0 and . <= 9007199254740991)' "${RELEASE_FILE}") \
-      || die "release ${TAG} ID is invalid"
-    gh api "/repos/${GITHUB_REPOSITORY}/releases/${release_id}" > "${CANONICAL_FILE}"
-    diff -u \
-      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${RELEASE_FILE}") \
-      <(jq -S '{id,tag_name,html_url,assets_url,draft,prerelease,target_commitish,author,body,assets}' "${CANONICAL_FILE}") >/dev/null \
-      || die "canonical draft release ${TAG} differs from its list entry"
-    cp "${CANONICAL_FILE}" "${RELEASE_FILE}"
+    canonicalize_release "its draft list entry"
     return 0
   fi
   cat "${RESPONSE}" >&2
   die "could not determine release state for ${TAG}"
+}
+
+reconcile_created_release() {
+  local attempt
+  for ((attempt = 1; attempt <= RELEASE_RECONCILE_ATTEMPTS; attempt++)); do
+    if fetch_release; then
+      return 0
+    fi
+    if [ "${attempt}" -lt "${RELEASE_RECONCILE_ATTEMPTS}" ]; then
+      sleep "${RELEASE_RECONCILE_DELAY_SECONDS}"
+    fi
+  done
+  return 1
 }
 
 release_exists=false
@@ -274,19 +308,19 @@ validate_asset_bytes() {
 
 if [ "${release_exists}" = false ]; then
   revalidate_target
-  CREATE_INPUT=$(mktemp)
   jq -n \
     --arg tag "${TAG}" \
     --arg body "${EXPECTED_BODY}" '{
       tag_name: $tag, target_commitish: "main", name: $tag,
       body: $body, draft: true, prerelease: false
     }' > "${CREATE_INPUT}"
-  if ! gh api --method POST "/repos/${GITHUB_REPOSITORY}/releases" --input "${CREATE_INPUT}" >/dev/null; then
-    fetch_release || die "draft creation outcome is unknown"
+  if gh api --method POST "/repos/${GITHUB_REPOSITORY}/releases" \
+    --input "${CREATE_INPUT}" > "${RESPONSE}"; then
+    cp "${RESPONSE}" "${RELEASE_FILE}"
+    canonicalize_release "its creation response"
   else
-    fetch_release || die "new draft release is not visible"
+    reconcile_created_release || die "draft creation outcome is unknown"
   fi
-  rm -f "${CREATE_INPUT}"
 fi
 
 RELEASE_STATE=$(jq -r 'if .draft then "draft" else "stable" end' "${RELEASE_FILE}")

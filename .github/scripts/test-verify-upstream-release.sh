@@ -2,8 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 VERIFIER="${SCRIPT_DIR}/verify-upstream-release.sh"
 FIXTURES="${SCRIPT_DIR}/testdata/upstream-release"
+CONFORMANCE="${FIXTURES}/verifier-conformance.json"
 TAG=v7.2.67-unstableneutron.0
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FINGERPRINT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -194,6 +197,10 @@ test_writes_receipt_after_success() {
   make_stubs "${root}"
   local receipt=${root}/receipt.json
 
+  jq -e '
+    .schema_version == 1 and
+    any(.vectors[]; .id == "valid-release" and .expected == "accept")
+  ' "${CONFORMANCE}" >/dev/null || fail "shared conformance corpus lacks valid-release"
   run_verifier \
     "${root}" "${receipt}" true \
     "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
@@ -276,7 +283,7 @@ test_rejects_incomplete_or_conflicting_release_asset_matrix() {
   local root mutation
   root=$(mktemp -d)
   make_stubs "${root}"
-  for mutation in missing extra duplicate renamed; do
+  while IFS= read -r mutation; do
     case "${mutation}" in
       missing)
         jq 'del(.assets[1])' "${FIXTURES}/release.json" > "${root}/${mutation}.json"
@@ -296,7 +303,13 @@ test_rejects_incomplete_or_conflicting_release_asset_matrix() {
       "${root}" "${root}/${mutation}-receipt.json" \
       "asset set differs from the release contract" \
       false "${COMMIT}" "${COMMIT}" "${root}/${mutation}.json"
-  done
+  done < <(
+    jq -r '
+      .vectors[] |
+      select(.surface == "release-assets" and .expected == "reject") |
+      .mutation
+    ' "${CONFORMANCE}"
+  )
   rm -rf "${root}"
 }
 
@@ -323,20 +336,26 @@ test_rejects_semantically_wrong_or_duplicate_receipts() {
 }
 
 test_rejects_missing_required_platforms() {
-  local root
+  local root mutation architecture
   root=$(mktemp -d)
   make_stubs "${root}"
-  jq 'del(.manifests[] | select(.platform.architecture == "amd64"))' \
-    "${FIXTURES}/image-index.json" > "${root}/missing-amd64.json"
-  expect_failure \
-    "${root}" "${root}/receipt-amd64.json" "invalid platform or attestation descriptor set" \
-    false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" "${root}/missing-amd64.json"
-
-  jq 'del(.manifests[] | select(.platform.architecture == "arm64"))' \
-    "${FIXTURES}/image-index.json" > "${root}/missing-arm64.json"
-  expect_failure \
-    "${root}" "${root}/receipt-arm64.json" "invalid platform or attestation descriptor set" \
-    false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" "${root}/missing-arm64.json"
+  while IFS= read -r mutation; do
+    architecture=${mutation#missing-}
+    jq --arg architecture "${architecture}" \
+      'del(.manifests[] | select(.platform.architecture == $architecture))' \
+      "${FIXTURES}/image-index.json" > "${root}/${mutation}.json"
+    expect_failure \
+      "${root}" "${root}/receipt-${architecture}.json" \
+      "invalid platform or attestation descriptor set" \
+      false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
+      "${root}/${mutation}.json"
+  done < <(
+    jq -r '
+      .vectors[] |
+      select(.surface == "oci-index" and (.mutation | startswith("missing-"))) |
+      .mutation
+    ' "${CONFORMANCE}"
+  )
   rm -rf "${root}"
 }
 
@@ -355,13 +374,22 @@ test_rejects_extra_duplicate_and_malformed_descriptors() {
     "${FIXTURES}/image-index.json" > "${root}/malformed-attestation.json"
   jq '.manifests += [(.manifests[2] | .digest = ("sha256:" + ("5" * 64)))]' \
     "${FIXTURES}/image-index.json" > "${root}/duplicate-attestation.json"
-  for mutation in extra duplicate malformed-attestation duplicate-attestation; do
+  while IFS= read -r mutation; do
     expect_failure \
       "${root}" "${root}/${mutation}-receipt.json" \
       "invalid platform or attestation descriptor set" \
       false "${COMMIT}" "${COMMIT}" "${FIXTURES}/release.json" \
       "${root}/${mutation}.json"
-  done
+  done < <(
+    jq -r '
+      .vectors[] |
+      select(
+        .surface == "oci-index" and
+        (.mutation | IN("extra", "duplicate", "malformed-attestation", "duplicate-attestation"))
+      ) |
+      .mutation
+    ' "${CONFORMANCE}"
+  )
 
   jq '.mediaType = "application/octet-stream"' \
     "${FIXTURES}/image-amd64.json" > "${root}/bad-architecture.json"

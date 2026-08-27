@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 HELPER="${SCRIPT_DIR}/upstream-sync.sh"
 VALIDATOR="${SCRIPT_DIR}/validate-upstream-sync.sh"
 RENDERER="${SCRIPT_DIR}/render-upstream-sync-report.sh"
@@ -318,7 +320,7 @@ test_validation_driver_modes_tooling_and_artifacts() {
 
   assert_contains "${calls}" "invariants"
   assert_contains "${calls}" "symbols"
-  if grep -Eq '^(build|tests|helper-tests|shellcheck|actionlint)$' "${calls}"; then
+  if grep -Eq '^(build|tests|doctor|helper-tests|shellcheck|actionlint|webhook-tests)$' "${calls}"; then
     fail "quick validation ran a full or tooling gate"
   fi
   assert_contains "${root}/quick/validation.env" "OVERALL_STATUS=passed"
@@ -343,7 +345,7 @@ test_validation_driver_modes_tooling_and_artifacts() {
   for gate in invariants symbols build tests; do
     assert_equal "1" "$(grep -c "^${gate}$" "${calls}")" "${gate} execution count"
   done
-  if grep -Eq '^(helper-tests|shellcheck|actionlint)$' "${calls}"; then
+  if grep -Eq '^(doctor|helper-tests|shellcheck|actionlint|webhook-tests)$' "${calls}"; then
     fail "unchanged candidate ran tooling validation"
   fi
 
@@ -355,16 +357,33 @@ test_validation_driver_modes_tooling_and_artifacts() {
       UPSTREAM_SYNC_SYMBOL_CMD=true \
       UPSTREAM_SYNC_BUILD_CMD=true \
       UPSTREAM_SYNC_TEST_CMD=true \
+      UPSTREAM_SYNC_DOCTOR_CMD="printf 'doctor\\n' >> '${calls}'" \
       UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
       UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
       UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_WEBHOOK_TEST_CMD="printf 'webhook-tests\\n' >> '${calls}'" \
       UPSTREAM_SYNC_TOOLING_MODE=auto \
       "${VALIDATOR}" --mode full --plan "${plan_out}" --report-dir "${root}/tooling"
   )
-  for gate in helper-tests shellcheck actionlint; do
+  for gate in doctor helper-tests shellcheck actionlint webhook-tests; do
     assert_equal "1" "$(grep -c "^${gate}$" "${calls}")" "${gate} execution count"
   done
   assert_contains "${root}/tooling/validation.env" "TOOLING_REQUIRED=true"
+
+  : > "${calls}"
+  (
+    cd "${fork}"
+    UPSTREAM_SYNC_DOCTOR_CMD="printf 'doctor\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_HELPER_TEST_CMD="printf 'helper-tests\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_SHELLCHECK_CMD="printf 'shellcheck\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_ACTIONLINT_CMD="printf 'actionlint\\n' >> '${calls}'" \
+      UPSTREAM_SYNC_WEBHOOK_TEST_CMD="printf 'webhook-tests\\n' >> '${calls}'" \
+      "${VALIDATOR}" --mode tooling --report-dir "${root}/tooling-only"
+  )
+  for gate in doctor helper-tests shellcheck actionlint webhook-tests; do
+    assert_equal "1" "$(grep -c "^${gate}$" "${calls}")" "tooling-only ${gate} execution count"
+  done
+  assert_contains "${root}/tooling-only/validation.env" "MODE=tooling"
 
   rm -rf "${root}"
 }
@@ -842,15 +861,21 @@ test_report_renderer_rejects_missing_required_plan_field() {
 
 test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   local workflow=${SCRIPT_DIR}/../workflows/upstream-sync-v2.yml
+  local workflow_helper=${SCRIPT_DIR}/upstream-sync-workflow.sh
   local legacy_active=${SCRIPT_DIR}/../workflows/upstream-sync.yml
   local legacy_disabled=${SCRIPT_DIR}/../workflows-disabled/upstream-sync.yml
+  local pr_workflow=${SCRIPT_DIR}/../workflows/pr-test-build.yml
+  local validator=${SCRIPT_DIR}/validate-upstream-sync.sh
 
   if [ -e "${legacy_active}" ]; then
     fail "legacy upstream sync workflow is still active"
   fi
-  if [ ! -f "${legacy_disabled}" ]; then
-    fail "disabled legacy upstream sync workflow is missing"
+  if [ -e "${legacy_disabled}" ]; then
+    fail "disabled legacy upstream sync workflow still exists"
   fi
+  assert_contains "${pr_workflow}" ".github/workflows-disabled/*"
+  assert_contains "${validator}" ".github/workflows-disabled/*"
+
 
   assert_contains "${workflow}" "schedule:"
   assert_contains "${workflow}" "cron: '17 3 * * *'"
@@ -858,6 +883,7 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "options: [shadow, promote]"
   assert_contains "${workflow}" "github.event_name == 'schedule' || github.actor == 'unstableneutron'"
   assert_contains "${workflow}" "github.event_name == 'schedule' || inputs.mode == 'promote'"
+  assert_contains "${workflow}" "if: always() && steps.plan.outputs.has_changes == 'true' && steps.result.outputs.acceptable != 'true'"
   # Scheduled and manual no-op runs follow the same represented-release
   # verifier; no mode-derived bypass is permitted.
   assert_not_contains "${workflow}" "MODE: \${{ github.event_name == 'schedule' && 'promote' || inputs.mode }}"
@@ -875,25 +901,25 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
   assert_contains "${workflow}" "            .github/scripts"
   assert_contains "${workflow}" "check-freshness"
   assert_contains "${workflow}" "validate-upstream-sync.sh --mode full"
-  assert_contains "${workflow}" "--force-with-lease"
-  assert_contains "${workflow}" "gh pr create"
+  assert_contains "${workflow_helper}" "--force-with-lease"
+  assert_contains "${workflow_helper}" "gh pr create"
   assert_contains "${workflow}" "git push origin HEAD:main"
   # shellcheck disable=SC2016 # The workflow expression is asserted literally.
   assert_contains "${workflow}" 'git push origin "refs/tags/${TAG}"'
   assert_contains "${workflow}" "verify-upstream-release.sh"
-  assert_contains "${workflow}" "gh release download"
-  assert_contains "${workflow}" "gh release upload"
+  assert_contains "${workflow_helper}" "gh release download"
+  assert_contains "${workflow_helper}" "gh release upload"
   assert_contains "${workflow}" "upstream-sync-receipt.json"
   assert_contains "${workflow}" "run-state.json"
   assert_contains "${workflow}" "Require final fetched no-op plan"
   # shellcheck disable=SC2016 # Final verification shell variables are asserted literally.
   assert_contains "${workflow}" '--main-policy "${MAIN_POLICY}"'
   # shellcheck disable=SC2016 # Final verification shell variables are asserted literally.
-  assert_contains "${workflow}" 'git merge-base --is-ancestor "${PROMOTED_COMMIT}" origin/main'
-  assert_contains "${workflow}" 'FINAL_HAS_CHANGES}'
-  assert_contains "${workflow}" 'FINAL_TARGET_DRIFT}'
-  assert_contains "${workflow}" 'FINAL_BLOCKED}'
-  assert_contains "${workflow}" 'status: "clean-noop"'
+  assert_contains "${workflow_helper}" 'git merge-base --is-ancestor "${promoted_commit}" origin/main'
+  assert_contains "${workflow_helper}" 'final_has_changes'
+  assert_contains "${workflow_helper}" 'final_target_drift'
+  assert_contains "${workflow_helper}" 'final_blocked'
+  assert_contains "${workflow_helper}" 'status: "clean-noop"'
   assert_contains "${workflow}" "docker_build:"
   assert_contains "${workflow}" "needs: [promote, release, docker_build]"
   assert_contains "${workflow}" "mode: build"
@@ -927,7 +953,6 @@ test_v2_workflow_contract_is_candidate_first_and_scheduled() {
     "1" \
     "$(grep -c 'validate-upstream-sync.sh --mode full' "${workflow}")" \
     "full validation invocation count"
-  assert_contains "${legacy_disabled}" "name: Upstream Sync"
   assert_not_contains "${workflow}" "gh issue"
   assert_not_contains "${workflow}" "force_pr"
   assert_not_contains "${workflow}" "base_ref:"
@@ -1290,7 +1315,7 @@ EOF
     run_git -C "${fork}" reset --hard -q "${valid_commit}"
     case "${mutation}" in
       missing)
-        sed -i '/^MODELS_COMMIT=/d' "${fork}/.ccs-fork-upstream.env"
+        portable_sed_in_place '/^MODELS_COMMIT=/d' "${fork}/.ccs-fork-upstream.env"
         ;;
       duplicate)
         value=$(grep '^MODELS_COMMIT=' "${fork}/.ccs-fork-upstream.env")
@@ -1823,9 +1848,9 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
   commit_file "${original}" internal/runtime/executor/shared.go $'package executor\nfunc UpstreamOnly() {}' "original shared symbol"
   clone_for_fork "${original}" "${fork}"
 
-  commit_file "${fork}" internal/runtime/executor/shared.go $'package executor\nfunc UpstreamOnly() {}\nfunc ForkOnly() {}' "fork shared symbol"
+  commit_file "${fork}" internal/runtime/executor/shared.go $'package executor\nconst ForkConstant = 1\ntype ForkType struct{}\nfunc UpstreamOnly() {}\nfunc ForkOnly() {}' "fork shared declarations"
   commit_file "${fork}" internal/runtime/executor/shared_test.go $'package executor\nimport "testing"\nfunc TestForkOnly(t *testing.T) {}' "fork shared test"
-  local baseline upstream_ref
+  local baseline upstream_ref fingerprint=1111111111111111111111111111111111111111
   baseline=$(run_git -C "${fork}" rev-parse HEAD)
   upstream_ref=$(run_git -C "${original}" rev-parse HEAD)
 
@@ -1834,24 +1859,36 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
 
   printf '%s\n' 'package executor' 'func UpstreamOnly() {}' > "${fork}/internal/runtime/executor/shared.go"
   rm -f "${fork}/internal/runtime/executor/shared_test.go"
+  mkdir -p "${fork}/sdk/other"
+  printf '%s\n' 'package other' 'type ForkType struct{}' 'func ForkOnly() {}' > "${fork}/sdk/other/other.go"
+  run_git -C "${fork}" add sdk/other/other.go
 
   set +e
   (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
   local exit_code=$?
   set -e
   if [ ${exit_code} -eq 0 ]; then
-    fail "check-symbol-survival passed despite deleted fork-only symbols"
+    fail "check-symbol-survival passed despite deleted package-qualified declarations"
   fi
-  assert_contains "${out}" "[FAIL] missing overlay symbol: ForkOnly"
+  assert_contains "${out}" "[FAIL] missing overlay symbol: internal/runtime/executor|func|ForkOnly"
+  assert_contains "${out}" "[FAIL] missing overlay symbol: internal/runtime/executor|type|ForkType"
+  assert_contains "${out}" "[FAIL] missing overlay symbol: internal/runtime/executor|const|ForkConstant"
   assert_contains "${out}" "DELETED FORK TESTS"
-  assert_contains "${out}" "[FAIL] deleted fork test: TestForkOnly"
+  assert_contains "${out}" "[FAIL] deleted fork test: internal/runtime/executor|func|TestForkOnly"
 
   mkdir -p "${fork}/.github"
-  printf '%s\n' '# symbol	reason' $'ForkOnly\tintentionally superseded in test' $'TestForkOnly\tintentionally superseded in test' > "${fork}/.github/upstream-sync-dropped-symbols.tsv"
-  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
-  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: ForkOnly"
-  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: TestForkOnly"
-  assert_contains "${out}" "[OK] symbol-survival gate passed with allowlisted removals."
+  printf '%s\n' \
+    '# qualified_symbol	plan_fingerprint	reason' \
+    $'internal/runtime/executor|const|ForkConstant\t'"${fingerprint}"$'\tintentionally superseded in test' \
+    $'internal/runtime/executor|func|ForkOnly\t'"${fingerprint}"$'\tintentionally superseded in test' \
+    $'internal/runtime/executor|func|TestForkOnly\t'"${fingerprint}"$'\tintentionally superseded in test' \
+    $'internal/runtime/executor|type|ForkType\t'"${fingerprint}"$'\tintentionally superseded in test' \
+    > "${fork}/.github/upstream-sync-dropped-symbols.tsv"
+  (cd "${fork}" && UPSTREAM_SYNC_PLAN_FINGERPRINT="${fingerprint}" \
+    "${HELPER}" check-symbol-survival "${baseline}" "${upstream_ref}") > "${out}" 2>&1
+  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: internal/runtime/executor|func|ForkOnly"
+  assert_contains "${out}" "[SKIP] dropped overlay symbol allowlisted: internal/runtime/executor|func|TestForkOnly"
+  assert_contains "${out}" "[OK] symbol-survival gate passed with target-bound removals."
 }
 
 main() {

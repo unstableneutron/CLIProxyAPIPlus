@@ -6,6 +6,8 @@ VERIFIER="${SCRIPT_DIR}/verify-hotfix-release.sh"
 FIXTURES="${SCRIPT_DIR}/testdata/upstream-release"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 BASE_TAG=v7.2.131-unstableneutron.0
 TAG=v7.2.131-unstableneutron.1
 ORIGINAL_SOURCE_TAG=v7.2.131
@@ -276,7 +278,7 @@ test_receipt_binds_release_and_upstream_state() {
     "${root}" "checksum for" \
     "${root}/asset-output.json" "" "${root}/wrong-asset.json"
 
-  sed -i 's/  / */' "${root}/checksums.txt"
+  portable_sed_in_place 's/  / */' "${root}/checksums.txt"
   checksums_sha=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
   jq --arg digest "sha256:${checksums_sha}" \
     '(.assets[] | select(.name == "checksums.txt") | .digest) = $digest' \
@@ -289,9 +291,9 @@ test_receipt_binds_release_and_upstream_state() {
   local separator_case
   for separator_case in single-space tab; do
     if [ "${separator_case}" = single-space ]; then
-      sed -i 's/  / /' "${root}/checksums.txt"
+      portable_sed_in_place 's/  / /' "${root}/checksums.txt"
     else
-      sed -i $'s/  /\t/' "${root}/checksums.txt"
+      portable_sed_in_place $'s/  /\t/' "${root}/checksums.txt"
     fi
     checksums_sha=$(sha256sum "${root}/checksums.txt" | awk '{ print $1 }')
     jq --arg digest "sha256:${checksums_sha}" \

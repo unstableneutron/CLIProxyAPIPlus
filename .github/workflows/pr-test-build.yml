@@ -11,16 +11,20 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
+      # actions/checkout v7.0.0
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
+      # actions/setup-go v6.5.0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
           cache: true
@@ -28,3 +32,68 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  sync-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      # actions/checkout v7.0.0
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+
+      - name: Detect synchronization policy changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          CHANGED=false
+          while IFS= read -r path; do
+            case "${path}" in
+              .amp/plugins/release-published-webhook/*|\
+              .agents/skills/validating-upstream-sync/*|\
+              .github/release-asset-contract.json|\
+              .github/scripts/*|\
+              .github/upstream-sync-*.tsv|\
+              .github/workflows-disabled/*|\
+              .github/workflows/*|\
+              .goreleaser.yml|\
+              README-ccs-fork.md)
+                CHANGED=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
+          echo "changed=${CHANGED}" >> "${GITHUB_OUTPUT}"
+
+      # actions/setup-go v6.5.0
+      - name: Set up Go
+        if: steps.changes.outputs.changed == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install synchronization policy tools
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          npm install --global bun@1.3.14
+
+      - name: Validate synchronization policy
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          .github/scripts/validate-upstream-sync.sh \
+            --mode tooling \
+            --report-dir /tmp/upstream-sync-policy-validation
+
+      - name: Upload failure logs
+        if: failure() && steps.changes.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: upstream-sync-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/upstream-sync-policy-validation
+          if-no-files-found: error
+          retention-days: 14

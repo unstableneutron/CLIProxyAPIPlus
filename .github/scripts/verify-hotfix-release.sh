@@ -8,6 +8,8 @@ CHAIN_VERIFIER="${SCRIPT_DIR}/verify-hotfix-chain.sh"
 source "${SCRIPT_DIR}/hotfix-release-tag.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 
 die() {
   echo "[hotfix-release-verifier] $*" >&2

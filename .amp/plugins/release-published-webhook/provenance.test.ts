@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import releaseAssetContract from "../../../.github/release-asset-contract.json";
 import sharedRegistryIndex from "../../../.github/scripts/testdata/upstream-release/image-index.json";
+import verifierConformance from "../../../.github/scripts/testdata/upstream-release/verifier-conformance.json";
 import {
   BOT_ID,
   BOT_LOGIN,
@@ -1261,6 +1262,92 @@ describe("upstream release provenance", () => {
     refreshUpstreamSchema3Evidence(fixture);
     await expect(validate(fixture)).rejects.toThrow();
   });
+
+  test.each(verifierConformance.vectors)(
+    "matches shared verifier vector $id",
+    async (vector) => {
+      const fixture = releaseFixture();
+      if (vector.surface === "release-assets") {
+        const assets = fixture.canonical.assets as Record<string, any>[];
+        const archiveIndex = assets.findIndex(
+          (asset) => asset.name !== "checksums.txt" && !asset.name.endsWith("-receipt.json"),
+        );
+        switch (vector.mutation) {
+          case "none":
+            break;
+          case "missing":
+            assets.splice(archiveIndex, 1);
+            break;
+          case "extra":
+            assets.push(
+              makeAsset(9999, "notes.txt", bytes("unexpected"), fixture.assetBytes),
+            );
+            break;
+          case "duplicate":
+            assets.push(structuredClone(assets[archiveIndex]));
+            break;
+          case "renamed":
+            assets[archiveIndex].name = `${assets[archiveIndex].name}.renamed`;
+            break;
+          default:
+            throw new Error(`unknown shared release mutation ${vector.mutation}`);
+        }
+      } else if (vector.surface === "oci-index") {
+        const manifests = fixture.registry.index.manifests as Record<string, any>[];
+        switch (vector.mutation) {
+          case "missing-amd64":
+            fixture.registry.index.manifests = manifests.filter(
+              (manifest) => manifest.platform?.architecture !== "amd64",
+            );
+            break;
+          case "missing-arm64":
+            fixture.registry.index.manifests = manifests.filter(
+              (manifest) => manifest.platform?.architecture !== "arm64",
+            );
+            break;
+          case "extra":
+            manifests.push({
+              digest: `sha256:${"e".repeat(64)}`,
+              mediaType: manifestMediaType,
+              platform: { os: "windows", architecture: "amd64" },
+            });
+            break;
+          case "duplicate":
+            manifests.push(structuredClone(manifests[0]));
+            break;
+          case "malformed-attestation":
+            delete manifests.find(
+              (manifest) =>
+                manifest.annotations?.["vnd.docker.reference.type"] ===
+                "attestation-manifest",
+            )!.annotations["vnd.docker.reference.digest"];
+            break;
+          case "duplicate-attestation":
+            manifests.push(
+              structuredClone(
+                manifests.find(
+                  (manifest) =>
+                    manifest.annotations?.["vnd.docker.reference.type"] ===
+                    "attestation-manifest",
+                )!,
+              ),
+            );
+            break;
+          default:
+            throw new Error(`unknown shared OCI mutation ${vector.mutation}`);
+        }
+        fixture.registry.refreshIndex();
+      } else {
+        throw new Error(`unknown shared verifier surface ${vector.surface}`);
+      }
+
+      if (vector.expected === "accept") {
+        await expect(validate(fixture)).resolves.toBeDefined();
+      } else {
+        await expect(validate(fixture)).rejects.toThrow();
+      }
+    },
+  );
 
   test.each([
     [404, RejectedDelivery],

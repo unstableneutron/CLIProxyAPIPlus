@@ -6,6 +6,8 @@ PUBLISHER="${SCRIPT_DIR}/publish-staged-release.sh"
 STAGER="${SCRIPT_DIR}/stage-release-assets.sh"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/release-assets.sh"
+# shellcheck source=.github/scripts/portable-tools.sh
+source "${SCRIPT_DIR}/portable-tools.sh"
 
 TAG=v7.2.135-unstableneutron.2
 COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -28,8 +30,12 @@ set -euo pipefail
 
 asset_json() {
   local id=$1 name=$2 file=$3 digest size
-  digest="sha256:$(sha256sum "${file}" | awk '{ print $1 }')"
-  size=$(stat -c %s "${file}")
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="sha256:$(sha256sum "${file}" | awk '{ print $1 }')"
+  else
+    digest="sha256:$(shasum -a 256 "${file}" | awk '{ print $1 }')"
+  fi
+  size=$(stat -c %s "${file}" 2>/dev/null || stat -f %z "${file}")
   jq -n --argjson id "${id}" --arg name "${name}" --arg digest "${digest}" --argjson size "${size}" '{
     id: $id, name: $name, size: $size, digest: $digest, state: "uploaded",
     url: ("https://api.github.com/repos/unstableneutron/CLIProxyAPIPlus/releases/assets/" + ($id | tostring)),
@@ -91,7 +97,7 @@ case "${method}:${path}" in
     cat "${STUB_RELEASE_FILE}"
     ;;
   GET:/repos/*/releases?per_page=100)
-    if [ -f "${STUB_RELEASE_FILE}" ]; then
+    if [ -f "${STUB_RELEASE_FILE}" ] && [ "${STUB_HIDE_DRAFT_FROM_LIST:-false}" != true ]; then
       jq -n --slurpfile release "${STUB_RELEASE_FILE}" '[$release]'
     else
       printf '[[]]\n'
@@ -328,7 +334,10 @@ test_fresh_and_every_partial_draft_boundary() {
   local root count expected_count
   root=$(mktemp -d)
   setup_fixture "${root}"
-  run_publisher "${root}" >/dev/null
+  run_publisher "${root}" \
+    RELEASE_RECONCILE_DELAY_SECONDS=0 \
+    STUB_HIDE_DRAFT_FROM_TAG=true \
+    STUB_HIDE_DRAFT_FROM_LIST=true >/dev/null
   [ "$(jq -r '.draft' "${root}/release.json")" = false ] || fail "fresh release remained draft"
   expected_count=$(expected_release_assets_json "${TAG}" | jq length)
   [ "$(jq '.assets | length' "${root}/release.json")" -eq "${expected_count}" ] \
