@@ -292,7 +292,7 @@ func responsesPayloadContainsOutputMarker(payload []byte, marker string) bool {
 	var envelope struct {
 		Type     string                  `json:"type"`
 		Delta    string                  `json:"delta"`
-		Text     string                  `json:"text"`
+		Text     json.RawMessage         `json:"text"`
 		Item     responsesMarkerOutput   `json:"item"`
 		Output   []responsesMarkerOutput `json:"output"`
 		Response struct {
@@ -306,7 +306,8 @@ func responsesPayloadContainsOutputMarker(payload []byte, marker string) bool {
 	case "response.output_text.delta":
 		return strings.Contains(envelope.Delta, marker)
 	case "response.output_text.done":
-		return strings.Contains(envelope.Text, marker)
+		var text string
+		return json.Unmarshal(envelope.Text, &text) == nil && strings.Contains(text, marker)
 	}
 	return responsesOutputContainsMarker([]responsesMarkerOutput{envelope.Item}, marker) ||
 		responsesOutputContainsMarker(envelope.Output, marker) ||
