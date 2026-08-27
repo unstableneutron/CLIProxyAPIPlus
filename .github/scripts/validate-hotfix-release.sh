@@ -137,11 +137,14 @@ SYNC_ID=$(state_value SYNC_ID)
 PLAN_FINGERPRINT=$(state_value PLAN_FINGERPRINT)
 RECORDED_TAG=$(state_value EXPECTED_FORK_TAG)
 ORIGINAL_TAG=$(state_value ORIGINAL_TAG)
+SYMBOL_BASELINE_COMMIT=$(state_value BASE_FORK_COMMIT)
 if [ -z "${SYNC_ID}" ]; then
   die "upstream-sync state is missing SYNC_ID"
 fi
 [[ "${PLAN_FINGERPRINT}" =~ ^[0-9a-f]{40}$ ]] \
   || die "upstream-sync state has an invalid PLAN_FINGERPRINT"
+[[ "${SYMBOL_BASELINE_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
+  || die "upstream-sync state has an invalid BASE_FORK_COMMIT"
 parse_fork_release_tag "${RECORDED_TAG}" \
   || die "upstream-sync state records an invalid accepted root tag"
 ROOT_PREFIX=${FORK_TAG_PREFIX}
@@ -158,6 +161,8 @@ fi
 git rev-parse --verify "refs/tags/${RECORDED_TAG}^{commit}" >/dev/null 2>&1 \
   || die "accepted upstream root tag ${RECORDED_TAG} is not fetched"
 ROOT_COMMIT=$(git rev-parse "refs/tags/${RECORDED_TAG}^{}")
+git merge-base --is-ancestor "${SYMBOL_BASELINE_COMMIT}" "${ROOT_COMMIT}" \
+  || die "symbol baseline ${SYMBOL_BASELINE_COMMIT} is not an ancestor of accepted root ${ROOT_COMMIT}"
 STATE_SHA256=$(sha256sum "${EXPECTED_STATE}" | awk '{ print $1 }')
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
@@ -168,6 +173,7 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "base_commit=${BASE_COMMIT}"
     echo "root_tag=${RECORDED_TAG}"
     echo "root_commit=${ROOT_COMMIT}"
+    echo "symbol_baseline_commit=${SYMBOL_BASELINE_COMMIT}"
     echo "sync_id=${SYNC_ID}"
     echo "plan_fingerprint=${PLAN_FINGERPRINT}"
     echo "upstream_state_sha256=${STATE_SHA256}"
