@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+RECEIPT_TEMP_DIR=""
 
 
 die() {
@@ -245,7 +246,7 @@ cmd_finalize_release_ledger() {
 
 cmd_attach_receipt() {
   local tag=$1 expected_commit=$2 main_policy=$3 receipt_file=$4
-  local assets output_dir
+  local assets
   assets=$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
   if grep -Fx upstream-sync-receipt.json <<< "${assets}" >/dev/null || \
      grep -Fx hotfix-release-receipt.json <<< "${assets}" >/dev/null; then
@@ -253,14 +254,17 @@ cmd_attach_receipt() {
   fi
   "${SCRIPT_DIR}/revalidate-release-target.sh" "${tag}" "${expected_commit}" "${main_policy}"
   gh release upload "${tag}" "${receipt_file}" --repo "${GITHUB_REPOSITORY}"
-  output_dir=$(mktemp -d)
-  trap 'rm -rf "${output_dir}"' EXIT
+  RECEIPT_TEMP_DIR=$(mktemp -d)
+  trap 'if [ -n "${RECEIPT_TEMP_DIR:-}" ]; then rm -rf "${RECEIPT_TEMP_DIR}"; fi' EXIT
   gh release download "${tag}" \
     --repo "${GITHUB_REPOSITORY}" \
     --pattern "$(basename -- "${receipt_file}")" \
-    --dir "${output_dir}"
-  cmp -s "${receipt_file}" "${output_dir}/$(basename -- "${receipt_file}")" \
+    --dir "${RECEIPT_TEMP_DIR}"
+  cmp -s "${receipt_file}" "${RECEIPT_TEMP_DIR}/$(basename -- "${receipt_file}")" \
     || die "published upstream receipt bytes differ"
+  rm -rf "${RECEIPT_TEMP_DIR}"
+  RECEIPT_TEMP_DIR=""
+  trap - EXIT
 }
 
 cmd_close_superseded_prs() {
