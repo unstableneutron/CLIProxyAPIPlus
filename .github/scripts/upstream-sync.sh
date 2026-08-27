@@ -1215,7 +1215,8 @@ cmd_validate_repair() {
     .github/workflows-disabled \
     .github/scripts \
     .github/upstream-sync-ownership.tsv \
-    .github/upstream-sync-invariants.tsv)
+    .github/upstream-sync-invariants.tsv \
+    .github/upstream-sync-dropped-symbols.tsv)
   [ -z "${restricted_changes}" ] \
     || die "repair candidate changes protected sync-policy paths: $(tr '\n' ' ' <<< "${restricted_changes}")"
 

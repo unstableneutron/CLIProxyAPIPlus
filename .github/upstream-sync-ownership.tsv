@@ -11,6 +11,7 @@ fork-owned	docker-compose.yml
 fork-owned	.agents/
 fork-owned	.amp/plugins/release-published-webhook/
 fork-owned	.amp/plugins/upstream-sync-v2-webhook/
+fork-owned	.github/fork-maintenance-audit.md
 fork-owned	.github/release-asset-contract.json
 fork-owned	.github/scripts/upstream-sync.sh
 fork-owned	.github/scripts/upstream-sync-workflow.sh
