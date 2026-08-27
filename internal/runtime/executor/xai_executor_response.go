@@ -318,10 +318,10 @@ func normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(body []byte, shouldFold 
 		var isFolded bool
 		if dispatcherName != "" {
 			isFolded = true
+		} else if !shouldFold && xaiHasFunctionToolNamed(body, qualifiedName) {
+			isFolded = false
 		} else if xaiHasFunctionToolNamed(body, namespaceName) {
 			isFolded = true
-		} else if xaiHasFunctionToolNamed(body, qualifiedName) {
-			isFolded = false
 		} else {
 			isFolded = shouldFold
 		}

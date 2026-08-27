@@ -4699,6 +4699,58 @@ func TestClampXAIToolsLimit_PreservesDispatchersOverRegularTools(t *testing.T) {
 	}
 }
 
+func TestPrepareResponsesRequest_ClampPreservesReferencedFoldedDispatcher(t *testing.T) {
+	namespaceTools := make([]string, 0, xaiMaxTools+1)
+	for i := 0; i <= xaiMaxTools; i++ {
+		namespaceTools = append(namespaceTools, fmt.Sprintf(
+			`{"type":"namespace","name":"namespace_%d","tools":[{"type":"function","name":"child","parameters":{"type":"object"}}]}`,
+			i,
+		))
+	}
+	payload := []byte(fmt.Sprintf(
+		`{"model":"grok-4.6","tools":[%s],"tool_choice":{"type":"function","namespace":"namespace_%d","name":"child"},"input":[{"type":"function_call","namespace":"namespace_%d","name":"child","call_id":"call_1","arguments":"{}"},{"role":"user","content":"continue"}]}`,
+		strings.Join(namespaceTools, ","),
+		xaiMaxTools,
+		xaiMaxTools-1,
+	))
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequestTo(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, false, sdktranslator.FormatOpenAIResponse)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequestTo error = %v", err)
+	}
+
+	historicalName := gjson.GetBytes(prepared.body, "input.0.name").String()
+	if historicalName == "" {
+		t.Fatalf("historical call name is empty; body=%s", prepared.body)
+	}
+	if gjson.GetBytes(prepared.body, "input.0.namespace").Exists() {
+		t.Fatalf("historical call namespace was not removed: %s", prepared.body)
+	}
+	forcedName := gjson.GetBytes(prepared.body, "tool_choice.name").String()
+	if forcedName == "" {
+		t.Fatalf("forced tool choice name is empty; body=%s", prepared.body)
+	}
+	if gjson.GetBytes(prepared.body, "tool_choice.namespace").Exists() {
+		t.Fatalf("forced tool choice namespace was not removed: %s", prepared.body)
+	}
+	found := make(map[string]bool)
+	for _, tool := range gjson.GetBytes(prepared.body, "tools").Array() {
+		found[tool.Get("name").String()] = true
+	}
+	if !found[historicalName] {
+		t.Fatalf("referenced dispatcher %q was dropped by clamp; body=%s", historicalName, prepared.body)
+	}
+	if !found[forcedName] {
+		t.Fatalf("forced dispatcher %q was dropped by clamp; body=%s", forcedName, prepared.body)
+	}
+}
+
 func xaiFoldedNamespaceTestBody(namespaceName string, childCount int, toolChoice string, extraTools ...string) []byte {
 	childTools := make([]string, 0, childCount)
 	for i := 0; i < childCount; i++ {
@@ -4756,6 +4808,42 @@ func TestNormalizeXAITools_FoldDispatcherNameAvoidsPlainToolCollision(t *testing
 	}
 	if got := gjson.GetBytes(restored, "item.namespace").String(); got != "lookup" {
 		t.Fatalf("restored dispatcher namespace = %q, want lookup; event=%s", got, restored)
+	}
+}
+
+func TestNormalizeXAITools_FlatHistoryPrefersQualifiedToolOverPlainCollision(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"type":"function","name":"mcp__exa","parameters":{"type":"object"}},
+			{"type":"namespace","name":"mcp__exa","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}
+		],
+		"input": [
+			{"type":"function_call","name":"search","namespace":"mcp__exa","call_id":"call_1","arguments":"{\"query\":\"test\"}"}
+		],
+		"tool_choice": {"type":"function","name":"search","namespace":"mcp__exa"}
+	}`)
+	shouldFold := xaiShouldFoldNamespaceTools(body, false)
+	if shouldFold {
+		t.Fatal("test fixture must stay in flat mode")
+	}
+	out, refs := normalizeXAIToolsAndCollectNamespaceRefs(body, shouldFold)
+	out = normalizeXAINamespaceToolChoiceWithFoldAndRefs(out, shouldFold, refs)
+	out = normalizeXAIInputNamespaceToolCallsWithFoldAndRefs(out, shouldFold, refs)
+
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "mcp__exa__search" {
+		t.Fatalf("tool choice name = %q, want qualified child; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "tool_choice.namespace").Exists() {
+		t.Fatalf("tool choice namespace was not removed: %s", out)
+	}
+	if got := gjson.GetBytes(out, "input.0.name").String(); got != "mcp__exa__search" {
+		t.Fatalf("historical call name = %q, want qualified child; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "input.0.namespace").Exists() {
+		t.Fatalf("historical call namespace was not removed: %s", out)
+	}
+	if got := gjson.GetBytes(out, "input.0.arguments").String(); got != `{"query":"test"}` {
+		t.Fatalf("historical call arguments = %q, want original child arguments; body=%s", got, out)
 	}
 }
 

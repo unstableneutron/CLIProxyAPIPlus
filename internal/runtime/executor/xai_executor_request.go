@@ -1283,14 +1283,18 @@ func clampXAIToolsLimit(body []byte, maxTools int, refs map[string]xaiNamespaceT
 		return body
 	}
 	allTools := tools.Array()
+	requiredToolNames := collectXAIRequiredToolNames(body, refs)
 	var nativeXSearchTool json.RawMessage
 	nativeXSearchRegularIndex := -1
+	var requiredTools []json.RawMessage
 	var dispatcherTools []json.RawMessage
 	var regularTools []json.RawMessage
 	for _, tool := range allTools {
 		rawTool := json.RawMessage(tool.Raw)
 		name := strings.TrimSpace(tool.Get("name").String())
-		if ref, ok := refs[name]; ok && ref.isDispatcher {
+		if _, required := requiredToolNames[name]; required {
+			requiredTools = append(requiredTools, rawTool)
+		} else if ref, ok := refs[name]; ok && ref.isDispatcher {
 			dispatcherTools = append(dispatcherTools, rawTool)
 		} else {
 			if nativeXSearchTool == nil && tool.Get("type").String() == xaiXSearchToolType {
@@ -1302,12 +1306,18 @@ func clampXAIToolsLimit(body []byte, maxTools int, refs map[string]xaiNamespaceT
 	}
 
 	capped := make([]json.RawMessage, 0, maxTools)
-	regularToolsKept := 0
-	if len(dispatcherTools) >= maxTools {
-		capped = append(capped, dispatcherTools[:maxTools]...)
+	if len(requiredTools) >= maxTools {
+		capped = append(capped, requiredTools[:maxTools]...)
 	} else {
+		capped = append(capped, requiredTools...)
+	}
+	remainingLimit := maxTools - len(capped)
+	regularToolsKept := 0
+	if len(dispatcherTools) >= remainingLimit {
+		capped = append(capped, dispatcherTools[:remainingLimit]...)
+	} else if remainingLimit > 0 {
 		capped = append(capped, dispatcherTools...)
-		remainingSlots := maxTools - len(dispatcherTools)
+		remainingSlots := remainingLimit - len(dispatcherTools)
 		if len(regularTools) > remainingSlots {
 			capped = append(capped, regularTools[:remainingSlots]...)
 			regularToolsKept = remainingSlots
@@ -1316,7 +1326,7 @@ func clampXAIToolsLimit(body []byte, maxTools int, refs map[string]xaiNamespaceT
 			regularToolsKept = len(regularTools)
 		}
 	}
-	if nativeXSearchTool != nil && nativeXSearchRegularIndex >= regularToolsKept && len(capped) > 0 {
+	if remainingLimit > 0 && nativeXSearchTool != nil && nativeXSearchRegularIndex >= regularToolsKept && len(capped) > 0 {
 		capped[len(capped)-1] = nativeXSearchTool
 	}
 
@@ -1330,6 +1340,40 @@ func clampXAIToolsLimit(body []byte, maxTools int, refs map[string]xaiNamespaceT
 	}
 	updated = pruneXAIOrphanedToolChoice(updated)
 	return normalizeXAIToolChoiceForTools(updated)
+}
+
+func collectXAIRequiredToolNames(body []byte, refs map[string]xaiNamespaceToolRef) map[string]struct{} {
+	required := make(map[string]struct{})
+	mark := func(name, namespace string) {
+		name = strings.TrimSpace(name)
+		namespace = strings.TrimSpace(namespace)
+		if namespace != "" {
+			if dispatcherName := xaiNamespaceDispatcherName(refs, namespace); dispatcherName != "" {
+				required[dispatcherName] = struct{}{}
+				return
+			}
+			name = qualifyXAINamespaceToolName(namespace, name)
+		}
+		if name != "" {
+			required[name] = struct{}{}
+		}
+	}
+
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "function_call" {
+			mark(item.Get("name").String(), item.Get("namespace").String())
+		}
+	}
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.Get("type").String() == xaiFunctionToolType {
+		mark(toolChoice.Get("name").String(), toolChoice.Get("namespace").String())
+	}
+	for _, choice := range toolChoice.Get("tools").Array() {
+		if choice.Get("type").String() == xaiFunctionToolType {
+			mark(choice.Get("name").String(), choice.Get("namespace").String())
+		}
+	}
+	return required
 }
 
 // promoteXAIAdditionalTools moves Responses Lite tool declarations to the
@@ -1544,10 +1588,10 @@ func normalizeXAINamespaceToolChoiceWithFoldAndRefs(body []byte, shouldFold bool
 			if ref, exists := refs[qualifiedName]; exists && !ref.isDispatcher {
 				targetName = xaiNamespaceDispatcherName(refs, namespaceName)
 			}
+		} else if !shouldFold && xaiHasFunctionToolNamed(body, qualifiedName) {
+			targetName = qualifiedName
 		} else if xaiHasFunctionToolNamed(body, namespaceName) {
 			targetName = namespaceName
-		} else if xaiHasFunctionToolNamed(body, qualifiedName) {
-			targetName = qualifiedName
 		} else if shouldFold {
 			targetName = namespaceName
 		} else {

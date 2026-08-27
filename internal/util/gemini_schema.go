@@ -1030,29 +1030,37 @@ func flattenAnyOfOneOf(jsonStr string) string {
 				selected = appendHintRaw(selected, hint)
 			}
 
-			jsonStr = setRawAt(jsonStr, parentPath, selected)
+			jsonStr = mergeWidenedUnionIntoParentAtPath(jsonStr, parentPath, gjson.Parse(selected))
+			jsonStr, _ = sjson.Delete(jsonStr, p)
 		}
 	}
 	return jsonStr
 }
 
 func widenObjectUnion(jsonStr, parentPath string, parent gjson.Result, items []gjson.Result) (string, bool) {
-	parentHasProperties := parent.Get("properties").IsObject()
-	if parent.Get("type").String() != "object" && !parentHasProperties {
+	parentHasObject, parentHasNull, parentHasOther, parentHasExplicitType := objectUnionTypeKinds(parent)
+	if parentHasExplicitType && (!parentHasObject || parentHasOther) {
 		return jsonStr, false
 	}
+	parentAllowsNull := !parentHasExplicitType || parentHasNull
 
 	branches := make([]gjson.Result, 0, len(items))
 	hasNull := false
 	for _, item := range items {
-		if item.Get("type").String() == "null" {
-			hasNull = true
+		hasObject, itemHasNull, hasOther, hasExplicitType := objectUnionTypeKinds(item)
+		if hasExplicitType && itemHasNull && !hasObject && !hasOther {
+			hasNull = hasNull || parentAllowsNull
 			continue
 		}
-		if !item.IsObject() && !parentHasProperties {
+		if !item.IsObject() {
 			return jsonStr, false
 		}
-		if itemType := item.Get("type").String(); itemType != "" && itemType != "object" && !parentHasProperties {
+		if hasExplicitType {
+			if !hasObject || hasOther {
+				return jsonStr, false
+			}
+			hasNull = hasNull || (itemHasNull && parentAllowsNull)
+		} else if !isObjectUnionSchema(item) {
 			return jsonStr, false
 		}
 		branches = append(branches, item)
@@ -1061,18 +1069,27 @@ func widenObjectUnion(jsonStr, parentPath string, parent gjson.Result, items []g
 		return jsonStr, false
 	}
 
-	if parent.Get("type").String() == "" {
+	if parent.Get("type").String() != "object" {
 		updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "object")
 		jsonStr = string(updated)
 	}
 
 	var commonRequired []string
 	allAdditionalPropertiesFalse := true
+	branchProperties := make(map[string]string)
+	branchPropertyOrder := make([]string, 0)
 	for i, branch := range branches {
 		if branchProps := branch.Get("properties"); branchProps.IsObject() {
 			branchProps.ForEach(func(propKey, propVal gjson.Result) bool {
-				destination := joinPath(parentPath, "properties."+escapeGJSONPathKey(propKey.String()))
-				jsonStr = mergeUnionSchemaAtPath(jsonStr, destination, propVal)
+				name := propKey.String()
+				if existing, ok := branchProperties[name]; ok {
+					scratch := `{"schema":` + existing + `}`
+					scratch = mergeUnionSchemaAtPath(scratch, "schema", propVal)
+					branchProperties[name] = gjson.Get(scratch, "schema").Raw
+				} else {
+					branchProperties[name] = propVal.Raw
+					branchPropertyOrder = append(branchPropertyOrder, name)
+				}
 				return true
 			})
 		}
@@ -1094,6 +1111,10 @@ func widenObjectUnion(jsonStr, parentPath string, parent gjson.Result, items []g
 			allAdditionalPropertiesFalse = false
 		}
 	}
+	for _, name := range branchPropertyOrder {
+		destination := joinPath(parentPath, "properties."+escapeGJSONPathKey(name))
+		jsonStr = mergeWidenedUnionIntoParentAtPath(jsonStr, destination, gjson.Parse(branchProperties[name]))
+	}
 
 	requiredPath := joinPath(parentPath, "required")
 	required := getStrings(jsonStr, requiredPath)
@@ -1108,15 +1129,137 @@ func widenObjectUnion(jsonStr, parentPath string, parent gjson.Result, items []g
 	}
 
 	additionalPropertiesPath := joinPath(parentPath, "additionalProperties")
-	if allAdditionalPropertiesFalse && !gjson.Get(jsonStr, additionalPropertiesPath).Exists() {
+	if allAdditionalPropertiesFalse {
 		updated, _ := sjson.SetBytes([]byte(jsonStr), additionalPropertiesPath, false)
 		jsonStr = string(updated)
 	}
 	if hasNull {
 		updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
 		jsonStr = string(updated)
+		currentParent := gjson.Get(jsonStr, parentPath)
+		if parentPath == "" {
+			currentParent = gjson.Parse(jsonStr)
+		}
+		hinted := appendHintRaw(currentParent.Raw, "Accepts: null | object")
+		jsonStr = setRawAt(jsonStr, parentPath, hinted)
 	}
 	return jsonStr, true
+}
+
+func mergeWidenedUnionIntoParentAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if destination == "" {
+		existing = gjson.Parse(jsonStr)
+	}
+	if !existing.Exists() {
+		return setRawAt(jsonStr, destination, incoming.Raw)
+	}
+	if existing.Raw == "true" {
+		return setRawAt(jsonStr, destination, incoming.Raw)
+	}
+	if existing.Raw == "false" || incoming.Raw == "true" {
+		return jsonStr
+	}
+	if incoming.Raw == "false" {
+		return setRawAt(jsonStr, destination, incoming.Raw)
+	}
+	if !existing.IsObject() || !incoming.IsObject() {
+		return jsonStr
+	}
+
+	incoming.ForEach(func(key, value gjson.Result) bool {
+		child := joinPath(destination, escapeGJSONPathKey(key.String()))
+		switch key.String() {
+		case "required":
+			jsonStr = unionStringArrayAtPath(jsonStr, child, value)
+		case "enum":
+			jsonStr = intersectEnumAtPath(jsonStr, child, value)
+		case "description":
+			existingDescription := gjson.Get(jsonStr, child).String()
+			incomingDescription := value.String()
+			mergedDescription := incomingDescription
+			if existingDescription != "" &&
+				incomingDescription != existingDescription &&
+				!strings.HasPrefix(incomingDescription, existingDescription+" ") {
+				mergedDescription = existingDescription + " (" + incomingDescription + ")"
+			}
+			if mergedDescription != "" {
+				updated, _ := sjson.SetBytes([]byte(jsonStr), child, mergedDescription)
+				jsonStr = string(updated)
+			}
+		case "additionalProperties":
+			if value.Raw == "false" {
+				updated, _ := sjson.SetBytes([]byte(jsonStr), child, false)
+				jsonStr = string(updated)
+			} else if !gjson.Get(jsonStr, child).Exists() {
+				updated, _ := sjson.SetRawBytes([]byte(jsonStr), child, []byte(value.Raw))
+				jsonStr = string(updated)
+			}
+		default:
+			jsonStr = mergeWidenedUnionIntoParentAtPath(jsonStr, child, value)
+		}
+		return true
+	})
+	return jsonStr
+}
+
+func unionStringArrayAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	values := getStrings(jsonStr, destination)
+	for _, value := range incoming.Array() {
+		if name := value.String(); name != "" && !contains(values, name) {
+			values = append(values, name)
+		}
+	}
+	updated, _ := sjson.SetBytes([]byte(jsonStr), destination, values)
+	return string(updated)
+}
+
+func intersectEnumAtPath(jsonStr, destination string, incoming gjson.Result) string {
+	existing := gjson.Get(jsonStr, destination)
+	if !existing.Exists() {
+		updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(incoming.Raw))
+		return string(updated)
+	}
+	allowed := make(map[string]struct{})
+	for _, value := range incoming.Array() {
+		allowed[value.Raw] = struct{}{}
+	}
+	common := make([]string, 0, len(existing.Array()))
+	for _, value := range existing.Array() {
+		if _, ok := allowed[value.Raw]; ok {
+			common = append(common, value.Raw)
+		}
+	}
+	updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte("["+strings.Join(common, ",")+"]"))
+	return string(updated)
+}
+
+func objectUnionTypeKinds(schema gjson.Result) (hasObject, hasNull, hasOther, explicit bool) {
+	typeValue := schema.Get("type")
+	if !typeValue.Exists() {
+		return false, false, false, false
+	}
+	explicit = true
+	types := typeValue.Array()
+	if !typeValue.IsArray() {
+		types = []gjson.Result{typeValue}
+	}
+	for _, item := range types {
+		switch item.String() {
+		case "object":
+			hasObject = true
+		case "null":
+			hasNull = true
+		default:
+			hasOther = true
+		}
+	}
+	return hasObject, hasNull, hasOther, explicit
 }
 
 func mergeUnionSchemaAtPath(jsonStr, destination string, incoming gjson.Result) string {
@@ -1129,15 +1272,99 @@ func mergeUnionSchemaAtPath(jsonStr, destination string, incoming gjson.Result) 
 		return jsonStr
 	}
 
+	objectSchemas := isObjectUnionSchema(existing) && isObjectUnionSchema(incoming)
+	if objectSchemas {
+		jsonStr = intersectUnionRequiredAtPath(jsonStr, destination, existing, incoming)
+		jsonStr = loosenUnionAdditionalPropertiesAtPath(jsonStr, destination, existing, incoming)
+	}
+	unionEnums := existing.Get("enum").Exists() && incoming.Get("enum").Exists()
+	if !unionEnums {
+		updated, _ := sjson.Delete(jsonStr, joinPath(destination, "enum"))
+		jsonStr = updated
+	}
+	if !objectSchemas {
+		jsonStr = loosenUnionTypeAtPath(jsonStr, destination, existing, incoming)
+	}
+
 	incoming.ForEach(func(key, value gjson.Result) bool {
+		if objectSchemas && (key.String() == "required" || key.String() == "additionalProperties") {
+			return true
+		}
+		if key.String() == "type" && !objectSchemas {
+			return true
+		}
 		child := joinPath(destination, escapeGJSONPathKey(key.String()))
 		if key.String() == "enum" {
-			jsonStr = mergeUnionEnumAtPath(jsonStr, child, value)
+			if unionEnums {
+				jsonStr = mergeUnionEnumAtPath(jsonStr, child, value)
+			}
 		} else {
 			jsonStr = mergeUnionSchemaAtPath(jsonStr, child, value)
 		}
 		return true
 	})
+	return jsonStr
+}
+
+func isObjectUnionSchema(schema gjson.Result) bool {
+	hasObject, _, hasOther, hasExplicitType := objectUnionTypeKinds(schema)
+	return (hasExplicitType && hasObject && !hasOther) ||
+		schema.Get("properties").IsObject() ||
+		schema.Get("required").IsArray()
+}
+
+func intersectUnionRequiredAtPath(jsonStr, destination string, existing, incoming gjson.Result) string {
+	incomingRequired := make(map[string]struct{})
+	for _, name := range incoming.Get("required").Array() {
+		incomingRequired[name.String()] = struct{}{}
+	}
+	common := filterStrings(getStrings(existing.Raw, "required"), incomingRequired)
+	requiredPath := joinPath(destination, "required")
+	if len(common) == 0 {
+		updated, _ := sjson.Delete(jsonStr, requiredPath)
+		return updated
+	}
+	updated, _ := sjson.SetBytes([]byte(jsonStr), requiredPath, common)
+	return string(updated)
+}
+
+func loosenUnionAdditionalPropertiesAtPath(jsonStr, destination string, existing, incoming gjson.Result) string {
+	if existing.Get("additionalProperties").Raw == "false" && incoming.Get("additionalProperties").Raw == "false" {
+		return jsonStr
+	}
+	updated, _ := sjson.Delete(jsonStr, joinPath(destination, "additionalProperties"))
+	return updated
+}
+
+func loosenUnionTypeAtPath(jsonStr, destination string, existing, incoming gjson.Result) string {
+	existingType := existing.Get("type")
+	incomingType := incoming.Get("type")
+	if existingType.Exists() && incomingType.Exists() && existingType.Raw == incomingType.Raw {
+		return jsonStr
+	}
+
+	typePath := joinPath(destination, "type")
+	updated, _ := sjson.Delete(jsonStr, typePath)
+	jsonStr = updated
+	types := make([]string, 0, 2)
+	for _, typeValue := range []gjson.Result{existingType, incomingType} {
+		if !typeValue.Exists() {
+			continue
+		}
+		if typeValue.IsArray() {
+			for _, item := range typeValue.Array() {
+				if value := item.String(); value != "" && !contains(types, value) {
+					types = append(types, value)
+				}
+			}
+		} else if value := typeValue.String(); value != "" && !contains(types, value) {
+			types = append(types, value)
+		}
+	}
+	if len(types) > 1 {
+		hinted := appendHintRaw(gjson.Get(jsonStr, destination).Raw, "Accepts: "+strings.Join(types, " | "))
+		jsonStr = setRawAt(jsonStr, destination, hinted)
+	}
 	return jsonStr
 }
 

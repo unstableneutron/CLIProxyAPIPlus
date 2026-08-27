@@ -2314,6 +2314,335 @@ func TestCleanJSONSchemaForAntigravityResponse_RootObjectOneOfWidensBranches(t *
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponse_RootObjectOneOfInfersObject(t *testing.T) {
+	input := `{
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {"alpha": {"type": "string"}},
+				"required": ["alpha"]
+			},
+			{
+				"type": "object",
+				"properties": {"beta": {"type": "integer"}},
+				"required": ["beta"]
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want inferred object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if parsed.Get("oneOf").Exists() {
+		t.Fatalf("oneOf was not removed; cleaned: %s", got)
+	}
+	if !parsed.Get("properties.alpha").Exists() || !parsed.Get("properties.beta").Exists() {
+		t.Fatalf("object union properties were not widened; cleaned: %s", got)
+	}
+	if required := getStrings(got, "required"); len(required) != 0 {
+		t.Fatalf("required = %v, want no branch-specific requirement; cleaned: %s", required, got)
+	}
+}
+
+func TestWidenObjectUnionRejectsScalarBranchWithParentProperties(t *testing.T) {
+	input := `{
+		"properties": {"fixed": {"type": "string"}},
+		"oneOf": [
+			{"type": "object", "properties": {"nested": {"type": "string"}}},
+			{"type": "string"}
+		]
+	}`
+	parent := gjson.Parse(input)
+	if _, ok := widenObjectUnion(input, "", parent, parent.Get("oneOf").Array()); ok {
+		t.Fatal("mixed object and scalar union was incorrectly widened as an object")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_MixedUnionPreservesParentConstraints(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {"fixed": {"type": "string"}},
+		"required": ["fixed"],
+		"oneOf": [
+			{"type": "object", "properties": {"nested": {"type": "string"}}},
+			{"type": "string"}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want parent object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if !parsed.Get("properties.fixed").Exists() || !parsed.Get("properties.nested").Exists() {
+		t.Fatalf("parent or selected-branch properties were lost; cleaned: %s", got)
+	}
+	if required := getStrings(got, "required"); !contains(required, "fixed") {
+		t.Fatalf("parent required = %v, want fixed; cleaned: %s", required, got)
+	}
+	if parsed.Get("oneOf").Exists() {
+		t.Fatalf("oneOf was not removed; cleaned: %s", got)
+	}
+}
+
+func TestWidenObjectUnionRejectsTypeLessNonObjectBranch(t *testing.T) {
+	input := `{
+		"oneOf": [
+			{"type": "object", "properties": {"nested": {"type": "string"}}},
+			{"enum": ["scalar"]}
+		]
+	}`
+	parent := gjson.Parse(input)
+	if _, ok := widenObjectUnion(input, "", parent, parent.Get("oneOf").Array()); ok {
+		t.Fatal("type-less enum branch was incorrectly widened as an object")
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ObjectNullTypeArrayWidensBranches(t *testing.T) {
+	input := `{
+		"oneOf": [
+			{
+				"type": ["object", "null"],
+				"properties": {"alpha": {"type": "string"}}
+			},
+			{
+				"type": "object",
+				"properties": {"beta": {"type": "integer"}}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("type").String() != "object" || !parsed.Get("nullable").Bool() {
+		t.Fatalf("type/nullable = %q/%v, want object/true; cleaned: %s", parsed.Get("type").String(), parsed.Get("nullable").Bool(), got)
+	}
+	if !parsed.Get("properties.alpha").Exists() || !parsed.Get("properties.beta").Exists() {
+		t.Fatalf("object/null union properties were not widened; cleaned: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ParentNullTypeDoesNotBroadenObjectBranches(t *testing.T) {
+	input := `{
+		"type": ["object", "null"],
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {"alpha": {"type": "string"}}
+			},
+			{
+				"type": "object",
+				"properties": {"beta": {"type": "integer"}}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if parsed.Get("nullable").Bool() {
+		t.Fatalf("parent null type incorrectly broadened object-only oneOf; cleaned: %s", got)
+	}
+	if !parsed.Get("properties.alpha").Exists() || !parsed.Get("properties.beta").Exists() {
+		t.Fatalf("object union properties were not widened; cleaned: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ParentObjectRejectsNullUnionBranch(t *testing.T) {
+	input := `{
+		"type": "object",
+		"oneOf": [
+			{"type": "null"},
+			{
+				"type": ["object", "null"],
+				"properties": {"value": {"type": "string"}}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("type").String() != "object" {
+		t.Fatalf("type = %q, want object; cleaned: %s", parsed.Get("type").String(), got)
+	}
+	if parsed.Get("nullable").Bool() {
+		t.Fatalf("null branch escaped parent object constraint; cleaned: %s", got)
+	}
+	if !parsed.Get("properties.value").Exists() {
+		t.Fatalf("object branch properties were not retained; cleaned: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ObjectUnionIntersectsNestedRequired(t *testing.T) {
+	input := `{
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {
+					"payload": {
+						"type": "object",
+						"properties": {"alpha": {"type": "string"}},
+						"required": ["alpha"],
+						"additionalProperties": false
+					}
+				}
+			},
+			{
+				"type": "object",
+				"properties": {
+					"payload": {
+						"type": "object",
+						"properties": {"beta": {"type": "integer"}},
+						"required": ["beta"]
+					}
+				}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if !parsed.Get("properties.payload.properties.alpha").Exists() ||
+		!parsed.Get("properties.payload.properties.beta").Exists() {
+		t.Fatalf("nested object properties were not widened; cleaned: %s", got)
+	}
+	if required := getStrings(got, "properties.payload.required"); len(required) != 0 {
+		t.Fatalf("nested required = %v, want intersection; cleaned: %s", required, got)
+	}
+	if parsed.Get("properties.payload.additionalProperties").Exists() {
+		t.Fatalf("nested additionalProperties=false was not loosened for an unrestricted branch; cleaned: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ObjectUnionLoosensSharedPropertyConstraints(t *testing.T) {
+	input := `{
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {
+					"mode": {"type": "string", "enum": ["alpha"]},
+					"value": {"type": "string"}
+				}
+			},
+			{
+				"type": "object",
+				"properties": {
+					"mode": {"type": "string"},
+					"value": {"type": "integer"}
+				}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("properties.mode.enum").Exists() {
+		t.Fatalf("branch-specific mode enum was retained; cleaned: %s", got)
+	}
+	if parsed.Get("properties.mode.type").String() != "string" {
+		t.Fatalf("mode type = %q, want string; cleaned: %s", parsed.Get("properties.mode.type").String(), got)
+	}
+	if parsed.Get("properties.value.type").Exists() {
+		t.Fatalf("conflicting value type was retained; cleaned: %s", got)
+	}
+	if desc := parsed.Get("properties.value.description").String(); !strings.Contains(desc, "string | integer") {
+		t.Fatalf("value type hint = %q, want string | integer; cleaned: %s", desc, got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ObjectUnionPreservesParentPropertyConstraints(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"value": {"type": "string", "enum": ["fixed"]},
+			"payload": {
+				"type": "object",
+				"properties": {"base": {"type": "string"}},
+				"required": ["base"],
+				"additionalProperties": false
+			}
+		},
+		"required": ["value", "payload"],
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {
+					"value": {"type": "string", "enum": ["fixed"]},
+					"payload": {
+						"type": "object",
+						"properties": {"alpha": {"type": "string"}},
+						"required": ["alpha"]
+					}
+				}
+			},
+			{
+				"type": "object",
+				"properties": {
+					"value": {"type": "integer"},
+					"payload": {
+						"type": "object",
+						"properties": {"beta": {"type": "integer"}},
+						"required": ["beta"]
+					}
+				}
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("properties.value.type").String() != "string" {
+		t.Fatalf("parent value type was loosened; cleaned: %s", got)
+	}
+	if enum := getStrings(got, "properties.value.enum"); len(enum) != 1 || enum[0] != "fixed" {
+		t.Fatalf("parent value enum = %v, want fixed; cleaned: %s", enum, got)
+	}
+	payloadRequired := getStrings(got, "properties.payload.required")
+	if !contains(payloadRequired, "base") || contains(payloadRequired, "alpha") || contains(payloadRequired, "beta") {
+		t.Fatalf("parent payload required = %v, want only base; cleaned: %s", payloadRequired, got)
+	}
+	if parsed.Get("properties.payload.additionalProperties").Raw != "false" {
+		t.Fatalf("parent payload additionalProperties was loosened; cleaned: %s", got)
+	}
+	if !parsed.Get("properties.payload.properties.alpha").Exists() ||
+		!parsed.Get("properties.payload.properties.beta").Exists() {
+		t.Fatalf("branch payload properties were not widened into parent; cleaned: %s", got)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravityResponse_ObjectUnionConjoinsBooleanParentSchemas(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {"value": true},
+		"additionalProperties": true,
+		"oneOf": [
+			{
+				"type": "object",
+				"properties": {"value": {"type": "string"}},
+				"additionalProperties": false
+			},
+			{
+				"type": "object",
+				"properties": {"value": {"type": "string"}},
+				"additionalProperties": false
+			}
+		]
+	}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	parsed := gjson.Parse(got)
+	if parsed.Get("properties.value.type").String() != "string" {
+		t.Fatalf("true parent property did not adopt branch schema; cleaned: %s", got)
+	}
+	if parsed.Get("additionalProperties").Raw != "false" {
+		t.Fatalf("parent additionalProperties did not adopt stricter branch constraint; cleaned: %s", got)
+	}
+}
+
 // TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped tests issue 5219 #3:
 // contains keyword in array schemas should be stripped and moved to description hint.
 func TestCleanJSONSchemaForAntigravityResponse_ContainsKeywordStripped(t *testing.T) {
