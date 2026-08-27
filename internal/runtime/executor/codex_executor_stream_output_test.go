@@ -89,6 +89,41 @@ func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *t
 	}
 }
 
+func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDoneForResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_item.done\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","sequence_number":15,"output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"smoke-gpt56-rest-ok"}]}}` + "\n\n"))
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","sequence_number":16,"response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-sol","output":[],"text":{"format":{"type":"text"}},"usage":{"input_tokens":17,"output_tokens":13,"total_tokens":30,"output_tokens_details":{"reasoning_tokens":0}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "openai/gpt-5.6-sol",
+		Payload: []byte(`{"model":"openai/gpt-5.6-sol","input":[{"type":"message","role":"user","content":"Say ok"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "smoke-gpt56-rest-ok" {
+		t.Fatalf("output[0].content[0].text = %q, want %q; payload=%s", got, "smoke-gpt56-rest-ok", resp.Payload)
+	}
+	if cliproxyauth.IsEmptyCompletionPayload(resp.Payload) {
+		t.Fatalf("reconstructed Responses payload classified as empty: %s", resp.Payload)
+	}
+}
+
 func TestCodexExecutorExecuteSurfacesTerminalStreamError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -591,6 +591,11 @@ func TestEmptyCompletionPredicate(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "codex responses-api non-stream text config does not hide output",
+			payload:  []byte(`{"object":"response","id":"r","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"text":{"format":{"type":"text"}},"usage":{"output_tokens":1}}`),
+			expected: false,
+		},
+		{
 			name:     "codex responses-api sse output_item message empty then completed is empty",
 			payload:  []byte("data: {\"type\":\"response.output_item.done\",\"output\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}],\"status\":\"completed\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}]}],\"usage\":{\"output_tokens\":0}}}\n\ndata: [DONE]\n\n"),
 			expected: true,
