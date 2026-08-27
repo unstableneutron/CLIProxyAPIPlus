@@ -404,7 +404,7 @@ type openAIResponseChunk struct {
 	Usage     *openAIResponseUsage  `json:"usage"`
 	Response  *openAIResponseObject `json:"response"`
 	Delta     string                `json:"delta"`
-	Text      string                `json:"text"`
+	Text      json.RawMessage       `json:"text"`
 	Arguments string                `json:"arguments"`
 }
 
@@ -709,7 +709,8 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 			a.hasContent = true
 		}
 	case "response.output_text.done":
-		if strings.TrimSpace(chunk.Text) != "" {
+		var text string
+		if json.Unmarshal(chunk.Text, &text) == nil && strings.TrimSpace(text) != "" {
 			a.hasContent = true
 		}
 	case "response.output_item.done":
