@@ -478,6 +478,18 @@ test_validate_repair_accepts_only_exact_recorded_candidate() {
 
   (
     cd "${fork}"
+    mkdir -p .github
+    printf '%s\n' \
+      $'0000000000000000000000000000000000000000\tinternal/example.go\tfunc\tRemoved\tunauthorized approval' \
+      > .github/upstream-sync-dropped-symbols.tsv
+    git add .github/upstream-sync-dropped-symbols.tsv
+    git commit -m "Alter dropped-symbol approvals" >/dev/null
+    if GITHUB_OUTPUT="${root}/invalid-approval-repair.out" \
+      "${HELPER}" validate-repair "${plan_out}" "$(git rev-parse HEAD)" >/dev/null 2>&1; then
+      fail "validate-repair accepted candidate-controlled dropped-symbol approvals"
+    fi
+    git reset --hard HEAD^ >/dev/null
+
     awk -F= '
       $1 == "PLAN_FINGERPRINT" { print "PLAN_FINGERPRINT=0000000000000000000000000000000000000000"; next }
       { print }

@@ -1,5 +1,5 @@
 # feature	check	path	pattern	description
-responses-websocket	contains	sdk/api/handlers/openai/openai_responses_websocket.go	stripUnsupportedResponsesWebsocketInputItemMetadata	responses websocket input item metadata sanitizer remains
+responses-websocket	contains	sdk/api/handlers/openai/openai_responses_websocket_requests.go	stripUnsupportedResponsesWebsocketInputItemMetadata	responses websocket input item metadata sanitizer remains
 responses-websocket	contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestStripsInputItemMetadata	responses websocket metadata sanitizer regression test remains
 gemini-cli	contains	internal/runtime/executor/gemini_cli_executor.go	type GeminiCLIExecutor	Gemini CLI executor remains present
 gemini-cli	contains	sdk/api/handlers/gemini/gemini-cli_handlers.go	GeminiCLIAPIHandler	Gemini CLI SDK handler surface remains present
@@ -29,7 +29,7 @@ codex-websocket-compaction	contains	internal/runtime/executor/codex_executor_com
 codex-websocket-compaction	contains	internal/runtime/executor/codex_executor_compact_test.go	TestCodexWebsocketsExecuteStreamCompactionTriggerUsesResponsesWebsocket	Codex V2 websocket compaction triggers remain on ordinary websocket Responses
 codex-websocket-compaction	contains	internal/runtime/executor/codex_executor_compaction.go	finalizeCodexCompactAdapterBody	Codex OAuth legacy compact requests retain the Responses V2 adapter
 codex-websocket-compaction	contains	internal/runtime/executor/codex_executor_compact_test.go	TestCodexExecutorOAuthCompactUsesResponsesAdapter	Codex OAuth legacy compact adaptation regression test remains
-responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
+responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket_requests.go	finalizeResponsesWebsocketRequest	responses websocket fast-tier normalization wiring remains
 responses-fast-tier	contains	sdk/api/handlers/openai/openai_responses_websocket_test.go	TestNormalizeResponsesWebsocketRequestCreateFastTier	responses websocket fast-tier regression test remains
 responses-compaction	contains	sdk/api/handlers/openai/openai_responses_handlers.go	isResponsesCompactionTriggerRequest(rawJSON)	responses compaction-trigger streams bypass bootstrap timeout
 responses-compaction	contains	sdk/api/handlers/openai/openai_responses_handlers_stream_error_test.go	TestHandleStreamingResponseDoesNotBootstrapTimeoutCompactionTrigger	responses compaction-trigger stream timeout regression test remains

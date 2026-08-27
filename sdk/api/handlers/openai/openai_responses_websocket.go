@@ -53,12 +53,6 @@ var responsesWebsocketUpgrader = websocket.Upgrader{
 	},
 }
 
-// Keep split request-normalization seams compile-bound to the websocket handler.
-var (
-	_ = finalizeResponsesWebsocketRequest
-	_ = stripUnsupportedResponsesWebsocketInputItemMetadata
-)
-
 // writeWebsocketCloseForUpstreamError mirrors transport-level upstream close
 // codes to the downstream WebSocket client before the connection is torn down.
 // Without this the client only observes an abnormal closure (1006) and cannot

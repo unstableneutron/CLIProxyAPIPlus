@@ -4,15 +4,27 @@ fork-owned	.gitattributes
 fork-owned	.ccs-fork-upstream.env
 fork-owned	.dockerignore
 fork-owned	.goreleaser.yml
+fork-owned	Dockerfile
+fork-owned	mise.toml
 fork-owned	README-ccs-fork.md
 fork-owned	docker-compose.yml
-fork-owned	.agents/skills/validating-upstream-sync/
+fork-owned	.agents/
 fork-owned	.amp/plugins/release-published-webhook/
+fork-owned	.amp/plugins/upstream-sync-v2-webhook/
+fork-owned	.github/fork-maintenance-audit.md
 fork-owned	.github/release-asset-contract.json
 fork-owned	.github/scripts/upstream-sync.sh
+fork-owned	.github/scripts/upstream-sync-workflow.sh
+fork-owned	.github/scripts/test-upstream-sync-workflow.sh
+fork-owned	.github/scripts/upstream-sync-dispatch-plan.sh
+fork-owned	.github/scripts/test-upstream-sync-dispatch-plan.sh
 fork-owned	.github/scripts/test-upstream-sync.sh
 fork-owned	.github/scripts/validate-upstream-sync.sh
 fork-owned	.github/scripts/render-upstream-sync-report.sh
+fork-owned	.github/scripts/check-go-symbols.go
+fork-owned	.github/scripts/check-upstream-sync-tools.sh
+fork-owned	.github/scripts/portable-tools.sh
+fork-owned	.github/scripts/safe_zip.py
 fork-owned	.github/scripts/verify-upstream-release.sh
 fork-owned	.github/scripts/test-verify-upstream-release.sh
 fork-owned	.github/scripts/validate-hotfix-release.sh
@@ -45,6 +57,7 @@ fork-owned	.github/workflows/
 fork-owned	.github/workflows-disabled/
 fork-owned	tools/upstream-sync-smoke/
 fork-owned	tools/release-asset-contract/
+fork-owned	tools/request-fingerprint-probe/
 
 plus-owned	internal/auth/codebuddy/
 plus-owned	internal/auth/copilot/
@@ -58,6 +71,13 @@ fork-owned	internal/auth/gemini/
 fork-owned	internal/runtime/geminicli/
 fork-owned	internal/runtime/executor/gemini_cli_executor.go
 fork-owned	internal/runtime/executor/gemini_cli_executor_test.go
+fork-owned	internal/runtime/executor/bedrock_executor.go
+fork-owned	internal/runtime/executor/bedrock_executor_test.go
+fork-owned	internal/runtime/executor/codex_continue_fold.go
+fork-owned	internal/runtime/executor/codex_continue_fold_test.go
+fork-owned	internal/runtime/executor/codex_websocket_compaction_overlap.go
+fork-owned	internal/runtime/executor/xai_executor_overlay_compat.go
+fork-owned	internal/runtime/executor/helps/logging_helpers.go
 fork-owned	internal/thinking/provider/geminicli/
 fork-owned	internal/translator/claude/gemini-cli/
 fork-owned	internal/translator/codex/gemini-cli/
@@ -65,6 +85,11 @@ fork-owned	internal/translator/gemini-cli/
 fork-owned	internal/translator/gemini/gemini-cli/
 fork-owned	internal/translator/openai/gemini-cli/
 fork-owned	sdk/api/handlers/gemini/gemini-cli_handlers.go
+fork-owned	internal/api/chatgpt_backend_passthrough.go
+fork-owned	internal/api/chatgpt_backend_passthrough_test.go
+fork-owned	sdk/api/handlers/force_model_prefix.go
+fork-owned	sdk/api/handlers/openai/codex_fast_model.go
+fork-owned	sdk/api/handlers/openai/codex_fast_model_test.go
 fork-owned	sdk/auth/gemini.go
 
 fork-owned	internal/registry/commandcode_model_definitions.go
