@@ -24,7 +24,7 @@ var inPlaceSJSONAllowlist = map[string]struct{}{}
 // that must not be treated as product code governed by these invariants.
 var skippedWalkDirs = map[string]struct{}{
 	".git": {}, "vendor": {}, "node_modules": {}, "testdata": {},
-	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {},
+	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {}, ".gomodcache": {},
 }
 
 // forEachSourceFile visits every non-test Go file in the repository.
@@ -139,7 +139,7 @@ func TestNoInPlaceSJSONWrites(t *testing.T) {
 // new code rather than a proof of absence.
 var inPlaceByteWritePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bcopy\([a-zA-Z_][A-Za-z0-9_.]*\[`),
-	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+\] = 0$`),
+	regexp.MustCompile(`^\s*[a-zA-Z_][A-Za-z0-9_.]*\[[a-zA-Z0-9_]+\] = 0\r?$`),
 }
 
 // reviewedInPlaceByteWrites records the reviewed in-place byte writes per file.
@@ -172,7 +172,8 @@ func TestInPlaceByteWritesAreReviewed(t *testing.T) {
 	root := repoRoot(t)
 	found := make(map[string][]string)
 	forEachSourceFile(t, root, func(rel string, data []byte) {
-		for _, line := range strings.Split(string(data), "\n") {
+		normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+		for _, line := range strings.Split(normalized, "\n") {
 			for _, pattern := range inPlaceByteWritePatterns {
 				if pattern.MatchString(line) {
 					found[rel] = append(found[rel], strings.TrimSpace(line))
