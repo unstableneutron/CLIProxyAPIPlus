@@ -1043,10 +1043,18 @@ func scheduledSuccessorIndex(entries []*scheduledAuth, lastID string) int {
 	index := sort.Search(len(entries), func(i int) bool {
 		return entries[i].auth.ID > lastID
 	})
-	if index >= len(entries) {
+	return normalizeCursor(index, len(entries))
+}
+
+func normalizeCursor(cursor, size int) int {
+	if size <= 0 || cursor <= 0 {
 		return 0
 	}
-	return index
+	cursor %= size
+	if cursor < 0 {
+		cursor += size
+	}
+	return cursor
 }
 
 // pickWeighted returns the next ready entry using smooth weighted round-robin.
