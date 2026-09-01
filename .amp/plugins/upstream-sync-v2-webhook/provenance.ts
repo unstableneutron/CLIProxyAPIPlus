@@ -9,7 +9,7 @@ export const githubActionsBotLogin = 'github-actions[bot]'
 
 const candidatePrefix = 'upstream-sync/'
 const workflowPath = '.github/workflows/upstream-sync-v2.yml'
-const expectedDispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
+const expectedDispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false resume_release=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
 const sourceRunMaximumAgeMs = 12 * 60 * 60 * 1000
 const maximumArtifactBytes = 4_000_000
 

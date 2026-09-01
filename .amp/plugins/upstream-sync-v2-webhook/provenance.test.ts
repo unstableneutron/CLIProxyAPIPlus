@@ -39,7 +39,7 @@ const workflowRunID = 12345
 const workflowRunAttempt = 1
 const artifactID = 54321
 const artifactURL = `https://api.github.com/repos/${repository}/actions/artifacts/${artifactID}/zip`
-const dispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
+const dispatchTitle = 'Upstream Sync v2 [event=workflow_dispatch mode=promote force_candidate=false resume_release=false repair_ref= repair_sha= repair_fingerprint= repair_pr=]'
 
 const bot = { login: githubActionsBotLogin, id: githubActionsBotID, type: 'Bot' }
 const owner = { login: 'unstableneutron', id: repositoryOwnerID, type: 'User' }
