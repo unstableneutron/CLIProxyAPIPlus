@@ -321,6 +321,45 @@ func (h *Handler) Handle(c *gin.Context) {
 		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		responseHeaders := callResponseHeaders(resp.Header)
+		helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
+		unauthorizedBody, errResponse := readLimitedBody(resp.Body)
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex live: close unauthorized response body error: %v", errClose)
+		}
+		helps.AppendAPIResponseChunk(ctx, runtimeConfig, unauthorizedBody)
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model, unauthorizedBody)
+		if errResponse != nil {
+			helps.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
+			selection.End("response_read_failed")
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errResponse, http.StatusBadGateway), "Failed to read Codex live response")
+			return
+		}
+
+		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
+		if errRefresh != nil {
+			selection.End("refresh_failed")
+			writeSelectionError(c, errRefresh)
+			return
+		}
+		if !didRefresh || refreshed == nil {
+			selection.End("refresh_unavailable")
+			writeResponseHeaders(c.Writer.Header(), responseHeaders)
+			c.Status(resp.StatusCode)
+			_, _ = c.Writer.Write(unauthorizedBody)
+			return
+		}
+		selected = refreshed
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		resp, errRequest = performRequest(selected)
+		if errRequest != nil {
+			selection.End("retry_failed")
+			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
+			return
+		}
+	}
 	var closeResponseOnce sync.Once
 	var closeResponseErr error
 	closeResponseBody := func() error {

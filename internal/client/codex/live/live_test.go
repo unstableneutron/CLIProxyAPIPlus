@@ -682,16 +682,15 @@ func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
 	}
 }
 
-func TestHandlerForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
-	const upstreamError = `{"error":{"message":"access token expired"}}`
+func TestHandlerRefreshesUnauthorizedHomeSelectionOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := auth.NewManager(nil, nil, nil)
 	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
 	registry := executionregistry.New()
 	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
 	executor := &captureExecutor{
-		statuses:     []int{http.StatusUnauthorized},
-		responseBody: &trackedResponseBody{Reader: strings.NewReader(upstreamError)},
+		statuses:     []int{http.StatusUnauthorized, http.StatusCreated},
+		responseBody: &trackedResponseBody{Reader: strings.NewReader("v=0\r\n")},
 	}
 	manager.RegisterExecutor(executor)
 	handler := NewHandler(manager, nil)
@@ -703,17 +702,14 @@ func TestHandlerForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
 	}
-	if got := recorder.Body.String(); got != upstreamError {
-		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
+	if executor.refreshCalls.Load() != 1 || executor.httpCalls.Load() != 2 {
+		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls.Load(), executor.httpCalls.Load())
 	}
-	if executor.refreshCalls.Load() != 0 || executor.httpCalls.Load() != 1 {
-		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls.Load(), executor.httpCalls.Load())
-	}
-	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-live-token" {
-		t.Fatalf("Authorization = %q, want original Home token", got)
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-live-token" {
+		t.Fatalf("retry Authorization = %q, want refreshed token", got)
 	}
 	if errDrain := registry.Drain(context.Background()); errDrain != nil {
 		t.Fatalf("Drain() error = %v", errDrain)
@@ -738,7 +734,7 @@ func TestHandlerReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
 				_ = registry.Close()
 			},
 			wantStatus:   http.StatusServiceUnavailable,
-			wantFailBody: "upstream unauthorized",
+			wantFailBody: upstreamError,
 		},
 		{
 			name: "response read failure",
@@ -979,71 +975,77 @@ func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
 	}
 }
 
-func TestHandleSidebandForwardsUnauthorizedHomeHandshakeWithoutRefresh(t *testing.T) {
+func TestHandleSidebandRefreshesUnauthorizedHomeHandshakeOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, tc := range []struct {
-		name         string
-		upstreamBody string
-	}{
-		{name: "response body", upstreamBody: `{"error":{"message":"access token expired"}}`},
-		{name: "empty response body"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var upstreamCalls atomic.Int32
-			upstreamHeaders := make(chan http.Header, 1)
-			upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				upstreamCalls.Add(1)
-				upstreamHeaders <- request.Header.Clone()
-				writer.Header().Set("Content-Type", "application/json")
-				writer.WriteHeader(http.StatusUnauthorized)
-				_, _ = writer.Write([]byte(tc.upstreamBody))
-			}))
-			defer upstreamServer.Close()
+	var upstreamCalls atomic.Int32
+	upstreamHeaders := make(chan http.Header, 2)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		upstreamHeaders <- request.Header.Clone()
+		if request.Header.Get("Authorization") != "Bearer refreshed-home-live-token" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		messageType, payload, errRead := conn.ReadMessage()
+		if errRead == nil {
+			_ = conn.WriteMessage(messageType, append([]byte("echo:"), payload...))
+		}
+	}))
+	defer upstreamServer.Close()
 
-			manager := auth.NewManager(nil, nil, nil)
-			manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
-			registry := executionregistry.New()
-			manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
-			executor := &captureExecutor{}
-			manager.RegisterExecutor(executor)
-			selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "codex", defaultLiveModel, auth.AuthKindOAuth, coreexecutor.Options{})
-			if errSelect != nil {
-				t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
-			}
-			selection.Retain()
-			defer selection.End("test_complete")
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+	executor := &captureExecutor{}
+	manager.RegisterExecutor(executor)
+	selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "codex", defaultLiveModel, auth.AuthKindOAuth, coreexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+	}
+	selection.Retain()
+	defer selection.End("test_complete")
 
-			handler := NewHandler(manager, nil)
-			handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
-			handler.sessions.put("call-home-refresh", liveSession{authID: "home-codex-live", model: defaultLiveModel, homeSelection: selection})
-			router := gin.New()
-			router.GET("/v1/live/:call_id", handler.HandleSideband)
-			downstreamServer := httptest.NewServer(router)
-			defer downstreamServer.Close()
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+	handler.sessions.put("call-home-refresh", liveSession{authID: "home-codex-live", model: defaultLiveModel, homeSelection: selection})
+	router := gin.New()
+	router.GET("/v1/live/:call_id", handler.HandleSideband)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
 
-			wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/call-home-refresh"
-			client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
-			if client != nil {
-				_ = client.Close()
-			}
-			if errDial == nil || response == nil {
-				t.Fatalf("dial downstream sideband = response %#v err %v, want rejected handshake", response, errDial)
-			}
-			defer func() { _ = response.Body.Close() }()
-			responseBody, errRead := io.ReadAll(response.Body)
-			if errRead != nil {
-				t.Fatalf("read downstream rejection: %v", errRead)
-			}
-			if response.StatusCode != http.StatusUnauthorized || string(responseBody) != tc.upstreamBody {
-				t.Fatalf("downstream rejection = status %d body %q, want original upstream 401 body %q", response.StatusCode, responseBody, tc.upstreamBody)
-			}
-			if executor.refreshCalls.Load() != 0 || upstreamCalls.Load() != 1 {
-				t.Fatalf("refresh/upstream calls = %d/%d, want 0/1", executor.refreshCalls.Load(), upstreamCalls.Load())
-			}
-			if got := (<-upstreamHeaders).Get("Authorization"); got != "Bearer home-live-token" {
-				t.Fatalf("upstream Authorization = %q, want original Home token", got)
-			}
-		})
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/call-home-refresh"
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial downstream sideband: %v", errDial)
+	}
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	defer func() { _ = client.Close() }()
+	if errWrite := client.WriteMessage(websocket.TextMessage, []byte("ping")); errWrite != nil {
+		t.Fatalf("write sideband message: %v", errWrite)
+	}
+	_, payload, errRead := client.ReadMessage()
+	if errRead != nil || string(payload) != "echo:ping" {
+		t.Fatalf("read sideband message = %q, %v", string(payload), errRead)
+	}
+	if executor.refreshCalls.Load() != 1 || upstreamCalls.Load() != 2 {
+		t.Fatalf("refresh/upstream calls = %d/%d, want 1/2", executor.refreshCalls.Load(), upstreamCalls.Load())
+	}
+	first := <-upstreamHeaders
+	second := <-upstreamHeaders
+	if first.Get("Authorization") != "Bearer home-live-token" || second.Get("Authorization") != "Bearer refreshed-home-live-token" {
+		t.Fatalf("upstream Authorization sequence = %q, %q", first.Get("Authorization"), second.Get("Authorization"))
 	}
 }
 

@@ -525,6 +525,52 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			continue
 		}
 
+		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+			helps.RecordAPIResponseMetadata(attemptCtx, s.cfg, resp.StatusCode, resp.Header.Clone())
+			unauthorizedBody, errRead := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Errorf("codex alpha search: close unauthorized response body error: %v", errClose)
+			}
+			helps.AppendAPIResponseChunk(attemptCtx, s.cfg, unauthorizedBody)
+			s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model, unauthorizedBody)
+			if errRead != nil {
+				helps.RecordAPIResponseError(attemptCtx, s.cfg, errRead)
+				endAttempt("response_read_failed")
+				c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read Codex search response"})
+				return
+			}
+
+			refreshed, didRefresh, errRefresh := s.handlers.AuthManager.RefreshHomeSelectionAfterUnauthorized(attemptCtx, selection, selected)
+			if errRefresh != nil {
+				endAttempt("refresh_failed")
+				status := http.StatusServiceUnavailable
+				if statusError, ok := errRefresh.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
+					status = statusError.StatusCode()
+				}
+				c.JSON(status, gin.H{"error": errRefresh.Error()})
+				return
+			}
+			if !didRefresh || refreshed == nil {
+				endAttempt("refresh_unavailable")
+				writeCodexAlphaSearchResponse(c, resp.StatusCode, resp.Header, unauthorizedBody)
+				return
+			}
+			selected = refreshed
+			logging.SetGinCPATraceID(c, selected.EnsureIndex())
+			resp, errRequest = performRequest(attemptCtx, selected)
+			if errRequest != nil {
+				if errors.Is(errRequest, errMissingBaseURL) {
+					endAttempt("missing_base_url")
+					c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRequest.Error()})
+					return
+				}
+				helps.RecordAPIResponseError(attemptCtx, s.cfg, errRequest)
+				endAttempt("retry_failed")
+				c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
+				return
+			}
+		}
+
 		closeResponseBody := func() error {
 			errClose := resp.Body.Close()
 			if errClose != nil {

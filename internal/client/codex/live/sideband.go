@@ -425,6 +425,40 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
+		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
+		var unauthorizedBody []byte
+		if handshakeResponse.Body != nil {
+			var errRead error
+			unauthorizedBody, errRead = readLimitedBody(handshakeResponse.Body)
+			if errRead != nil {
+				log.Errorf("codex live sideband: read unauthorized handshake body error: %v", errRead)
+			}
+			helps.AppendAPIWebsocketResponse(ctx, runtimeConfig, unauthorizedBody)
+			if errClose := handshakeResponse.Body.Close(); errClose != nil {
+				log.Errorf("codex live sideband: close unauthorized handshake body error: %v", errClose)
+			}
+		}
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model, unauthorizedBody)
+		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
+		if errRefresh != nil {
+			writeSelectionError(c, errRefresh)
+			return
+		}
+		if !didRefresh || refreshed == nil {
+			if contentType := handshakeResponse.Header.Get("Content-Type"); contentType != "" {
+				c.Header("Content-Type", contentType)
+			}
+			c.Status(http.StatusUnauthorized)
+			if len(unauthorizedBody) > 0 {
+				_, _ = c.Writer.Write(unauthorizedBody)
+			}
+			return
+		}
+		selected = refreshed
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		upstream, handshakeResponse, errDial = dialUpstream(selected)
+	}
 	if errDial != nil {
 		handshakeStatus := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {

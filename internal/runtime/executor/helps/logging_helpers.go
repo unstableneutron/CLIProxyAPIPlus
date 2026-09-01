@@ -54,6 +54,7 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+	responseTrailingLFs  int
 }
 
 func requestLogCaptureEnabled(cfg *config.Config) bool {
@@ -708,6 +709,15 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
+	if attempt.index > 1 && apiResponseSourceOrNil(ginCtx) != nil {
+		attempts := getAttempts(ginCtx)
+		if previousIndex := attempt.index - 2; previousIndex >= 0 && previousIndex < len(attempts) {
+			missingLFs := 2 - attempts[previousIndex].responseTrailingLFs
+			if missingLFs > 0 {
+				writeAttemptResponse(ginCtx, attempt, []byte(strings.Repeat("\n", missingLFs)))
+			}
+		}
+	}
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
 	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
@@ -717,6 +727,18 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload []byte) {
 	if attempt == nil || len(payload) == 0 {
 		return
+	}
+	trailingLFs := 0
+	for i := len(payload) - 1; i >= 0 && payload[i] == '\n'; i-- {
+		trailingLFs++
+	}
+	if trailingLFs == len(payload) {
+		attempt.responseTrailingLFs += trailingLFs
+	} else {
+		attempt.responseTrailingLFs = trailingLFs
+	}
+	if attempt.responseTrailingLFs > 2 {
+		attempt.responseTrailingLFs = 2
 	}
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)

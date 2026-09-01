@@ -133,6 +133,7 @@ func TestConductor_ExecuteStreamDrainsSourceOnTerminalEmpty_ModelPoolFailover(t 
 		true,
 		false,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("executeStreamWithModelPool unexpected error: %v", err)

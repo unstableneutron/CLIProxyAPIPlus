@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,7 +74,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 	accessToken := metaStringValue(auth.Metadata, "access_token")
-	expiry, _ := auth.ExpirationTime()
+	expiry := tokenExpiry(auth.Metadata)
 	if accessToken != "" && expiry.After(time.Now().Add(antigravityRequestTokenSafetyWindow)) {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
 		return accessToken, nil, nil
@@ -287,6 +288,11 @@ func missingAntigravityProjectIDError(cause error) statusErr {
 	return statusErr{code: http.StatusBadRequest, msg: msg}
 }
 
+func tokenExpiry(metadata map[string]any) time.Time {
+	expiry, _ := (&cliproxyauth.Auth{Metadata: metadata}).ExpirationTime()
+	return expiry
+}
+
 func metaStringValue(metadata map[string]any, key string) string {
 	if metadata == nil {
 		return ""
@@ -300,4 +306,27 @@ func metaStringValue(metadata map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+func int64Value(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		if i, errParse := typed.Int64(); errParse == nil {
+			return i, true
+		}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return 0, false
+		}
+		if i, errParse := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); errParse == nil {
+			return i, true
+		}
+	}
+	return 0, false
 }

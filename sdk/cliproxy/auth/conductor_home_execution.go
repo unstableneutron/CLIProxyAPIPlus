@@ -28,6 +28,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	attempt := 0
 	retryRoundPending := false
 	retryRoundWaited := false
+	var lastErr error
 	var preferredUpstreamErr error
 	for {
 		response, errExecute := m.executeHomeOnce(ctx, providers, req, opts, countTokens, maxRetryCredentials, &homeRetryLimit, tracker, attempt)
@@ -37,10 +38,11 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if hasUpstreamExecutionAttempt(errExecute) {
 			preferredUpstreamErr = errExecute
 		}
+		lastErr = preferHomeRetryError(lastErr, errExecute)
 		if retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errExecute, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
-					return cliproxyexecutor.Response{}, errExecute
+					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(lastErr)
 				}
 				if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 					return cliproxyexecutor.Response{}, errWait
@@ -59,7 +61,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			if preferredUpstreamErr != nil && isHomeRetryRoundExhausted(errExecute) {
 				errExecute = preferredExecutionAttemptError(errExecute, preferredUpstreamErr)
 			}
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
+			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(preferHomeRetryError(lastErr, errExecute))
 		}
 		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
@@ -68,6 +70,12 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		retryRoundPending = true
 		retryRoundWaited = false
 	}
+}
+
+// preferHomeRetryError retains the fork compatibility seam while following the
+// newer Home contract that makes the current selection failure authoritative.
+func preferHomeRetryError(_ error, next error) error {
+	return next
 }
 
 func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool, maxRetryCredentials int, homeRetryLimit *int, tracker *routeAttemptTracker, retryRounds ...int) (cliproxyexecutor.Response, error) {
@@ -177,6 +185,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			roundTiming.Observe(lastErr)
 			continue
 		}
+		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			execCtx = newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
@@ -237,16 +246,52 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
+			refreshAuth := preparedAuth
 			if countTokens {
-				if _, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
+				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
 					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
+					if observedAuth != nil {
+						refreshAuth = observedAuth
+					}
 				}
 			}
 			if errExecute != nil {
 				if hasUpstreamExecutionAttempt(errExecute) {
 					upstreamErr = errExecute
 				}
-				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
+				refreshCtx := newUpstreamAttemptContext(execCtx)
+				if refreshed, okRefresh, errRefresh := m.tryRefreshExecutionAuthAfterUnauthorized(refreshCtx, selection.Executor, refreshAuth, errExecute, didRefreshOnUnauthorized, true); errRefresh != nil {
+					errExecute = errRefresh
+					upstreamErr = nil
+					warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
+				} else if okRefresh {
+					preparedAuth = refreshed
+					m.replaceHomeSelectionAuth(selection, preparedAuth)
+					didRefreshOnUnauthorized = true
+					publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
+					setEffectiveAuth(preparedAuth)
+					execCtx = newUpstreamAttemptContext(execCtx)
+					executorCtx = execCtx
+					if countTokens {
+						executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
+					}
+					startHomeRetry := time.Now()
+					response, errExecute = execute()
+					errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
+					durationHomeRetry := time.Since(startHomeRetry)
+					if hasUpstreamExecutionAttempt(errExecute) {
+						upstreamErr = errExecute
+					}
+					if errExecute != nil {
+						warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeRetry, errExecute)
+						if countTokens && isUnauthorizedError(errExecute) {
+							_, fingerprint := getEffectiveAuth()
+							m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
+						}
+					}
+				} else {
+					warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
+				}
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil && !countTokens && isEmptyCompletionPayload(response.Payload) {

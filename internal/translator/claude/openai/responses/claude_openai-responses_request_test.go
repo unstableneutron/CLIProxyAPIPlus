@@ -1526,7 +1526,7 @@ func TestConvertOpenAIResponsesRequestToClaude_UnsupportedPrefillModelsStripTrai
 	}
 }
 
-func TestConvertOpenAIResponsesRequestToClaude_SupportedPrefillModelsPreserveAssistantPrefill(t *testing.T) {
+func TestConvertOpenAIResponsesRequestToClaude_NonFablePreservesAssistantPrefill(t *testing.T) {
 	supportedModels := []string{
 		"claude-sonnet-4-5",
 		"claude-haiku-4-5",

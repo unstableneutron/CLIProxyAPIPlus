@@ -414,16 +414,14 @@ func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
 	}
 }
 
-func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testing.T) {
-	const upstreamError = `{"error":{"message":"access token expired"}}`
+func TestHomeCodexAlphaSearchRefreshesUnauthorizedSelectionOnce(t *testing.T) {
 	server := newTestServer(t)
 	server.cfg.RequestLog = true
 	dispatcher := &codexSearchHomeDispatcher{}
 	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
 	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	executor := &codexSearchCaptureExecutor{
-		statuses:     []int{http.StatusUnauthorized},
-		responseBody: io.NopCloser(strings.NewReader(upstreamError)),
+		statuses: []int{http.StatusUnauthorized, http.StatusOK},
 	}
 	server.handlers.AuthManager.RegisterExecutor(executor)
 
@@ -434,17 +432,14 @@ func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testi
 	c.Request = req
 	server.codexAlphaSearch(c)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	if got := rr.Body.String(); got != upstreamError {
-		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
+	if executor.refreshCalls != 1 || executor.httpCalls != 2 {
+		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls, executor.httpCalls)
 	}
-	if executor.refreshCalls != 0 || executor.httpCalls != 1 {
-		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls, executor.httpCalls)
-	}
-	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-search-token" {
-		t.Fatalf("Authorization = %q, want original Home token", got)
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-search-token" {
+		t.Fatalf("retry Authorization = %q, want refreshed token", got)
 	}
 	if got := dispatcher.calls.Load(); got != 1 {
 		t.Fatalf("Home RPOP calls = %d, want 1", got)
@@ -454,8 +449,8 @@ func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testi
 		t.Fatal("API_RESPONSE was not captured")
 	}
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !strings.Contains(string(apiResponse), "Status: 401") || !strings.Contains(string(apiResponse), upstreamError) {
-		t.Fatalf("API_RESPONSE = %q, want original upstream 401", apiResponse)
+	if !strings.Contains(string(apiResponse), "Status: 401") || !strings.Contains(string(apiResponse), "Status: 200") {
+		t.Fatalf("API_RESPONSE = %q, want initial 401 and successful retry", apiResponse)
 	}
 }
 
@@ -477,7 +472,7 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 				_ = registry.Close()
 			},
 			wantStatus:   http.StatusServiceUnavailable,
-			wantFailBody: "upstream unauthorized",
+			wantFailBody: upstreamError,
 		},
 		{
 			name: "response read failure",

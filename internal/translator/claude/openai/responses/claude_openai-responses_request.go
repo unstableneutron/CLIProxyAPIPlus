@@ -584,7 +584,24 @@ func isResponsesSystemLevelRole(role string) bool {
 // Claude model families that reject assistant message prefill (e.g., Fable,
 // Opus 5, Sonnet 4.6).
 func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+		return dropUnsupportedFableAssistantPrefill(modelName, messages)
+	}
 	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
+		return messages
+	}
+	last := gjson.ParseBytes(messages[len(messages)-1])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	return messages[:len(messages)-1]
+}
+
+// dropUnsupportedFableAssistantPrefill removes a trailing assistant message for
+// Claude Fable models, which reject assistant message prefill.
+func dropUnsupportedFableAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	if !strings.Contains(normalized, "fable") || len(messages) == 0 {
 		return messages
 	}
 	last := gjson.ParseBytes(messages[len(messages)-1])

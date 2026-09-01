@@ -76,7 +76,7 @@ func TestHomeStatusErrLogDiagnosticSanitizesUpstreamFallback(t *testing.T) {
 	}
 }
 
-func TestRefreshAuthViaHomeMapsTransportFailureToGeneric503(t *testing.T) {
+func TestRefreshAuthViaHomeMapsTransportFailureToRedacted503(t *testing.T) {
 	client := &fakeHomeRefreshClient{err: errors.New("dial failed with provider-secret")}
 	oldCurrentHomeRefreshClient := currentHomeRefreshClient
 	currentHomeRefreshClient = func() homeRefreshClient { return client }
@@ -108,7 +108,7 @@ func TestRefreshAuthViaHomeMapsTransportFailureToGeneric503(t *testing.T) {
 	}
 }
 
-func TestRefreshAuthViaHomeUsesGenericMessageForLegacyErrorEnvelope(t *testing.T) {
+func TestRefreshAuthViaHomeRedactsLegacyErrorEnvelope(t *testing.T) {
 	client := &fakeHomeRefreshClient{raw: []byte(`{"error":{"type":"error","message":"provider response: refresh_token=provider-secret"}}`)}
 	oldCurrentHomeRefreshClient := currentHomeRefreshClient
 	currentHomeRefreshClient = func() homeRefreshClient { return client }

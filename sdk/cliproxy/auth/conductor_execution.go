@@ -917,6 +917,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
+	unauthorizedRefreshTried := make(map[string]struct{})
 	emptyCompletionTried := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
@@ -1032,6 +1033,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					}
 				}
 			}
+			if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready {
+				homeExcludedAuthIDs[auth.ID] = struct{}{}
+				homeSameAuthRetryPending = false
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_refresh_auth"); errEnd != nil {
+					return nil, errEnd
+				}
+				continue
+			}
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -1096,7 +1105,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errPrepare != nil {
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
-				if homeSameAuthRetries[auth.ID] > 0 {
+				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
 					excludeAuth = true
 				}
 				if excludeAuth {
@@ -1150,7 +1159,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if selection == nil {
 			releaseCompletedStream = releaseAttempt
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, releaseCompletedStream)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried, releaseCompletedStream)
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
@@ -1159,7 +1168,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			releaseAttempt()
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)
-				if homeSameAuthRetries[auth.ID] > 0 {
+				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
 					excludeAuth = true
 				}
 				if excludeAuth {
@@ -1878,6 +1887,10 @@ func safeErrorDiagnosticForLog(err error) string {
 	return logging.SafeDiagnosticForLog(diagnostic)
 }
 
+func summarizeErrorForLog(err error) string {
+	return safeErrorDiagnosticForLog(err)
+}
+
 func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, model string, auth *Auth, duration time.Duration, err error) {
 	if err == nil {
 		return
@@ -1899,7 +1912,7 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 		}
 	}
 	authIdent := formatAuthIdentity(auth, provider)
-	errSummary := safeErrorDiagnosticForLog(err)
+	errSummary := summarizeErrorForLog(err)
 	duration = duration.Round(time.Millisecond)
 	if statusCode := statusCodeFromError(err); statusCode != 0 {
 		entry.Warnf("%3d | %13v | upstream execution failed: provider=%s model=%s auth=%s err=%s", statusCode, duration, provider, model, authIdent, errSummary)
