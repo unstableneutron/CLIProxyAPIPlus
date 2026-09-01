@@ -525,47 +525,6 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			continue
 		}
 
-		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model)
-			helps.RecordAPIResponseMetadata(attemptCtx, s.cfg, resp.StatusCode, resp.Header.Clone())
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-			if errClose := resp.Body.Close(); errClose != nil {
-				log.Errorf("codex alpha search: close unauthorized response body error: %v", errClose)
-			}
-			refreshed, didRefresh, errRefresh := s.handlers.AuthManager.RefreshHomeSelectionAfterUnauthorized(attemptCtx, selection, selected)
-			if errRefresh != nil {
-				endAttempt("refresh_failed")
-				status := http.StatusServiceUnavailable
-				if statusError, ok := errRefresh.(interface{ StatusCode() int }); ok && statusError.StatusCode() > 0 {
-					status = statusError.StatusCode()
-				}
-				c.JSON(status, gin.H{"error": errRefresh.Error()})
-				return
-			}
-			if !didRefresh || refreshed == nil {
-				endAttempt("refresh_unavailable")
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
-				return
-			}
-			selected = refreshed
-			logging.SetGinCPATraceID(c, selected.EnsureIndex())
-			resp, errRequest = performRequest(attemptCtx, selected)
-			if errRequest != nil {
-				if errors.Is(errRequest, errMissingBaseURL) {
-					endAttempt("missing_base_url")
-					c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRequest.Error()})
-					return
-				}
-				helps.RecordAPIResponseError(attemptCtx, s.cfg, errRequest)
-				endAttempt("retry_failed")
-				c.JSON(http.StatusBadGateway, gin.H{"error": errRequest.Error()})
-				return
-			}
-			if resp.StatusCode == http.StatusUnauthorized {
-				s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model)
-			}
-		}
-
 		closeResponseBody := func() error {
 			errClose := resp.Body.Close()
 			if errClose != nil {
@@ -575,6 +534,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		}
 		if selection != nil {
 			if errBind := selection.Bind(closeResponseBody); errBind != nil {
+				if resp.StatusCode == http.StatusUnauthorized {
+					s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model)
+				}
 				_ = closeResponseBody()
 				endAttempt("response_bind_failed")
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
@@ -585,6 +547,10 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		upstreamBody, errRead := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 		_ = closeResponseBody()
 		if errRead != nil {
+			helps.AppendAPIResponseChunk(attemptCtx, s.cfg, upstreamBody)
+			if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+				s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model, upstreamBody)
+			}
 			helps.RecordAPIResponseError(attemptCtx, s.cfg, errRead)
 			lastErr = errRead
 			s.handlers.AuthManager.MarkResult(attemptCtx, auth.Result{
@@ -599,6 +565,10 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			continue
 		}
 		helps.AppendAPIResponseChunk(attemptCtx, s.cfg, upstreamBody)
+		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+			s.handlers.AuthManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", model, upstreamBody)
+			log.WithField("status", resp.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
+		}
 
 		if !codexAlphaSearchRetryableStatus(resp.StatusCode) {
 			if resp.StatusCode >= 200 && resp.StatusCode < 400 {

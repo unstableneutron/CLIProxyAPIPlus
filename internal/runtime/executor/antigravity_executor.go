@@ -39,7 +39,7 @@ const (
 	antigravityClientIDEnv                 = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
 	antigravityClientSecretEnv             = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
 	antigravityAuthType                    = "antigravity"
-	refreshSkew                            = 3000 * time.Second
+	antigravityRequestTokenSafetyWindow    = 5 * time.Minute
 	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
