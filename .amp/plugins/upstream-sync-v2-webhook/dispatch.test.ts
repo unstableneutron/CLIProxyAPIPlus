@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  candidatePrompt,
   dispatchCandidate,
   emptyDispatchState,
   type DispatchState,
@@ -41,6 +42,17 @@ function memoryStore(): DispatchStore & { state: DispatchState } {
 }
 
 describe('candidate dispatch', () => {
+  test('grants the standing fail-closed release lifecycle without deployment authority', () => {
+    const prompt = candidatePrompt(candidate, 'delivery-1')
+    expect(prompt).toContain('Standing project authorization applies')
+    expect(prompt).toContain('exact repaired-candidate push with a safe lease')
+    expect(prompt).toContain('pinned v2 repair import and promotion')
+    expect(prompt).toContain('multi-platform GHCR publication')
+    expect(prompt).toContain('Stop fail-closed')
+    expect(prompt).toContain('Do not deploy or run production runtime smoke unless separately authorized')
+    expect(prompt).not.toContain('Do not push, merge, promote, tag, release')
+  })
+
   test('creates and prompts one thread across duplicate deliveries', async () => {
     const store = memoryStore()
     let creates = 0

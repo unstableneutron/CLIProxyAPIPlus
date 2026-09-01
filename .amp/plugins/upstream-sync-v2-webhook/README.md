@@ -22,6 +22,12 @@ The handler requires all of the following before creating a thread:
 
 PR text is never copied into the agent prompt. The prompt contains only validated scalar facts and tells the new thread to treat PR content as untrusted data.
 
+## Standing lifecycle authorization
+
+Every candidate admitted by the validation contract receives standing project authorization to complete the repository's fail-closed Upstream Sync v2 lifecycle. The child Orb must independently recheck every gate, perform bounded repair and canonical validation, push only the exact validated candidate with a safe lease, use the pinned v2 repair-import/promotion path, and independently verify the resulting tag, release assets, receipt, and multi-platform GHCR publication. It may close superseded candidates only as repository policy specifies.
+
+This authorization does not permit bypassing a failed or stale gate, changing an immutable candidate identity, force-pushing without the expected lease, deploying, or running production runtime smoke. Any unprovable gate terminates in a report without further mutation.
+
 ## Secrets and setup
 
 The owning Amp Orb needs:

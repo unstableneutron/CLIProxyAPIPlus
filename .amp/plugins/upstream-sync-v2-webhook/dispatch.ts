@@ -66,7 +66,9 @@ Validated delivery facts:
 - source workflow run: ${candidate.workflowRunID}
 - older open candidates potentially superseded: ${superseded}
 
-Follow AGENTS.md and .agents/skills/validating-upstream-sync/SKILL.md exactly. Inspect the workflow artifact and manually compose shared hotspots; never blanket-select ours/theirs or bypass symbol survival. Perform bounded repairs and full validation. Leave a reviewable local commit/branch and report the exact SHA, evidence, and blocker or recommended pinned v2 import. Do not push, merge, promote, tag, release, deploy, close PRs, or mutate shared infrastructure without explicit authorization in this thread.`
+Follow AGENTS.md and .agents/skills/validating-upstream-sync/SKILL.md exactly. Inspect the workflow artifact and manually compose shared hotspots; never blanket-select ours/theirs or bypass symbol survival.
+
+Standing project authorization applies to this strictly validated candidate. Independently recheck every freshness, provenance, supersession, review, CI, immutable-identity, symbol-survival, release, receipt, and publication gate. If all gates pass, perform the complete lifecycle: bounded repair; canonical validation; exact repaired-candidate push with a safe lease; pinned v2 repair import and promotion; main integration; tag, release, assets, receipt, and multi-platform GHCR publication; final independent verification; and policy-defined closure of superseded candidates. Stop fail-closed and report without bypassing or weakening any gate if an identity changes, a lease fails, or any required check cannot be proven. Preserve idempotency and least privilege. Do not deploy or run production runtime smoke unless separately authorized.`
 }
 
 function errorMessage(error: unknown): string {
