@@ -178,6 +178,7 @@ func (s *codexSearchFailoverSelector) Pick(_ context.Context, _ string, _ string
 }
 
 type codexSearchHomeDispatcher struct {
+	authID string
 	calls  atomic.Int32
 	policy atomic.Value
 }
@@ -226,18 +227,22 @@ func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
+	authID := d.authID
+	if authID == "" {
+		authID = "home-codex-search"
+	}
 	return json.Marshal(map[string]any{
 		"model":      model,
-		"auth_index": "home-codex-search",
+		"auth_index": authID,
 		"auth": map[string]any{
-			"id":       "home-codex-search",
+			"id":       authID,
 			"provider": "codex",
 			"status":   "active",
 			"metadata": map[string]any{"access_token": "home-search-token"},
 		},
 		"concurrency": map[string]any{
 			"accounted":     true,
-			"credential_id": "home-codex-search",
+			"credential_id": authID,
 			"model":         model,
 		},
 	})
@@ -489,7 +494,8 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 			server := newTestServer(t)
 			registry := executionregistry.New()
 			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
-			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, registry, 1)
+			testAuthID := "home-codex-search-" + strings.ReplaceAll(test.name, " ", "-")
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{authID: testAuthID}, registry, 1)
 			executor := &codexSearchCaptureExecutor{
 				statuses:     []int{http.StatusUnauthorized},
 				responseBody: test.responseBody(),
@@ -498,7 +504,7 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 				executor.beforeReturn = func() { test.beforeReturn(registry) }
 			}
 			server.handlers.AuthManager.RegisterExecutor(executor)
-			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), "home-codex-search")
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), testAuthID)
 
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
