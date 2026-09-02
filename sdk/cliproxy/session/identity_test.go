@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -331,6 +332,26 @@ func TestEnrichCopiesDerivedIdentityToRequestAndOptions(t *testing.T) {
 	}
 	if _, exists := req.Metadata[cliproxyexecutor.DerivedSessionIDMetadataKey]; exists {
 		t.Fatal("Enrich() mutated original request metadata")
+	}
+}
+
+func TestEnrichCarriesRequestPayloadIntoSelectionOptions(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"conversation":{"id":"request-only-conversation"},"input":"hello"}`)
+	_, enrichedOpts := Enrich(
+		cliproxyexecutor.Request{Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+
+	if !bytes.Equal(enrichedOpts.OriginalRequest, payload) {
+		t.Fatalf("OriginalRequest = %q, want request payload %q", enrichedOpts.OriginalRequest, payload)
+	}
+	if len(enrichedOpts.OriginalRequest) > 0 && &enrichedOpts.OriginalRequest[0] == &payload[0] {
+		t.Fatal("OriginalRequest aliases Request.Payload instead of preserving a snapshot")
+	}
+	if got := DerivedID(enrichedOpts.Metadata); got != "" {
+		t.Fatalf("DerivedSessionID = %q, want explicit conversation to remain authoritative", got)
 	}
 }
 
