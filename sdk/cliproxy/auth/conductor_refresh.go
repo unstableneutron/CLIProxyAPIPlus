@@ -32,6 +32,7 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	minQuotaCooldownFloor     = 10 * time.Second
 	transientErrorCooldown    = time.Minute
 )
 
@@ -547,13 +548,29 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			current.Generation++
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
-			if unauthorized {
-				current.NextRefreshAfter = time.Time{}
+
+			hasValidAccessToken := current.HasValidAccessToken(now)
+			if !hasValidAccessToken {
 				current.Unavailable = true
 				current.Status = StatusError
-				current.StatusMessage = "unauthorized"
+				if unauthorized {
+					current.NextRefreshAfter = time.Time{}
+					current.StatusMessage = "unauthorized"
+				} else {
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					current.StatusMessage = "token expired"
+				}
 			} else {
-				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
+				nextRetry := now.Add(refreshFailureBackoff)
+				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
+					nextRetry = exp
+				}
+				current.NextRefreshAfter = nextRetry
+
+				if !current.Unavailable {
+					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+				}
 			}
 			m.auths[id] = current
 			shouldReschedule = true

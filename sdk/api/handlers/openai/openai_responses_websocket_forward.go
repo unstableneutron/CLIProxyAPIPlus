@@ -24,6 +24,7 @@ type responsesWebsocketForwardOptions struct {
 	toolCacheTurn             *responsesWebsocketToolCacheTurn
 	suppressError             func(*interfaces.ErrorMessage) bool
 	hideIncompleteStreamError bool
+	keepAliveInterval         *time.Duration
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -50,6 +51,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
+	}
+
+	var keepAliveTicker *time.Ticker
+	var keepAliveC <-chan time.Time
+	keepAliveInterval := time.Duration(0)
+	if h != nil {
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+	}
+	if opts.keepAliveInterval != nil {
+		keepAliveInterval = *opts.keepAliveInterval
+	}
+	if keepAliveInterval > 0 {
+		keepAliveTicker = time.NewTicker(keepAliveInterval)
+		defer keepAliveTicker.Stop()
+		keepAliveC = keepAliveTicker.C
 	}
 
 	for {
@@ -93,6 +109,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+		case <-keepAliveC:
+			if errPing := writer.writePing(); errPing != nil {
+				cancel(errPing)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errPing
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -133,6 +154,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			if !ok {
 				data = nil
 				continue
+			}
+			if keepAliveTicker != nil && keepAliveInterval > 0 {
+				keepAliveTicker.Reset(keepAliveInterval)
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
