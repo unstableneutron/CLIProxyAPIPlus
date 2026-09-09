@@ -11,6 +11,8 @@ Never call upstream sync complete from workflow status alone. Prove the immutabl
 
 Keep release maintenance separate from deployment. Unless deployment is explicitly in scope, do not deploy or runtime-smoke VN3; report `runtime_smoke=not_run` and `vn3_deployed=false`.
 
+Own the repair, not just the gate report. A failing check is evidence to investigate, not by itself a reason to hand the task back. Trace the failure to application behavior, merge composition, fixture assumptions, validation tooling, or infrastructure; fix the cause within the authorized scope and verify it. Reserve escalation for a concrete unresolved contract, unavailable authority, or an immutable-identity gate that cannot be satisfied. Report what was repaired and what action remains in plain language.
+
 ## Maintenance Flow
 
 ### 1. Snapshot and classify the target
@@ -35,10 +37,16 @@ Keep release maintenance separate from deployment. Unless deployment is explicit
   - Preserve explicit fork behavior on fork-owned paths.
   - Manually compose shared hotspots; never blanket `ours` or `theirs`.
 - Check `.github/upstream-sync-invariants.tsv`; conflict-free Git merges can still clobber owned behavior.
-- After shared-hotspot composition, run `check-symbol-survival <pre-sync-head>`. Restore missing fork-only symbols and `Test*` functions, or document genuine replacements in `.github/upstream-sync-dropped-symbols.tsv` in the same commit.
+- After shared-hotspot composition, run `check-symbol-survival <pre-sync-head>`. Classify fork-only declarations against the Original commit recorded at the immutable fork baseline, never against the incoming Original or candidate state. For a failure, compare the declaration and its body at the baseline, its recorded Original, and the incoming Original before concluding fork behavior was lost. Restore genuinely missing fork declarations/tests. Deliberate removals require fingerprint-bound approvals; protected approval manifests must land through the separate policy-change path before replanning, not inside a repair import.
 - Re-check provider fallback, auth and proxy selection, CommandCode, Responses WebSocket continuity, compaction, Gemini CLI, model catalog, aliases, release branding, and CGO or plugin settings when touched.
 
+For each failed test, identify the contract it exercises and choose an input where the competing behaviors differ. Preserve real fork behavior while integrating newer upstream behavior. In streaming tests, distinguish lifecycle-only bootstrap activity from semantic output that commits the attempt; retain assertions for cooldown, credential scope, original errors, and no replay after commitment. Check both sides of the boundary rather than weakening expectations. Trace typed errors through auth accounting as well as checking client-visible frames, and test aggregation together with terminal/incomplete status.
+
+Investigate the validator itself when evidence contradicts its ownership claim. Correct false positives at their source and add adversarial tests that still reject real losses; never keep dead symbols, rename weakened tests, insert candidate-controlled approvals, or override gate commands merely to obtain green output. If a tooling fix is necessary, prepare and verify it separately, obtain any missing publication authority, land it on `main`, then replan. Local validation with proposed tooling is useful evidence but is not acceptance by the published workflow.
+
 During repair iteration, rerun `replay-plan`, the failing gate, and focused tests for the changed surface. Do not rerun the full matrix after every edit. Once the repair is stable, run the canonical validator once. If final review causes another code change, rerun its focused checks and the canonical validator.
+
+When sources advance, stop mutation of the stale candidate. Preserve its diagnostic repair and evidence, then carry reviewed composition forward under a freshly fetched plan when authorized; never import an old SHA or reuse an old fingerprint. Finish independent root-cause work that remains in scope rather than discarding it because release identity changed.
 
 Return `needs-manual-action` as a successful, durable automation outcome when repository ownership and invariants cannot determine the intended behavior, the repair expands beyond the bounded overlay, required authority or secrets are missing, or the exact repair-import or integration gates cannot be proven. The run ledger, report artifact, candidate branch, and actionable PR must survive. Reserve a failed workflow conclusion for tooling, infrastructure, or state-recording failures that prevent a trustworthy outcome.
 

@@ -1663,13 +1663,16 @@ validate_dropped_symbol_approvals() {
 }
 
 default_symbol_survival_upstream_ref() {
+  local baseline_ref=$1
   local recorded
-  recorded=$(recorded_state_value ORIGINAL_COMMIT)
-  if [ -n "${recorded}" ]; then
-    printf '%s\n' "${recorded}"
-  else
-    printf 'refs/remotes/%s/main\n' "${ORIGINAL_REMOTE}"
-  fi
+  recorded=$(state_value_at_ref "${baseline_ref}" ORIGINAL_COMMIT)
+  [[ "${recorded}" =~ ^[0-9a-f]{40}$ ]] \
+    || die "baseline ${baseline_ref} lacks a valid recorded ORIGINAL_COMMIT"
+  git cat-file -e "${recorded}^{commit}" 2>/dev/null \
+    || die "baseline Original anchor is unavailable: ${recorded}"
+  git merge-base --is-ancestor "${recorded}" "${baseline_ref}" \
+    || die "baseline Original anchor is not an ancestor of ${baseline_ref}: ${recorded}"
+  printf '%s\n' "${recorded}"
 }
 
 cmd_check_symbol_survival() {
@@ -1678,8 +1681,31 @@ cmd_check_symbol_survival() {
   local baseline_ref=${1:-}
   local upstream_ref=${2:-}
   [ -n "${baseline_ref}" ] || die "check-symbol-survival requires baseline-ref"
-  if [ -z "${upstream_ref}" ]; then
-    upstream_ref=$(default_symbol_survival_upstream_ref)
+  git rev-parse --verify "${baseline_ref}^{commit}" >/dev/null 2>&1 \
+    || die "symbol-survival baseline is unavailable: ${baseline_ref}"
+  local recorded_upstream_ref
+  recorded_upstream_ref=$(state_value_at_ref "${baseline_ref}" ORIGINAL_COMMIT)
+  if [ -n "${recorded_upstream_ref}" ] && [[ ! "${recorded_upstream_ref}" =~ ^[0-9a-f]{40}$ ]]; then
+    die "baseline ${baseline_ref} records a malformed ORIGINAL_COMMIT"
+  fi
+  if [ -n "${upstream_ref}" ]; then
+    [[ "${upstream_ref}" =~ ^[0-9a-f]{40}$ ]] \
+      || die "explicit baseline Original anchor is malformed: ${upstream_ref}"
+    git cat-file -e "${upstream_ref}^{commit}" 2>/dev/null \
+      || die "explicit baseline Original anchor is unavailable: ${upstream_ref}"
+    git merge-base --is-ancestor "${upstream_ref}" "${baseline_ref}" \
+      || die "explicit baseline Original anchor is not an ancestor of ${baseline_ref}: ${upstream_ref}"
+    if [ -n "${recorded_upstream_ref}" ] && [ "${recorded_upstream_ref}" != "${upstream_ref}" ]; then
+      die "explicit baseline Original anchor disagrees with baseline metadata"
+    fi
+  else
+    upstream_ref=$(default_symbol_survival_upstream_ref "${baseline_ref}")
+  fi
+  if [ -n "${UPSTREAM_SYNC_PLANNED_ORIGINAL_COMMIT:-}" ]; then
+    git cat-file -e "${UPSTREAM_SYNC_PLANNED_ORIGINAL_COMMIT}^{commit}" 2>/dev/null \
+      || die "planned Original commit is unavailable: ${UPSTREAM_SYNC_PLANNED_ORIGINAL_COMMIT}"
+    git merge-base --is-ancestor "${upstream_ref}" "${UPSTREAM_SYNC_PLANNED_ORIGINAL_COMMIT}" \
+      || die "planned Original commit does not descend from baseline Original anchor"
   fi
 
   local root baseline_symbols upstream_symbols overlay_symbols current_symbols

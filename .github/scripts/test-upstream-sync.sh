@@ -1757,6 +1757,10 @@ test_replay_plan_reports_all_phase_conflicts_and_gates() {
   commit_file "${models}" models.json models-1 "models base"
 
   clone_for_fork "${plus}" "${fork}"
+  local baseline_original
+  baseline_original=$(run_git -C "${original}" rev-parse HEAD)
+  commit_file "${fork}" .ccs-fork-upstream.env \
+    "ORIGINAL_COMMIT=${baseline_original}" "record Original baseline"
   mkdir -p "${fork}/.github"
   printf '\n' > "${fork}/.github/upstream-sync-invariants.tsv"
   commit_file "${fork}" original-conflict.txt fork-original "fork original conflict"
@@ -1916,6 +1920,122 @@ test_check_symbol_survival_detects_deleted_overlay_symbols() {
   assert_not_contains "${out}" "dropped symbol approval targets a different plan"
 }
 
+test_check_symbol_survival_uses_immutable_baseline_original() {
+  local root=${TMPDIR:-/tmp}/upstream-sync-test-symbol-anchor-$$
+  rm -rf "${root}"
+  mkdir -p "${root}"
+
+  local original=${root}/original
+  local fork=${root}/fork
+  local out=${root}/symbols.out
+  new_repo "${original}"
+  commit_file "${original}" internal/runtime/executor/shared.go \
+    $'package executor\nfunc OldUpstreamOnly() {}' "original baseline"
+  commit_file "${original}" internal/runtime/executor/upstream_test.go \
+    $'package executor\nimport "testing"\nfunc TestOldUpstreamOnly(t *testing.T) {}' "original test"
+  local original_anchor
+  original_anchor=$(run_git -C "${original}" rev-parse HEAD)
+  clone_for_fork "${original}" "${fork}"
+  commit_file "${fork}" .ccs-fork-upstream.env \
+    "ORIGINAL_COMMIT=${original_anchor}" "record immutable Original baseline"
+  commit_file "${fork}" internal/runtime/executor/shared.go \
+    $'package executor\nfunc OldUpstreamOnly() {}\nfunc ForkOnly() {}' "add fork function"
+  commit_file "${fork}" internal/runtime/executor/shared_test.go \
+    $'package executor\nimport "testing"\nfunc TestForkOnly(t *testing.T) {}' "add fork test"
+  local baseline
+  baseline=$(run_git -C "${fork}" rev-parse HEAD)
+
+  # Removing an Original-only baseline declaration is allowed.
+  printf '%s\n' 'package executor' 'func ForkOnly() {}' > "${fork}/internal/runtime/executor/shared.go"
+  rm -f "${fork}/internal/runtime/executor/upstream_test.go"
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}") > "${out}" 2>&1
+  assert_contains "${out}" "[OK] symbol-survival gate passed."
+
+  # A moving target and dirty candidate state must not become the subtraction source.
+  commit_file "${original}" internal/runtime/executor/shared.go \
+    $'package executor\nfunc ForkOnly() {}\nfunc IncomingOnly() {}' "incoming Original reuses fork name"
+  local incoming
+  incoming=$(run_git -C "${original}" rev-parse HEAD)
+  run_git -C "${fork}" fetch -q origin "${incoming}"
+  printf '%s\n' 'package executor' 'func IncomingOnly() {}' > "${fork}/internal/runtime/executor/shared.go"
+  rm -f "${fork}/internal/runtime/executor/shared_test.go"
+  printf '%s\n' "ORIGINAL_COMMIT=${incoming}" > "${fork}/.ccs-fork-upstream.env"
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}") > "${out}" 2>&1
+  local exit_code=$?
+  set -e
+  [ "${exit_code}" -ne 0 ] || fail "incoming names masked deleted fork declarations"
+  assert_contains "${out}" "[FAIL] missing overlay symbol: internal/runtime/executor|func|ForkOnly"
+  assert_contains "${out}" "[FAIL] deleted fork test: internal/runtime/executor|func|TestForkOnly"
+
+  # Exercise the actual validator invocation: a new target must neither reject
+  # legitimate upstream removals nor hide a deleted fork-only test.
+  printf 'base_fork_commit=%s\noriginal_head=%s\nplan_fingerprint=%s\n' \
+    "${baseline}" "${incoming}" 2222222222222222222222222222222222222222 > "${root}/plan.out"
+  printf '%s\n' 'package executor' 'func ForkOnly() {}' > "${fork}/internal/runtime/executor/shared.go"
+  printf '%s\n' 'package executor' 'import "testing"' 'func TestForkOnly(t *testing.T) {}' > "${fork}/internal/runtime/executor/shared_test.go"
+  (cd "${fork}" && UPSTREAM_SYNC_INVARIANT_CMD=true "${VALIDATOR}" \
+    --mode quick --tooling never --plan "${root}/plan.out" --report-dir "${root}/valid") > "${out}" 2>&1
+  assert_contains "${root}/valid/validation.env" "SYMBOL_SURVIVAL_STATUS=passed"
+  rm -f "${fork}/internal/runtime/executor/shared_test.go"
+  if (cd "${fork}" && UPSTREAM_SYNC_INVARIANT_CMD=true "${VALIDATOR}" \
+    --mode quick --tooling never --plan "${root}/plan.out" --report-dir "${root}/invalid") > "${out}" 2>&1; then
+    fail "validator accepted a deleted fork test"
+  fi
+  assert_contains "${root}/invalid/symbol-survival.log" "deleted fork test: internal/runtime/executor|func|TestForkOnly"
+
+  # Explicit refs remain supported for state-less fixtures, but all anchors fail closed.
+  local stateless
+  stateless=$(run_git -C "${fork}" rev-parse "${original_anchor}")
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${stateless}" "${original_anchor}") > "${out}" 2>&1
+  assert_contains "${out}" "[OK] symbol-survival gate passed."
+
+  local disagreeing_anchor
+  disagreeing_anchor=$(run_git -C "${fork}" rev-parse "${baseline}~2")
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${baseline}" "${disagreeing_anchor}") > "${out}" 2>&1
+  exit_code=$?
+  set -e
+  [ "${exit_code}" -ne 0 ] || fail "disagreeing baseline Original anchor was accepted"
+  assert_contains "${out}" "explicit baseline Original anchor disagrees with baseline metadata"
+
+  commit_file "${fork}" .ccs-fork-upstream.env 'ORIGINAL_COMMIT=not-a-commit' "malformed baseline metadata"
+  local malformed_baseline
+  malformed_baseline=$(run_git -C "${fork}" rev-parse HEAD)
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${malformed_baseline}") > "${out}" 2>&1
+  exit_code=$?
+  set -e
+  [ "${exit_code}" -ne 0 ] || fail "malformed baseline Original anchor was accepted"
+  assert_contains "${out}" "records a malformed ORIGINAL_COMMIT"
+
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${original_anchor}") > "${out}" 2>&1
+  exit_code=$?
+  set -e
+  [ "${exit_code}" -ne 0 ] || fail "missing baseline Original anchor was accepted"
+  assert_contains "${out}" "lacks a valid recorded ORIGINAL_COMMIT"
+
+  set +e
+  (cd "${fork}" && "${HELPER}" check-symbol-survival "${original_anchor}" 1111111111111111111111111111111111111111) > "${out}" 2>&1
+  exit_code=$?
+  set -e
+  [ "${exit_code}" -ne 0 ] || fail "unavailable explicit Original anchor was accepted"
+  assert_contains "${out}" "explicit baseline Original anchor is unavailable"
+
+  commit_file "${fork}" .ccs-fork-upstream.env "ORIGINAL_COMMIT=${incoming}" "record nonancestor anchor"
+  if (cd "${fork}" && "${HELPER}" check-symbol-survival HEAD) > "${out}" 2>&1; then
+    fail "nonancestor recorded Original anchor was accepted"
+  fi
+  assert_contains "${out}" "baseline Original anchor is not an ancestor"
+  commit_file "${fork}" .ccs-fork-upstream.env \
+    ORIGINAL_COMMIT=1111111111111111111111111111111111111111 "record unavailable anchor"
+  if (cd "${fork}" && "${HELPER}" check-symbol-survival HEAD) > "${out}" 2>&1; then
+    fail "unavailable recorded Original anchor was accepted"
+  fi
+  assert_contains "${out}" "baseline Original anchor is unavailable"
+}
+
 main() {
   test_plan_emits_exact_snapshot_and_candidate_branch
   test_plan_sanitizes_plus_in_source_tag_identity
@@ -1960,6 +2080,7 @@ main() {
   test_original_merge_skips_identical_owned_path_touch
   test_check_invariants_detects_missing_pattern
   test_check_symbol_survival_detects_deleted_overlay_symbols
+  test_check_symbol_survival_uses_immutable_baseline_original
   test_plan_reports_target_drift_from_recorded_state
   test_replay_plan_reports_all_phase_conflicts_and_gates
   test_replay_plan_fails_when_gate_fails

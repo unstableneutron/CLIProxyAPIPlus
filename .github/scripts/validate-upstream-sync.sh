@@ -155,7 +155,7 @@ if [ "${MODE}" != tooling ]; then
     "${UPSTREAM_SYNC_INVARIANT_CMD:-\"${HELPER}\" check-invariants}" \
     INVARIANTS_STATUS
   run_gate symbol-survival \
-    "${UPSTREAM_SYNC_SYMBOL_CMD:-UPSTREAM_SYNC_PLAN_FINGERPRINT=\"${PLAN_FINGERPRINT}\" \"${HELPER}\" check-symbol-survival \"${BASE_FORK_COMMIT}\" \"${ORIGINAL_COMMIT}\"}" \
+    "${UPSTREAM_SYNC_SYMBOL_CMD:-UPSTREAM_SYNC_PLAN_FINGERPRINT=\"${PLAN_FINGERPRINT}\" UPSTREAM_SYNC_PLANNED_ORIGINAL_COMMIT=\"${ORIGINAL_COMMIT}\" \"${HELPER}\" check-symbol-survival \"${BASE_FORK_COMMIT}\"}" \
     SYMBOL_SURVIVAL_STATUS
 else
   skip_gate invariants INVARIANTS_STATUS
