@@ -356,6 +356,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionHeaders, body, nil)
 	selectionModel, errRoute := s.codexAlphaSearchSelectionModel(ctx, c, body, strings.TrimSpace(routing.Model))
 	if errRoute != nil {
 		log.WithError(errRoute).Warn("codex alpha search: model router returned an unsupported target")
@@ -482,10 +483,19 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
 		attemptCtx := ctx
+		if selection != nil && selection.CanonicalSessionID != "" {
+			meta := logging.GetClientRequestMetadata(attemptCtx)
+			meta.SessionID = selection.CanonicalSessionID
+			meta.ParentSessionID = selection.ParentSessionID
+			if meta.SessionID == meta.ParentSessionID {
+				meta.ParentSessionID = ""
+			}
+			attemptCtx = logging.WithClientRequestMetadata(attemptCtx, meta)
+		}
 		releaseAttempt := func() {}
 		if selection != nil {
 			var errBind error
-			attemptCtx, releaseAttempt, errBind = homeSelectionAttemptContext(ctx, selection)
+			attemptCtx, releaseAttempt, errBind = homeSelectionAttemptContext(attemptCtx, selection)
 			if errBind != nil {
 				selection.End("attempt_bind_failed")
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})

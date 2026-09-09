@@ -403,7 +403,7 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 		})
 	}
 	if len(levels) == 0 {
-		delete(entry, "supported_reasoning_levels")
+		entry["supported_reasoning_levels"] = levels
 		delete(entry, "default_reasoning_level")
 		return
 	}
@@ -439,7 +439,7 @@ func sanitizeCodexClientReasoningMetadata(entry map[string]any, clientVersion st
 	}
 
 	if len(levels) == 0 {
-		delete(entry, "supported_reasoning_levels")
+		entry["supported_reasoning_levels"] = levels
 		delete(entry, "default_reasoning_level")
 		return
 	}
