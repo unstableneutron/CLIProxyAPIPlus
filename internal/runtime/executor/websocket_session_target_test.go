@@ -236,12 +236,14 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 			var connections atomic.Int32
 			releaseSuccessfulConnection := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Number the request before Upgrade flushes the handshake. The client
+				// can otherwise open its retry before this handler resumes.
+				connection := connections.Add(1)
 				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
 				if errUpgrade != nil {
 					t.Errorf("upgrade websocket: %v", errUpgrade)
 					return
 				}
-				connection := connections.Add(1)
 				defer func() { _ = conn.Close() }()
 				if connection == 1 {
 					_, _, _ = conn.ReadMessage()
