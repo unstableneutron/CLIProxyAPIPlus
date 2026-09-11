@@ -1112,8 +1112,9 @@ func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T
 	if !strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("expected responses error chunk, got: %q", body)
 	}
-	if strings.Contains(body, `"error":{`) {
-		t.Fatalf("expected streaming error chunk (top-level type), got HTTP error body: %q", body)
+	payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(body), "event: error\ndata: "))
+	if !strings.Contains(body, "event: error\ndata: ") || gjson.Get(payload, "error.code").String() != "invalid_request" || gjson.Get(payload, "error.message").String() != "invalid request" {
+		t.Fatalf("expected Responses SSE error with preserved nested error, got: %q", body)
 	}
 }
 

@@ -147,12 +147,28 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 }
 
 func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
-	for _, transport := range []string{"sse", "websocket-error", "websocket-failed"} {
-		t.Run(transport, func(t *testing.T) {
+	for _, tc := range []struct {
+		transport string
+		committed bool
+	}{
+		{transport: "sse"},
+		{transport: "sse", committed: true},
+		{transport: "websocket-error"},
+		{transport: "websocket-error", committed: true},
+		{transport: "websocket-failed"},
+		{transport: "websocket-failed", committed: true},
+	} {
+		t.Run(fmt.Sprintf("%s/committed=%t", tc.transport, tc.committed), func(t *testing.T) {
+			transport, committed := tc.transport, tc.committed
 			const model, siblingModel = "gpt-5.3-codex-spark", "gpt-5.6-sol"
 			const created = `{"type":"response.created","response":{"id":"quota-test-response"}}`
+			const textDelta = `{"type":"response.output_text.delta","item_id":"message-1","output_index":0,"content_index":0,"delta":"partial answer"}`
 			const quota = `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
 			const completed = `{"type":"response.completed","response":{"id":"quota-test-success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`
+			events := []string{created}
+			if committed {
+				events = append(events, textDelta)
+			}
 			attempts := make(chan string, 8)
 			upgrader := websocket.Upgrader{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +203,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 							terminal = `{"type":"response.failed","response":{"error":` + quota + `}}`
 						}
 					}
-					for _, event := range []string{created, terminal} {
+					for _, event := range append(append([]string{}, events...), terminal) {
 						if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
 							t.Errorf("write websocket event: %v", errWrite)
 							return
@@ -199,7 +215,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 					terminal = `{"type":"error","status":429,"error":` + quota + `}`
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", created, terminal); errWrite != nil {
+				if _, errWrite := fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", strings.Join(events, "\n\ndata: "), terminal); errWrite != nil {
 					t.Errorf("write SSE: %v", errWrite)
 				}
 			}))
@@ -251,12 +267,21 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			}
 			before := time.Now()
 			payload, quotaErr := run(model)
-			if !strings.Contains(string(payload), "response.created") || quotaErr == nil {
+			if committed && (!strings.Contains(string(payload), "partial answer") || quotaErr == nil) {
 				t.Fatalf("expected payload then terminal quota error: payload=%s error=%v", payload, quotaErr)
 			}
+			if !committed && (quotaErr != nil || !strings.Contains(string(payload), "response.completed")) {
+				t.Fatalf("bootstrap-only rejection must fail over: payload=%s error=%v", payload, quotaErr)
+			}
 			var scoped interface{ IsCredentialScoped() bool }
-			if errors.As(quotaErr, &scoped) && scoped.IsCredentialScoped() {
+			if committed && (!errors.As(quotaErr, &scoped) || scoped.IsCredentialScoped()) {
 				t.Errorf("model-level cooling must NOT be credential scoped: %T %v", quotaErr, quotaErr)
+			}
+			if committed {
+				var retry interface{ RetryAfter() *time.Duration }
+				if !errors.As(quotaErr, &retry) || retry.RetryAfter() == nil || *retry.RetryAfter() != time.Hour || !strings.Contains(quotaErr.Error(), "usage_limit_reached") {
+					t.Errorf("committed quota failure must retain its cause and reset: %v", quotaErr)
+				}
 			}
 			high, _ := manager.GetByID(highID)
 			if high.Quota.Reason == "credential_quota" {
@@ -269,7 +294,11 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			if errSibling != nil || !strings.Contains(string(payload), "response.completed") {
 				t.Errorf("sibling model failed unexpectedly: payload=%s error=%v", payload, errSibling)
 			}
-			for _, want := range []string{"quota-high", "quota-high"} {
+			wantAttempts := []string{"quota-high", "quota-high"}
+			if !committed {
+				wantAttempts = []string{"quota-high", "quota-low", "quota-high"}
+			}
+			for _, want := range wantAttempts {
 				select {
 				case got := <-attempts:
 					if got != want {

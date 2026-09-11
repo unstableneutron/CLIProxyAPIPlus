@@ -805,3 +805,49 @@ func TestResponsesStreamErrorTextPreservesTokenCountersAndLargeInts(t *testing.T
 		t.Fatalf("token_limit should remain number 8192, got %v", parsed.Error["token_limit"])
 	}
 }
+
+func TestResponsesTerminalSequenceCombinesFrameCountAndUpstreamSequence(t *testing.T) {
+	for _, tc := range []struct {
+		name, sequence, errorSequence string
+		want                          int
+	}{
+		{name: "missing sequence uses frame count", want: 2},
+		{name: "sparse sequence uses last upstream value", sequence: `,"sequence_number":7`, want: 8},
+		{name: "explicit terminal sequence is preserved", sequence: `,"sequence_number":7`, errorSequence: `,"sequence_number":12`, want: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, inBand := range []bool{false, true} {
+				h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+				framer := &responsesSSEFramer{context: c}
+				framer.WriteChunk(recorder, []byte("data: {\"type\":\"response.created\"}\n\n"))
+				framer.WriteChunk(recorder, []byte(`data: {"type":"response.output_text.delta","delta":"partial"`+tc.sequence+"}\n\n"))
+				errText := `{"error":{"code":"cyber_policy","message":"blocked"}` + tc.errorSequence + `}`
+				if inBand {
+					framer.WriteChunk(recorder, []byte("event: error\ndata: "+errText+"\n\n"))
+				} else {
+					data := make(chan []byte)
+					close(data)
+					errs := make(chan *interfaces.ErrorMessage, 1)
+					errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(errText)}
+					close(errs)
+					h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
+				}
+				body := recorder.Body.String()
+				last := strings.LastIndex(body, "data: ")
+				if last < 0 {
+					t.Fatalf("missing terminal frame: %q", body)
+				}
+				var payload struct {
+					Type           string `json:"type"`
+					SequenceNumber int    `json:"sequence_number"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(body[last+len("data: "):])), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.Type != "error" || payload.SequenceNumber != tc.want {
+					t.Fatalf("inBand=%t terminal=%+v, want error sequence %d", inBand, payload, tc.want)
+				}
+			}
+		})
+	}
+}

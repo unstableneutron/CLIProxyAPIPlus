@@ -21,7 +21,7 @@ import (
 )
 
 const reproOAuthMessage = `token refresh failed with status 401: {"error":{"message":"Refresh credential has already been consumed; sign in again.","type":"invalid_request_error","code":"refresh_token_reused"}}`
-const reproCompletedResponse = `{"id":"resp-fixture","object":"response","status":"completed","output":[]}`
+const reproCompletedResponse = `{"id":"resp-fixture","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"healthy response"}]}]}`
 
 type reproOAuthExecutor struct{ calls atomic.Int32 }
 
