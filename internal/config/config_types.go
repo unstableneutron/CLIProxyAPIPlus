@@ -241,6 +241,9 @@ type CodexConfig struct {
 	OrphanDelegationCompatibility bool                  `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	TLSProfile                    CodexTLSProfileConfig `yaml:"tls-profile" json:"tls-profile"`
 	ContinueThinking              CodexContinueThinking `yaml:"continue-thinking" json:"continue-thinking"`
+	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
+	// rather than cooling down the entire credential across all sibling models.
+	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }

@@ -126,6 +126,7 @@ type Service struct {
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	kiroModelsCache              kiroModelsCache
+	antigravityProbeWg           sync.WaitGroup
 }
 
 // GetWatcher returns the active watcher for integrations that need to trigger

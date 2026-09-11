@@ -312,6 +312,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, errCtx
 		}
 		entry := logEntryWithRequestID(ctx)
+		payload := execOpts.OriginalRequest
+		if len(payload) == 0 {
+			payload = execReq.Payload
+		}
+		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		startStream := time.Now()
 		// Each provider stream gets its own child context so a rejected or
