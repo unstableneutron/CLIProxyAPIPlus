@@ -7,6 +7,36 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestNormalizeClaudeToolResultsTextOnly(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"user","content":[
+			{"type":"image","source":{"type":"url","url":"https://example.com/user.png"}},
+			{"type":"tool_result","tool_use_id":"first","is_error":true,"content":[{"type":"image","source":{"type":"base64","data":"AA=="}}]},
+			{"type":"tool_result","tool_use_id":"second","content":"already text"}
+		]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"third","content":[{"type":"text","text":"later"},{"type":"image","source":{"type":"url","url":"https://example.com/tool.png"}}]}]}
+	]}`)
+	before := string(input)
+	got := NormalizeClaudeToolResultsTextOnly(input)
+	for path, want := range map[string]string{
+		"messages.0.content.1.content": openAIToolResultImageOmittedText,
+		"messages.0.content.2.content": "already text",
+		"messages.1.content.0.content": "later\n\n" + openAIToolResultImageOmittedText,
+	} {
+		if content := gjson.GetBytes(got, path); content.Type != gjson.String || content.String() != want {
+			t.Fatalf("%s = %s, want string %q", path, content.Raw, want)
+		}
+	}
+	for _, path := range []string{"messages.0.content.0", "messages.0.content.1.tool_use_id", "messages.0.content.1.is_error"} {
+		if gjson.GetBytes(got, path).Raw != gjson.GetBytes(input, path).Raw {
+			t.Fatalf("unrelated content changed at %s", path)
+		}
+	}
+	if string(input) != before || string(NormalizeClaudeToolResultsTextOnly(got)) != string(got) {
+		t.Fatal("normalization mutated its input or was not idempotent")
+	}
+}
+
 func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 	input := []byte(`{"messages":[
         {"role":"assistant","content":[{"type":"text","text":"before"}]},

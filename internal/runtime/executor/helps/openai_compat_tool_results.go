@@ -52,6 +52,30 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	return out
 }
 
+// NormalizeClaudeToolResultsTextOnly filters tool results before translation can
+// relay their images into user messages. Ordinary user images remain untouched.
+func NormalizeClaudeToolResultsTextOnly(payload []byte) []byte {
+	out := payload
+	for messageIndex, message := range gjson.GetBytes(payload, "messages").Array() {
+		if message.Get("role").String() != "user" {
+			continue
+		}
+		for partIndex, part := range message.Get("content").Array() {
+			if part.Get("type").String() != "tool_result" {
+				continue
+			}
+			content := part.Get("content")
+			if content.Exists() && content.Type != gjson.String {
+				path := fmt.Sprintf("messages.%d.content.%d.content", messageIndex, partIndex)
+				if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(content)); errSet == nil {
+					out = updated
+				}
+			}
+		}
+	}
+	return out
+}
+
 func openAICompatibilityModelExcludesImages(models []config.OpenAICompatibilityModel, model string) (bool, bool) {
 	model = normalizeOpenAICompatibilityModelName(model)
 	if model == "" {

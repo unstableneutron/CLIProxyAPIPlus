@@ -19,12 +19,13 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 		name            string
 		stream          bool
 		inputModalities []string
-		wantString      bool
+		omitToolImages  bool
 	}{
-		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, wantString: true},
-		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, wantString: true},
-		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, wantString: false},
-		{name: "non-stream unspecified", stream: false, inputModalities: nil, wantString: false},
+		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, omitToolImages: true},
+		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, omitToolImages: true},
+		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, omitToolImages: false},
+		{name: "stream multimodal", stream: true, inputModalities: []string{"text", "image"}, omitToolImages: false},
+		{name: "non-stream unspecified", stream: false, inputModalities: nil, omitToolImages: false},
 	}
 
 	for _, tt := range tests {
@@ -61,12 +62,13 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 					"provider_key": "compat",
 				},
 			}
-			payload := []byte(`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"image inspected"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}]}`)
+			payload := []byte(`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"image inspected"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]},{"type":"image","source":{"type":"url","url":"https://example.com/user.png"}}]}]}`)
 			req := cliproxyexecutor.Request{Model: "mapped-model", Payload: payload}
 			opts := cliproxyexecutor.Options{
-				SourceFormat:   sdktranslator.FormatClaude,
-				ResponseFormat: sdktranslator.FormatOpenAI,
-				Stream:         tt.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				ResponseFormat:  sdktranslator.FormatOpenAI,
+				Stream:          tt.stream,
+				OriginalRequest: payload,
 			}
 
 			if tt.stream {
@@ -84,16 +86,37 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 			}
 
 			toolContent := gjson.GetBytes(gotBody, "messages.1.content")
-			if tt.wantString {
-				if toolContent.Type != gjson.String {
-					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
-				}
+			if toolContent.Type != gjson.String {
+				t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+			}
+			if tt.omitToolImages {
 				want := "image inspected\n\n[image omitted: unsupported by upstream]"
 				if toolContent.String() != want {
 					t.Fatalf("tool content = %q, want %q", toolContent.String(), want)
 				}
-			} else if !toolContent.IsArray() {
-				t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
+			} else if toolContent.String() != "image inspected" {
+				t.Fatalf("tool text = %q, want image inspected", toolContent.String())
+			}
+			var toolImages, userImages int
+			for _, message := range gjson.GetBytes(gotBody, "messages").Array() {
+				for _, part := range message.Get("content").Array() {
+					switch part.Get("image_url.url").String() {
+					case "data:image/png;base64,AA==":
+						toolImages++
+						if message.Get("role").String() != "user" {
+							t.Fatal("tool image was not relayed as user content")
+						}
+					case "https://example.com/user.png":
+						userImages++
+					}
+				}
+			}
+			wantToolImages := 1
+			if tt.omitToolImages {
+				wantToolImages = 0
+			}
+			if toolImages != wantToolImages || userImages != 1 {
+				t.Fatalf("images: tool=%d (want %d), user=%d (want 1); body=%s", toolImages, wantToolImages, userImages, gotBody)
 			}
 		})
 	}
