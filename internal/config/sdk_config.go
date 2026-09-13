@@ -9,6 +9,9 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// Qoder configures provider-wide Qoder request behavior.
+	Qoder QoderConfig `yaml:"qoder" json:"qoder"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:
@@ -74,6 +77,14 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// QoderConfig configures Qoder provider endpoints.
+type QoderConfig struct {
+	// VPCEndpoint selects a Qoder CN Enterprise VPC deployment. It accepts either
+	// an instance name or its base, gateway, or OpenAPI domain. Empty keeps the
+	// public global Qoder endpoints.
+	VPCEndpoint string `yaml:"vpc-endpoint,omitempty" json:"vpc-endpoint,omitempty"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.
