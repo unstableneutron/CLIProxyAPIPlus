@@ -87,6 +87,11 @@ const (
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
 
+	MethodQuotaIdentifier = "quota.identifier"
+	MethodQuotaDescribe   = "quota.describe"
+	MethodQuotaFetch      = "quota.fetch"
+	MethodQuotaReset      = "quota.reset"
+
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"
@@ -102,6 +107,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 )
 
 type Envelope struct {

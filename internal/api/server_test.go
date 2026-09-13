@@ -2248,7 +2248,7 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
 		{
 			ID:                  "gpt-5.5",
 			Object:              "model",
@@ -2273,6 +2273,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -2377,6 +2380,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
+		"gpt-image-2.5-flare":            false,
+		"gpt-image-2.5-sunburst":         false,
+		"gpt-image-2.5":                  false,
 		"grok-imagine-image":             false,
 		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,

@@ -96,6 +96,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostAuthSave != "host.auth.save" {
 		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
 	}
+	if MethodHostAffinityLookup != "host.affinity.lookup" {
+		t.Fatalf("MethodHostAffinityLookup = %q", MethodHostAffinityLookup)
+	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
 	}
@@ -107,5 +110,17 @@ func TestSchedulerPickMethodName(t *testing.T) {
 	}
 	if MethodModelRoute != "model.route" {
 		t.Fatalf("MethodModelRoute = %q", MethodModelRoute)
+	}
+	if MethodQuotaIdentifier != "quota.identifier" {
+		t.Fatalf("MethodQuotaIdentifier = %q", MethodQuotaIdentifier)
+	}
+	if MethodQuotaDescribe != "quota.describe" {
+		t.Fatalf("MethodQuotaDescribe = %q", MethodQuotaDescribe)
+	}
+	if MethodQuotaFetch != "quota.fetch" {
+		t.Fatalf("MethodQuotaFetch = %q", MethodQuotaFetch)
+	}
+	if MethodQuotaReset != "quota.reset" {
+		t.Fatalf("MethodQuotaReset = %q", MethodQuotaReset)
 	}
 }

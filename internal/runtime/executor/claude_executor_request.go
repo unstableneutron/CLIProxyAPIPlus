@@ -77,6 +77,43 @@ var claudeCodeTrailingBetas = []string{
 	claudeStructuredOutputsBeta,
 }
 
+// claudeManagedBetaSet holds every beta the proxy itself assembles or gates.
+// Caller betas outside this set are unknown to the pinned Claude Code profile —
+// newer client releases ship betas past it — and are forwarded verbatim so
+// their features keep working (#5738).
+var claudeManagedBetaSet = func() map[string]bool {
+	managed := []string{
+		claudeTokenCountingBeta,
+		claudeFastModeBeta,
+		claudeOAuthBeta,
+		claudeCodeBeta,
+		claudeContext1MBeta,
+		claudeMidConvSystemBeta,
+		claudeAdvisorToolBeta,
+		claudeAdvancedToolUseBeta,
+		claudeEffortBeta,
+		claudeServerSideFallbackBeta,
+		claudeFallbackCreditBeta,
+		claudeStructuredOutputsBeta,
+		claudeThinkingDisplayUpdatesBeta,
+		claudeExtendedCacheTTLBeta,
+		claudeCacheDiagnosisBeta,
+		claudeRedactThinkingBeta,
+		claudeAFKModeBeta,
+	}
+	managed = append(managed, claudeCodeCLIConstantBetas...)
+	managed = append(managed, claudeCodeTrailingBetas...)
+	set := make(map[string]bool, len(managed))
+	for _, beta := range managed {
+		set[beta] = true
+	}
+	return set
+}()
+
+func isManagedClaudeBeta(beta string) bool {
+	return claudeManagedBetaSet[strings.TrimSpace(beta)]
+}
+
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
 // 2.1.258 does: the list is per-request, not a fixed string. requested holds the
 // betas the caller asked for, which decide the capability flags below.
@@ -161,8 +198,13 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if requested[claudeAFKModeBeta] {
 		betas = append(betas, claudeAFKModeBeta)
 	}
-	if oauthToken && !helps.IsClaudeSubagentRequest(nil, body) && !isProbeOrHelper {
-		betas = append(betas, claudeExtendedCacheTTLBeta)
+	if !isProbeOrHelper {
+		includeExtended := (oauthToken && !helps.IsClaudeSubagentRequest(nil, body)) ||
+			requested[claudeExtendedCacheTTLBeta] ||
+			helps.ClaudePayloadHas1hTTL(body)
+		if includeExtended {
+			betas = append(betas, claudeExtendedCacheTTLBeta)
+		}
 	}
 	if diagnostics := gjson.GetBytes(body, "diagnostics"); diagnostics.IsObject() {
 		betas = append(betas, claudeCacheDiagnosisBeta)
@@ -359,6 +401,21 @@ func withoutClaudeBeta(betas, removeBeta string) string {
 		}
 	}
 	return strings.Join(res, ",")
+}
+
+func withClaudeExtendedCacheTTLBeta(betas string) string {
+	parts := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, beta := range strings.Split(betas, ",") {
+		if beta = strings.TrimSpace(beta); beta != "" && !seen[beta] {
+			parts = append(parts, beta)
+			seen[beta] = true
+		}
+	}
+	if !seen[claudeExtendedCacheTTLBeta] {
+		parts = append(parts, claudeExtendedCacheTTLBeta)
+	}
+	return strings.Join(parts, ",")
 }
 
 // withClaudeAdvisorToolBeta ensures advisor-tool-2026-03-01 is present when
@@ -902,7 +959,8 @@ func applyClaudeHeadersWithNativeProfile(
 			} else {
 				isSubagent := helps.IsClaudeSubagentRequest(incomingHeaders, body)
 				isProbe := helps.IsClaudeProbeOrHelperRequest(body)
-				includeExtendedCacheTTL := !isSubagent && !isProbe
+				subagent1h := isSubagent && helps.ClaudeSubagentRequests1h(incomingHeaders, body)
+				includeExtendedCacheTTL := (!isSubagent || subagent1h) && !isProbe
 				baseBetas = withClaudeOAuthCredentialBetas(baseBetas, includeExtendedCacheTTL)
 			}
 		}
@@ -941,11 +999,22 @@ func applyClaudeHeadersWithNativeProfile(
 			appendBeta(beta)
 		}
 	} else {
-		// On direct Anthropic an unconfirmed CLI-profile caller's own betas are
-		// dropped: appending them to the measured baseline produces a shape real
-		// Claude Code never sends. Custom gateways keep caller extensions.
-		if !confirmedClaudeCode && incomingBetas != "" && !isAnthropicBase {
+		// On direct Anthropic an unconfirmed CLI-profile caller's managed betas
+		// are dropped: appending them to the measured baseline produces a shape
+		// real Claude Code never sends. Caller betas the proxy does not manage
+		// are newer-client features the pinned profile predates; dropping them
+		// fails those requests outright (per-turn effort directives need
+		// per-turn-control-2026-07-01), so they are forwarded (#5738). Custom
+		// gateways keep all caller extensions.
+		if !confirmedClaudeCode && incomingBetas != "" {
 			for _, beta := range strings.Split(incomingBetas, ",") {
+				beta = strings.TrimSpace(beta)
+				if beta == "" {
+					continue
+				}
+				if isManagedClaudeBeta(beta) && isAnthropicBase {
+					continue
+				}
 				appendBeta(beta)
 			}
 		}
@@ -970,8 +1039,11 @@ func applyClaudeHeadersWithNativeProfile(
 		if reqThinkingType == "disabled" {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
 		}
-		if helps.IsClaudeSubagentRequest(nil, body) {
+		if helps.IsClaudeSubagentRequest(incomingHeaders, body) && !helps.ClaudeSubagentRequests1h(incomingHeaders, body) {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+		}
+		if !reqProbeOrHelper && !countTokens && helps.ClaudePayloadHas1hTTL(body) {
+			baseBetas = withClaudeExtendedCacheTTLBeta(baseBetas)
 		}
 		reqModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
 		if isClaudeHaikuModel(reqModel) && !gjson.GetBytes(body, "fallbacks").Exists() {

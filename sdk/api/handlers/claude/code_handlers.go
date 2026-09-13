@@ -171,7 +171,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
 	sortClaudeModelsByDisplayName(models)
 	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(models, disableCloaking))
+	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(models, disableCloaking))
 }
 
 // sortClaudeModelsByDisplayName sorts models by display_name ascending.
