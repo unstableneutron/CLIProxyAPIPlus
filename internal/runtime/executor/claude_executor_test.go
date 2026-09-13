@@ -8381,23 +8381,23 @@ func TestApplyClaudeHeaders_StreamTransportNegotiation(t *testing.T) {
 }
 
 func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
-	incoming := http.Header{"Anthropic-Beta": []string{"caller-only-beta"}}
+	incoming := http.Header{"Anthropic-Beta": []string{"caller-only-beta,effort-2025-11-24"}}
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":    "key-caller-betas",
 		"cloak_mode": "always",
 	}}
-	body := []byte(`{"model":"claude-opus-4-6"}`)
+	body := []byte(`{"model":"claude-haiku-4-5"}`)
 
-	// Direct Anthropic must not echo a beta real Claude Code never sends.
+	// Direct Anthropic forwards unknown betas but still gates managed betas.
 	directReq := newClaudeHeaderTestRequest(t, incoming)
 	if errApply := applyClaudeHeaders(directReq, auth, "key-caller-betas", false, nil, body, nil, incoming, false); errApply != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errApply)
 	}
-	if got := directReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "caller-only-beta") {
-		t.Fatalf("Anthropic-Beta = %q, want caller beta dropped on api.anthropic.com", got)
+	if got := directReq.Header.Get("Anthropic-Beta"); !strings.Contains(got, "caller-only-beta") {
+		t.Fatalf("Anthropic-Beta = %q, want unknown caller beta forwarded on api.anthropic.com", got)
 	}
-	if got, want := directReq.Header.Get("Anthropic-Beta"), claudeCodeCLIBetas(body, nil, false); got != want {
-		t.Fatalf("Anthropic-Beta = %q, want exactly the CLI baseline %q", got, want)
+	if got := directReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "effort-2025-11-24") {
+		t.Fatalf("Anthropic-Beta = %q, want managed effort beta excluded for Haiku", got)
 	}
 
 	// Other Anthropic-compatible upstreams keep caller betas functional.
@@ -8408,6 +8408,9 @@ func TestApplyClaudeHeaders_CallerBetasScopedByUpstream(t *testing.T) {
 	}
 	if got := gatewayReq.Header.Get("Anthropic-Beta"); !strings.Contains(got, "caller-only-beta") {
 		t.Fatalf("Anthropic-Beta = %q, want caller beta preserved on non-Anthropic upstream", got)
+	}
+	if got := gatewayReq.Header.Get("Anthropic-Beta"); strings.Contains(got, "effort-2025-11-24") {
+		t.Fatalf("Anthropic-Beta = %q, want Haiku effort exclusion preserved on non-Anthropic upstream", got)
 	}
 }
 

@@ -12,6 +12,9 @@ func TestMergeExistingAuthMetadataPreservesDisabledState(t *testing.T) {
 	if !target.Disabled {
 		t.Fatal("Disabled = false, want true")
 	}
+	if target.Status != StatusDisabled {
+		t.Fatalf("Status = %q, want disabled for inherited disabled metadata", target.Status)
+	}
 	if disabled, _ := target.Metadata["disabled"].(bool); !disabled {
 		t.Fatalf("metadata disabled = %v, want true", target.Metadata["disabled"])
 	}
@@ -21,11 +24,14 @@ func TestMergeExistingAuthMetadataPreservesDisabledState(t *testing.T) {
 }
 
 func TestMergeExistingAuthMetadataKeepsExplicitDisabledState(t *testing.T) {
-	target := &Auth{Metadata: map[string]any{"disabled": false}}
+	target := &Auth{Status: StatusActive, Metadata: map[string]any{"disabled": false}}
 	MergeExistingAuthMetadata(target, map[string]any{"disabled": true})
 
 	if target.Disabled {
 		t.Fatal("Disabled = true, want explicit false state")
+	}
+	if target.Status != StatusActive {
+		t.Fatalf("Status = %q, want active for explicitly enabled record", target.Status)
 	}
 	if disabled, _ := target.Metadata["disabled"].(bool); disabled {
 		t.Fatalf("metadata disabled = %v, want false", target.Metadata["disabled"])

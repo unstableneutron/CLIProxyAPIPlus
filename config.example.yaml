@@ -611,9 +611,9 @@ nonstream-keepalive-interval: 0
 # is added only for models that accept a role=system turn, advanced-tool-use only when
 # the request uses tool search (deferred tools) or another advanced tool-use feature,
 # afk-mode sits between fast-mode and extended-cache-ttl, and server-side-fallback / fallback-credit /
-# structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
-# betas real Claude Code also sends, and they are placed at their observed positions;
-# anything else is dropped so the outgoing set stays one a real client could produce.
+# structured-outputs trail effort. On direct api.anthropic.com managed betas remain
+# gated by the assembled CLI baseline and use their observed positions. Unknown caller
+# betas are forwarded so newer client features remain available to unconfirmed clients.
 # Other Anthropic-compatible upstreams still forward caller betas verbatim.
 #
 # Default headers for Claude API requests. Update only after measuring a new Claude Code release.
