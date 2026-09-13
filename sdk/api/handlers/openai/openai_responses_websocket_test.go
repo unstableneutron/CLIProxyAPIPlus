@@ -3401,6 +3401,7 @@ func TestResponsesWebsocketExposesTerminalOAuthError(t *testing.T) {
 	executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
+	modelName := registerWebsocketUpstreamDisconnectFixture(t, manager, executor)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 
@@ -3416,12 +3417,8 @@ func TestResponsesWebsocketExposesTerminalOAuthError(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	var sessionID string
-	select {
-	case sessionID = <-executor.subscribed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for upstream disconnect subscription")
-	}
+	sessionID := establishWebsocketUpstreamDisconnectFixture(t, conn, executor, modelName)
+	resultCh := armWebsocketReadAfterServerReady(t, conn)
 
 	terminalErr := coreauth.NewTerminalAuthError(&coreauth.Error{
 		Code:       "auth_unavailable",
@@ -3431,11 +3428,11 @@ func TestResponsesWebsocketExposesTerminalOAuthError(t *testing.T) {
 
 	executor.TriggerDisconnect(sessionID, terminalErr)
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, payload, errRead := conn.ReadMessage()
-	if errRead != nil {
-		t.Fatalf("terminal OAuth rejection was hidden: %v", errRead)
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("terminal OAuth rejection was hidden: %v", result.err)
 	}
+	payload := result.payload
 	if got := gjson.GetBytes(payload, "type").String(); got != "error" {
 		t.Fatalf("type = %q, want error: %s", got, payload)
 	}

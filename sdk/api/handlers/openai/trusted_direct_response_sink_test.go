@@ -294,18 +294,27 @@ func (e *untrustedTerminationStreamExecutor) body() []byte {
 func TestSanitizedStreamErrorUnwrapReturnsNil(t *testing.T) {
 	rawSecret := "raw-secret-key-12345"
 	rawErr := errors.New("internal upstream error with api_key=" + rawSecret)
-	errMsg := &interfaces.ErrorMessage{
-		StatusCode: http.StatusBadGateway,
-		Error:      rawErr,
-	}
-	sanitized := sanitizeOpenAIErrorMessage(errMsg)
-	if sanitized == nil || sanitized.Error == nil {
-		t.Fatal("expected sanitized error, got nil")
-	}
-	if errors.Unwrap(sanitized.Error) != nil {
-		t.Fatalf("errors.Unwrap(sanitized.Error) = %v, want nil to prevent raw cause leakage", errors.Unwrap(sanitized.Error))
-	}
-	if strings.Contains(sanitized.Error.Error(), rawSecret) {
-		t.Fatalf("sanitized error leaked secret %q: %q", rawSecret, sanitized.Error.Error())
+	for _, terminal := range []bool{false, true} {
+		var cause error = rawErr
+		if terminal {
+			cause = coreauth.NewTerminalAuthError(&coreauth.Error{Code: "auth_unavailable", HTTPStatus: http.StatusServiceUnavailable}, rawErr)
+		}
+		errMsg := &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      cause,
+		}
+		sanitized := sanitizeOpenAIErrorMessage(errMsg)
+		if sanitized == nil || sanitized.Error == nil {
+			t.Fatal("expected sanitized error, got nil")
+		}
+		if errors.Unwrap(sanitized.Error) != nil {
+			t.Fatalf("errors.Unwrap(sanitized.Error) = %v, want nil to prevent raw cause leakage", errors.Unwrap(sanitized.Error))
+		}
+		if strings.Contains(sanitized.Error.Error(), rawSecret) {
+			t.Fatalf("sanitized error leaked secret %q: %q", rawSecret, sanitized.Error.Error())
+		}
+		if got := coreauth.IsTerminalAuthError(sanitized.Error); got != terminal {
+			t.Fatalf("terminal auth classification = %t, want %t", got, terminal)
+		}
 	}
 }

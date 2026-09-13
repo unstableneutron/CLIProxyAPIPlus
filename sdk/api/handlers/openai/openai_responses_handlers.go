@@ -1759,6 +1759,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		if framer.terminalEvent != "" {
 			return
 		}
+		if framer.dataFrames > nextResponsesSequence(c) {
+			c.Set(responsesLastSequenceKey, int64(framer.dataFrames-1))
+		}
 		writeResponsesTerminalError(c, errMsg)
 	}
 

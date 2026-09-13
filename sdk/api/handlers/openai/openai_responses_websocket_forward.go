@@ -642,6 +642,10 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 				errObj, _ = sjson.SetBytes(errObj, field, v.Value())
 				copied = true
 			}
+			if retryable := errorNode.Get("retryable"); retryable.Type == gjson.True || retryable.Type == gjson.False {
+				errObj, _ = sjson.SetBytes(errObj, "retryable", retryable.Bool())
+				copied = true
+			}
 			if copied {
 				payload, errSet = sjson.SetRawBytes(payload, "error", errObj)
 			} else {

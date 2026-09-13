@@ -958,19 +958,25 @@ func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfac
 	safe.Body = nil
 	if errMsg.Error != nil {
 		safe.Error = &openAIStreamSanitizedError{
-			message:     openAIStreamErrorText(errMsg.Error.Error(), status),
-			safeHeaders: coreauth.SafeResponseHeaders(errMsg.Error),
+			message:      openAIStreamErrorText(errMsg.Error.Error(), status),
+			safeHeaders:  coreauth.SafeResponseHeaders(errMsg.Error),
+			terminalAuth: coreauth.IsTerminalAuthError(errMsg.Error),
 		}
 	}
 	return &safe
 }
 
 type openAIStreamSanitizedError struct {
-	message     string
-	safeHeaders http.Header
+	message      string
+	safeHeaders  http.Header
+	terminalAuth bool
 }
 
 func (e *openAIStreamSanitizedError) Error() string { return e.message }
+
+func (e *openAIStreamSanitizedError) IsTerminalAuth() bool {
+	return e != nil && e.terminalAuth
+}
 
 func (e *openAIStreamSanitizedError) SafeResponseHeaders() http.Header {
 	if e == nil || e.safeHeaders == nil {
