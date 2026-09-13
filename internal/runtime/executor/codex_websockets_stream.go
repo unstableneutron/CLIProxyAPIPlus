@@ -274,7 +274,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
-	if streamResult, handled := e.executeCodexContinueFoldWebsocketStream(ctx, auth, req, opts, responseFormat, to, clientBody, clientBody, upstreamBody, identityState, reporter, executionSessionID, sess, readCh, conn, wsReqBody, wsURL, wsHeaders, upstreamHeaders, authID, baseURL, baseModel); handled {
+	releaseStreamSession := func(reason string) {
+		sess.clearActive(conn, readCh)
+		unlockStreamSession()
+		if isEphemeralSession {
+			closeCodexWebsocketSession(sess, reason)
+		}
+	}
+	if streamResult, handled := e.executeCodexContinueFoldWebsocketStream(ctx, auth, req, opts, responseFormat, to, clientBody, clientBody, upstreamBody, identityState, reporter, executionSessionID, sess, readCh, conn, wsReqBody, wsURL, wsHeaders, upstreamHeaders, authID, baseURL, baseModel, releaseStreamSession); handled {
 		return streamResult, nil
 	}
 
@@ -512,11 +519,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	if immediateTerminal {
 		if sess != nil {
-			sess.clearActive(conn, readCh)
-			unlockStreamSession()
-			if isEphemeralSession {
-				closeCodexWebsocketSession(sess, "completed")
-			}
+			releaseStreamSession("completed")
 		} else {
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "completed", nil)
 			if errClose := closer.Close(); errClose != nil {
@@ -534,11 +537,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		defer close(out)
 		defer func() {
 			if sess != nil {
-				sess.clearActive(conn, readCh)
-				unlockStreamSession()
-				if isEphemeralSession {
-					closeCodexWebsocketSession(sess, terminateReason)
-				}
+				releaseStreamSession(terminateReason)
 				return
 			}
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, terminateReason, terminateErr)

@@ -2596,6 +2596,85 @@ func TestCodexWebsocketsExecuteStreamContinueFoldObservesNormalizedResponse(t *t
 	}
 }
 
+func TestCodexWebsocketsContinueFoldSessionOwnership(t *testing.T) {
+	for _, sessionID := range []string{"", "fold-owned-session"} {
+		name := "ephemeral"
+		if sessionID != "" {
+			name = "persistent"
+		}
+		t.Run(name, func(t *testing.T) {
+			closed := make(chan struct{}, 2)
+			upgrader := websocket.Upgrader{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+				if errUpgrade != nil {
+					t.Errorf("upgrade: %v", errUpgrade)
+					return
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+				defer func() {
+					_ = conn.Close()
+					closed <- struct{}{}
+				}()
+				for {
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						return
+					}
+					completed := []byte(`{"type":"response.completed","response":{"id":"fold-done","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fold ownership checked"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+					if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+						return
+					}
+				}
+			}))
+			defer server.Close()
+			exec := NewCodexWebsocketsExecutor(&config.Config{
+				Codex: config.CodexConfig{ContinueThinking: config.CodexContinueThinking{Enabled: true}},
+			})
+			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+			t.Cleanup(func() { exec.CloseExecutionSession(sessionID) })
+			auth := &cliproxyauth.Auth{ID: "fold-ownership", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"hello"}]}`)}
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("codex"),
+				Metadata:     map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID},
+			}
+			for range 2 {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				result, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					cancel()
+					t.Fatalf("ExecuteStream: %v", errStream)
+				}
+				var payload []byte
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						cancel()
+						t.Fatalf("stream error: %v", chunk.Err)
+					}
+					payload = append(payload, chunk.Payload...)
+				}
+				cancel()
+				if !bytes.Contains(payload, []byte("fold ownership checked")) || !bytes.Contains(payload, []byte("response.completed")) {
+					t.Fatalf("missing folded completion: %s", payload)
+				}
+				if sessionID != "" {
+					sess := exec.getOrCreateSession(sessionID)
+					if !sess.reqMu.TryLock() {
+						t.Fatal("continue-fold leaked the persistent request lock")
+					}
+					sess.reqMu.Unlock()
+				} else {
+					select {
+					case <-closed:
+					case <-time.After(time.Second):
+						t.Fatal("continue-fold leaked its ephemeral connection")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCodexWebsocketsExecuteHandshakeUsageLimitReachedSetsRetryAfter(t *testing.T) {
 	body := []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":120}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
